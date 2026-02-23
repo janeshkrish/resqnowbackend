@@ -1,0 +1,197 @@
+import express from "express";
+import { OAuth2Client } from "google-auth-library";
+import jwt from "jsonwebtoken";
+import * as db from "../db.js";
+import { verifyUser } from "../middleware/auth.js";
+import { getBackendPublicUrl, getFrontendUrl } from "../config/network.js"; // Ensure these exist or use env
+
+const router = express.Router();
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+
+if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    console.error("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variables.");
+}
+
+/**
+ * Helper to get the correct callback URL dynamically.
+ * This solves the "Redirect URI mismatch" when using Ngrok/Tunnels.
+ */
+const getRedirectUri = (req) => {
+    // If explicitly set in env (Production)
+    if (process.env.GOOGLE_CALLBACK_URL) return process.env.GOOGLE_CALLBACK_URL;
+
+    // Trust Proxy headers for Mobile/Dev access
+    const proto = req.get("x-forwarded-proto") || req.protocol;
+    const host = req.get("x-forwarded-host") || req.get("host"); // e.g. "192.168.x.x:8080"
+
+    // If running via Vite proxy, the host might be localhost:3001, but we want the frontend host
+    // Actually, Google needs the BACKEND callback URL registered in console.
+    // If the user access via https://192.168.x.x:8080, Vite proxies /api/... to localhost:3001.
+    // The browser sees https://192.168.x.x:8080/api/auth/google/callback.
+    // So we need to construct THAT url.
+
+    return `${proto}://${host}/api/auth/google/callback`;
+};
+
+/**
+ * GET /api/auth/google/url
+ * Returns the Google Auth URL for the frontend to redirect to.
+ */
+router.get("/google/url", (req, res) => {
+    const redirectUri = getRedirectUri(req);
+    console.log("[Auth] Generating Google Auth URL with redirect:", redirectUri);
+
+    const oAuth2Client = new OAuth2Client(
+        GOOGLE_CLIENT_ID,
+        GOOGLE_CLIENT_SECRET,
+        redirectUri
+    );
+
+    const authorizeUrl = oAuth2Client.generateAuthUrl({
+        access_type: "offline",
+        scope: [
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/userinfo.email",
+        ],
+        prompt: "consent",
+    });
+
+    res.json({ url: authorizeUrl });
+});
+
+/**
+ * GET /api/auth/google/callback
+ * Handle the code returned from Google.
+ */
+router.get("/google/callback", async (req, res) => {
+    const { code } = req.query;
+    if (!code) return res.status(400).send("No code provided");
+
+    try {
+        const redirectUri = getRedirectUri(req);
+        console.log("[Auth] Verifying code with redirect:", redirectUri);
+
+        const oAuth2Client = new OAuth2Client(
+            GOOGLE_CLIENT_ID,
+            GOOGLE_CLIENT_SECRET,
+            redirectUri
+        );
+
+        const { tokens } = await oAuth2Client.getToken(code);
+        oAuth2Client.setCredentials(tokens);
+
+        // Get User Info
+        const url = "https://www.googleapis.com/oauth2/v2/userinfo";
+        const response = await oAuth2Client.request({ url });
+        const data = response.data;
+
+        const { id: googleId, email, name, picture } = data;
+
+        if (!email) return res.status(400).send("Google account has no email.");
+
+        const pool = await db.getPool();
+
+        // Check if user exists
+        const [rows] = await pool.query("SELECT * FROM users WHERE email = ?", [email]);
+
+        let userId;
+        let userRow;
+
+        if (rows.length > 0) {
+            userRow = rows[0];
+            userId = userRow.id;
+            // Update info if needed
+            await pool.query("UPDATE users SET google_id = ?, full_name = ? WHERE id = ?", [googleId, name, userId]);
+        } else {
+            // Create new user
+            const [result] = await pool.execute(
+                "INSERT INTO users (full_name, email, google_id, is_verified, status) VALUES (?, ?, ?, TRUE, 'approved')",
+                [name, email, googleId]
+            );
+            userId = result.insertId;
+            userRow = { id: userId, full_name: name, email, role: "user" };
+        }
+
+        // Generate JWT
+        const token = jwt.sign(
+            { userId, email, role: "user" },
+            process.env.JWT_SECRET || "default_secret",
+            { expiresIn: "30d" } // Session-like
+        );
+
+        // Redirect to Frontend with Token
+        // We need to know where the frontend is.
+        // Use referrer or env var.
+        const frontendUrl = process.env.FRONTEND_URL || "http://localhost:8080";
+        // Append token as query param
+        const target = `${frontendUrl}/auth/success?token=${token}`;
+
+        res.redirect(target);
+
+    } catch (err) {
+        console.error("[Auth] Google Callback Error:", err);
+        res.redirect(`${process.env.FRONTEND_URL || "http://localhost:8080"}/auth/failed?error=google_auth_failed`);
+    }
+});
+
+/**
+ * POST /api/auth/verify
+ * Check if token is valid (for frontend guard).
+ */
+router.get("/verify", async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: "No token" });
+
+    const token = authHeader.split(" ")[1];
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || "default_secret");
+
+        const pool = await db.getPool();
+        const [rows] = await pool.query("SELECT id, full_name, email, phone FROM users WHERE id = ?", [decoded.userId]);
+
+        if (rows.length === 0) return res.status(401).json({ error: "User not found" });
+
+        res.json({ user: rows[0], valid: true });
+    } catch (err) {
+        res.status(401).json({ error: "Invalid token" });
+    }
+});
+
+router.get("/me", verifyUser, async (req, res) => {
+    try {
+        const userId = req.user.userId || req.user.id;
+        const pool = await db.getPool();
+        const [rows] = await pool.query(
+            "SELECT id, full_name, email, phone, birthday, gender, is_verified, subscription, google_id FROM users WHERE id = ? LIMIT 1",
+            [userId]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const user = rows[0];
+        return res.json({
+            id: user.id,
+            name: user.full_name,
+            email: user.email,
+            phone: user.phone || "",
+            birthday: user.birthday || null,
+            gender: user.gender || "",
+            isVerified: !!user.is_verified,
+            subscription: user.subscription || "free",
+            googleId: user.google_id || null
+        });
+    } catch (err) {
+        console.error("[Auth] me endpoint error:", err);
+        return res.status(500).json({ error: "Failed to fetch current user." });
+    }
+});
+
+router.post("/logout", (_req, res) => {
+    return res.json({ success: true });
+});
+
+export default router;
