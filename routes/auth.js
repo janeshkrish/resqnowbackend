@@ -3,43 +3,40 @@ import { OAuth2Client } from "google-auth-library";
 import jwt from "jsonwebtoken";
 import * as db from "../db.js";
 import { verifyUser } from "../middleware/auth.js";
+import { getFrontendUrl, getGoogleCallbackUrl } from "../config/network.js";
 
 const router = express.Router();
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const JWT_SECRET = String(process.env.JWT_SECRET || "").trim();
 
 if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
     console.error("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variables.");
 }
 
-/**
- * Helper to get the correct callback URL dynamically.
- * This solves the "Redirect URI mismatch" when using Ngrok/Tunnels.
- */
-const getRedirectUri = (req) => {
-    // If explicitly set in env (Production)
-    if (process.env.GOOGLE_CALLBACK_URL) return process.env.GOOGLE_CALLBACK_URL;
+const getRedirectUri = () => getGoogleCallbackUrl();
 
-    // Trust Proxy headers for Mobile/Dev access
-    const proto = req.get("x-forwarded-proto") || req.protocol;
-    const host = req.get("x-forwarded-host") || req.get("host"); // e.g. "192.168.x.x:8080"
-
-    // If running via Vite proxy, the host might be localhost:3001, but we want the frontend host
-    // Actually, Google needs the BACKEND callback URL registered in console.
-    // If the user access via https://192.168.x.x:8080, Vite proxies /api/... to localhost:3001.
-    // The browser sees https://192.168.x.x:8080/api/auth/google/callback.
-    // So we need to construct THAT url.
-
-    return `${proto}://${host}/api/auth/google/callback`;
-};
+function ensureGoogleAuthConfigured(res) {
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+        res.status(503).json({ error: "Google OAuth is not configured." });
+        return false;
+    }
+    if (!JWT_SECRET) {
+        res.status(503).json({ error: "JWT is not configured." });
+        return false;
+    }
+    return true;
+}
 
 /**
  * GET /api/auth/google/url
  * Returns the Google Auth URL for the frontend to redirect to.
  */
 router.get("/google/url", (req, res) => {
-    const redirectUri = getRedirectUri(req);
+    if (!ensureGoogleAuthConfigured(res)) return;
+
+    const redirectUri = getRedirectUri();
     console.log("[Auth] Generating Google Auth URL with redirect:", redirectUri);
 
     const oAuth2Client = new OAuth2Client(
@@ -65,11 +62,13 @@ router.get("/google/url", (req, res) => {
  * Handle the code returned from Google.
  */
 router.get("/google/callback", async (req, res) => {
+    if (!ensureGoogleAuthConfigured(res)) return;
+
     const { code } = req.query;
     if (!code) return res.status(400).send("No code provided");
 
     try {
-        const redirectUri = getRedirectUri(req);
+        const redirectUri = getRedirectUri();
         console.log("[Auth] Verifying code with redirect:", redirectUri);
 
         const oAuth2Client = new OAuth2Client(
@@ -116,14 +115,14 @@ router.get("/google/callback", async (req, res) => {
         // Generate JWT
         const token = jwt.sign(
             { userId, email, role: "user" },
-            process.env.JWT_SECRET || "default_secret",
+            JWT_SECRET,
             { expiresIn: "30d" } // Session-like
         );
 
         // Redirect to Frontend with Token
         // We need to know where the frontend is.
         // Use referrer or env var.
-        const frontendUrl = process.env.FRONTEND_URL || "http://localhost:8080";
+        const frontendUrl = getFrontendUrl();
         // Append token as query param
         const target = `${frontendUrl}/auth/success?token=${token}`;
 
@@ -131,7 +130,7 @@ router.get("/google/callback", async (req, res) => {
 
     } catch (err) {
         console.error("[Auth] Google Callback Error:", err);
-        res.redirect(`${process.env.FRONTEND_URL || "http://localhost:8080"}/auth/failed?error=google_auth_failed`);
+        res.redirect(`${getFrontendUrl()}/auth/failed?error=google_auth_failed`);
     }
 });
 
@@ -145,7 +144,10 @@ router.get("/verify", async (req, res) => {
 
     const token = authHeader.split(" ")[1];
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || "default_secret");
+        if (!JWT_SECRET) {
+            return res.status(503).json({ error: "JWT is not configured." });
+        }
+        const decoded = jwt.verify(token, JWT_SECRET);
 
         const pool = await db.getPool();
         const [rows] = await pool.query("SELECT id, full_name, email, phone FROM users WHERE id = ?", [decoded.userId]);

@@ -23,12 +23,12 @@ const hasRazorpayConfig = Boolean(
     !RAZORPAY_KEY_SECRET.includes("placeholder")
 );
 
-// Initialize Razorpay
-// Note: These should be in your .env file
-const razorpay = new Razorpay({
-    key_id: RAZORPAY_KEY_ID || 'rzp_test_placeholder',
-    key_secret: RAZORPAY_KEY_SECRET || 'secret_placeholder',
-});
+const razorpay = hasRazorpayConfig
+    ? new Razorpay({
+        key_id: RAZORPAY_KEY_ID,
+        key_secret: RAZORPAY_KEY_SECRET,
+    })
+    : null;
 
 const ensureRazorpayConfigured = (res) => {
     if (hasRazorpayConfig) return true;
@@ -101,6 +101,7 @@ async function resolveRequestBaseAmount(requestRow, pricingConfig) {
  */
 router.post("/create-registration-order", verifyTechnician, async (req, res) => {
     try {
+        if (!ensureRazorpayConfigured(res)) return;
         const technicianId = req.technicianId;
 
         // Registration fee (e.g., ₹500)
@@ -127,7 +128,7 @@ router.post("/create-registration-order", verifyTechnician, async (req, res) => 
             order_id: order.id,
             amount: order.amount,
             currency: order.currency,
-            key_id: process.env.RAZORPAY_KEY_ID
+            key_id: RAZORPAY_KEY_ID
         });
     } catch (err) {
         console.error("[Payments] Create order error:", err);
@@ -141,6 +142,7 @@ router.post("/create-registration-order", verifyTechnician, async (req, res) => 
  */
 router.post("/verify-registration-payment", verifyTechnician, async (req, res) => {
     try {
+        if (!ensureRazorpayConfigured(res)) return;
         const technicianId = req.technicianId;
         const {
             razorpay_order_id,
@@ -148,9 +150,8 @@ router.post("/verify-registration-payment", verifyTechnician, async (req, res) =
             razorpay_signature
         } = req.body;
 
-        const secret = process.env.RAZORPAY_KEY_SECRET || 'secret_placeholder';
         const generated_signature = crypto
-            .createHmac("sha256", secret)
+            .createHmac("sha256", RAZORPAY_KEY_SECRET)
             .update(razorpay_order_id + "|" + razorpay_payment_id)
             .digest("hex");
 
@@ -178,6 +179,7 @@ router.post("/verify-registration-payment", verifyTechnician, async (req, res) =
  */
 router.post("/create-service-order", verifyUser, async (req, res) => {
     try {
+        if (!ensureRazorpayConfigured(res)) return;
         const userId = req.user.userId;
         const { serviceType, vehicleType } = req.body;
 
@@ -214,7 +216,7 @@ router.post("/create-service-order", verifyUser, async (req, res) => {
             order_id: order.id,
             amount: order.amount,
             currency: order.currency,
-            key_id: process.env.RAZORPAY_KEY_ID
+            key_id: RAZORPAY_KEY_ID
         });
     } catch (err) {
         console.error("[Payments] Create service order error:", err);
@@ -228,15 +230,15 @@ router.post("/create-service-order", verifyUser, async (req, res) => {
  */
 router.post("/verify-service-payment", verifyUser, async (req, res) => {
     try {
+        if (!ensureRazorpayConfigured(res)) return;
         const {
             razorpay_order_id,
             razorpay_payment_id,
             razorpay_signature
         } = req.body;
 
-        const secret = process.env.RAZORPAY_KEY_SECRET || 'secret_placeholder';
         const generated_signature = crypto
-            .createHmac("sha256", secret)
+            .createHmac("sha256", RAZORPAY_KEY_SECRET)
             .update(razorpay_order_id + "|" + razorpay_payment_id)
             .digest("hex");
 
@@ -758,6 +760,7 @@ router.get('/diagnostics/request/:requestId', verifyAdmin, async (req, res) => {
  */
 router.post("/create-subscription-order", verifyUser, async (req, res) => {
     try {
+        if (!ensureRazorpayConfigured(res)) return;
         const userId = req.user.userId;
         const { planId } = req.body;
         if (!planId) {
@@ -794,7 +797,7 @@ router.post("/create-subscription-order", verifyUser, async (req, res) => {
             order_id: order.id,
             amount: order.amount,
             currency: order.currency,
-            key_id: process.env.RAZORPAY_KEY_ID
+            key_id: RAZORPAY_KEY_ID
         });
     } catch (err) {
         console.error("[Payments] Create subscription order error:", err);
@@ -807,6 +810,7 @@ router.post("/create-subscription-order", verifyUser, async (req, res) => {
  */
 router.post("/verify-subscription-payment", verifyUser, async (req, res) => {
     try {
+        if (!ensureRazorpayConfigured(res)) return;
         const userId = req.user.userId;
         const {
             razorpay_order_id,
@@ -824,15 +828,14 @@ router.post("/verify-subscription-payment", verifyUser, async (req, res) => {
             return res.status(400).json({ error: "Invalid or inactive planId" });
         }
 
-        const secret = process.env.RAZORPAY_KEY_SECRET || 'secret_placeholder';
         const generated_signature = crypto
-            .createHmac("sha256", secret)
+            .createHmac("sha256", RAZORPAY_KEY_SECRET)
             .update(razorpay_order_id + "|" + razorpay_payment_id)
             .digest("hex");
 
         console.log("[Debug] Subscription Verification:", {
-            secret_exists: !!secret,
-            secret_len: secret ? secret.length : 0,
+            secret_exists: true,
+            secret_len: RAZORPAY_KEY_SECRET.length,
             generated: generated_signature,
             received: razorpay_signature,
             input: razorpay_order_id + "|" + razorpay_payment_id

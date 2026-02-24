@@ -9,9 +9,12 @@ import { verifyUser } from "../middleware/auth.js";
 const router = Router();
 
 
-const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-key";
+const JWT_SECRET = String(process.env.JWT_SECRET || "").trim();
 
 function signUserToken(userId, email) {
+  if (!JWT_SECRET) {
+    throw new Error("JWT is not configured.");
+  }
   return jwt.sign({ userId, email, type: "user" }, JWT_SECRET, { expiresIn: "7d" });
 }
 

@@ -5,11 +5,12 @@ import * as db from "../db.js";
 import * as mail from "../services/mailer.js";
 import { addClient } from "../sse.js";
 import { getAdminCredentials, signAdminToken, verifyAdmin } from "../middleware/auth.js";
+import { getFrontendUrl } from "../config/network.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../services/serviceNormalization.js";
 import { runDispatchMatrixAudit } from "../services/dispatchMatrixAudit.js";
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-key";
+const JWT_SECRET = String(process.env.JWT_SECRET || "").trim();
 
 router.post("/login", (req, res) => {
   const { email, password } = req.body;
@@ -503,8 +504,11 @@ router.post("/users", verifyAdmin, async (req, res) => {
     );
     const insertId = insertResult.insertId;
     if (insertId != null) {
+      if (!JWT_SECRET) {
+        return res.status(503).json({ error: "JWT is not configured." });
+      }
       const confirmationToken = jwt.sign({ userId: insertId, email: normalizedEmail }, JWT_SECRET, { expiresIn: "1d" });
-      const confirmationUrl = `${process.env.FRONTEND_URL || "http://172.20.10.3:8080"}/confirm-email?token=${encodeURIComponent(confirmationToken)}`;
+      const confirmationUrl = `${getFrontendUrl()}/confirm-email?token=${encodeURIComponent(confirmationToken)}`;
       try {
         await mail.sendMail({
           to: normalizedEmail,

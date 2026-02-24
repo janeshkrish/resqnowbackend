@@ -55,10 +55,14 @@ router.post("/contact", async (req, res) => {
                 pass: process.env.EMAIL_PASS
             }
         });
+        const contactReceiver = String(process.env.CONTACT_RECEIVER_EMAIL || process.env.EMAIL_USER || "").trim();
+        if (!contactReceiver) {
+            return res.status(503).json({ error: "Contact email receiver is not configured." });
+        }
 
         const mailOptions = {
             from: `"${name}" <${email}>`, // sender address
-            to: "resqnow01@gmail.com", // list of receivers
+            to: contactReceiver, // list of receivers
             subject: `ResQNow Contact: ${subject}`, // Subject line
             text: `Name: ${name}\nEmail: ${email}\n\nMessage:\n${message}`, // plain text body
             html: `

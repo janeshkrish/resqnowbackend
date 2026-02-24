@@ -18,6 +18,28 @@ import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/p
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
 
 const router = Router();
+const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
+const RAZORPAY_KEY_SECRET = String(process.env.RAZORPAY_KEY_SECRET || "");
+const hasRazorpayConfig = Boolean(
+  RAZORPAY_KEY_ID &&
+  RAZORPAY_KEY_SECRET &&
+  !RAZORPAY_KEY_ID.includes("placeholder") &&
+  !RAZORPAY_KEY_SECRET.includes("placeholder")
+);
+const razorpay = hasRazorpayConfig
+  ? new Razorpay({
+    key_id: RAZORPAY_KEY_ID,
+    key_secret: RAZORPAY_KEY_SECRET,
+  })
+  : null;
+
+const ensureRazorpayConfigured = (res) => {
+  if (hasRazorpayConfig) return true;
+  res.status(503).json({
+    error: "Payment gateway is not configured. Please contact support."
+  });
+  return false;
+};
 
 const DEFAULT_TECHNICIAN_SETTINGS = Object.freeze({
   appearance: {
@@ -713,6 +735,7 @@ router.get('/me/dues', verifyTechnician, async (req, res) => {
  */
 router.post('/me/pay-dues/order', verifyTechnician, async (req, res) => {
   try {
+    if (!ensureRazorpayConfigured(res)) return;
     const technicianId = req.technicianId;
     const pool = await db.getPool();
     const pricingConfig = await getPlatformPricingConfig();
@@ -724,24 +747,10 @@ router.post('/me/pay-dues/order', verifyTechnician, async (req, res) => {
     const options = {
       amount: Math.round(total * 100),
       currency: pricingConfig.currency || "INR",
-      receipt: `dues_${technicianId}_${Date.now()} `
+      receipt: `dues_${technicianId}_${Date.now()}`
     };
-
-    try {
-      const order = await new Razorpay({
-        key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_placeholder',
-        key_secret: process.env.RAZORPAY_KEY_SECRET || 'secret_placeholder'
-      }).orders.create(options);
-      res.json(order);
-    } catch (rzpErr) {
-      console.error("Razorpay order error:", rzpErr);
-      // Return fallback for tests if credentials invalid
-      res.json({
-        id: `order_test_${Date.now()} `,
-        amount: options.amount,
-        currency: options.currency
-      });
-    }
+    const order = await razorpay.orders.create(options);
+    res.json(order);
   } catch (err) {
     console.error("Pay dues order error:", err);
     res.status(500).json({ error: "Failed to create order" });
@@ -754,21 +763,18 @@ router.post('/me/pay-dues/order', verifyTechnician, async (req, res) => {
  */
 router.post('/me/pay-dues/verify', verifyTechnician, async (req, res) => {
   try {
+    if (!ensureRazorpayConfigured(res)) return;
     const technicianId = req.technicianId;
     const { razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body;
-    // Verify signature... (skipping strict check for speed/test environment usually, but prompt demands strict)
-    // strict check:
+
     const body = razorpay_order_id + "|" + razorpay_payment_id;
     const expectedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET || 'secret_placeholder')
+      .createHmac("sha256", RAZORPAY_KEY_SECRET)
       .update(body.toString())
       .digest("hex");
 
-    // Allow bypass if test mode or placeholder
-    if (process.env.RAZORPAY_KEY_SECRET && process.env.RAZORPAY_KEY_SECRET !== 'secret_placeholder') {
-      if (expectedSignature !== razorpay_signature) {
-        return res.status(400).json({ error: "Invalid payment signature" });
-      }
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ error: "Invalid payment signature" });
     }
 
     const pool = await db.getPool();
@@ -1298,8 +1304,10 @@ router.post("/create", verifyAdmin, async (req, res) => {
       return res.status(400).json({ error: "Name and email are required." });
     }
 
-    const tempPassword = password && String(password).length >= 8 ? password : null;
-    const password_hash = tempPassword ? await bcrypt.hash(tempPassword, 10) : await bcrypt.hash("ChangeMe123!", 10);
+    if (!password || String(password).length < 8) {
+      return res.status(400).json({ error: "Password is required and must be at least 8 characters." });
+    }
+    const password_hash = await bcrypt.hash(String(password), 10);
     const normalizedSpecialties = normalizeSpecialties(specialties);
     const normalizedVehicleTypes = normalizeVehicleTypes(vehicle_types);
     const normalizedServiceCosts = normalizeServiceCosts(service_costs);
@@ -1406,13 +1414,6 @@ router.get("/me/notifications", verifyTechnician, async (req, res) => {
   }
 });
 
-
-// Initialize Razorpay
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_placeholder',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || 'secret_placeholder',
-});
-
 /**
  * GET /api/technicians/me/financials
  * Get earnings and pending dues
@@ -1435,6 +1436,7 @@ router.get("/me/financials", verifyTechnician, async (req, res) => {
  */
 router.post("/me/pay-dues", verifyTechnician, async (req, res) => {
   try {
+    if (!ensureRazorpayConfigured(res)) return;
     const technicianId = req.technicianId;
     const pool = await db.getPool();
     const pricingConfig = await getPlatformPricingConfig();
@@ -1445,7 +1447,7 @@ router.post("/me/pay-dues", verifyTechnician, async (req, res) => {
     const options = {
       amount: Math.round(amount * 100),
       currency: pricingConfig.currency || "INR",
-      receipt: `tech_dues_${technicianId}_${Date.now()} `,
+      receipt: `tech_dues_${technicianId}_${Date.now()}`,
       payment_capture: 1
     };
 
@@ -1463,12 +1465,13 @@ router.post("/me/pay-dues", verifyTechnician, async (req, res) => {
  */
 router.post("/me/verify-dues", verifyTechnician, async (req, res) => {
   try {
+    if (!ensureRazorpayConfigured(res)) return;
     const technicianId = req.technicianId;
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
 
     const body = razorpay_order_id + "|" + razorpay_payment_id;
     const expectedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET || 'secret_placeholder')
+      .createHmac("sha256", RAZORPAY_KEY_SECRET)
       .update(body.toString())
       .digest("hex");
 

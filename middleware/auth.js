@@ -1,7 +1,11 @@
 import jwt from "jsonwebtoken";
 
 function getJwtSecret() {
-  return process.env.JWT_SECRET || "resqnow-jwt-secret-change-in-production";
+  const secret = String(process.env.JWT_SECRET || "").trim();
+  if (!secret) {
+    throw new Error("JWT_SECRET is not configured.");
+  }
+  return secret;
 }
 
 export function verifyTechnician(req, res, next) {
@@ -22,6 +26,9 @@ export function verifyTechnician(req, res, next) {
     next();
   } catch (err) {
     console.log("[Auth] Token verification failed:", err.message);
+    if (err.message === "JWT_SECRET is not configured.") {
+      return res.status(500).json({ error: "Server auth is not configured." });
+    }
     return res.status(401).json({ error: "Unauthorized" });
   }
 }
@@ -39,7 +46,10 @@ export function verifyUser(req, res, next) {
     }
     req.user = payload;
     next();
-  } catch {
+  } catch (err) {
+    if (err.message === "JWT_SECRET is not configured.") {
+      return res.status(500).json({ error: "Server auth is not configured." });
+    }
     return res.status(401).json({ error: "Unauthorized" });
   }
 }
@@ -56,7 +66,10 @@ export function verifyAdmin(req, res, next) {
     }
     req.adminEmail = payload.email;
     next();
-  } catch {
+  } catch (err) {
+    if (err.message === "JWT_SECRET is not configured.") {
+      return res.status(500).json({ error: "Server auth is not configured." });
+    }
     return res.status(401).json({ error: "Unauthorized" });
   }
 }

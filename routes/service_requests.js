@@ -16,6 +16,15 @@ import {
 import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/pricingEstimator.js";
 import { computePaymentAmounts, getPlatformPricingConfig } from "../services/platformPricing.js";
 
+const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
+const RAZORPAY_KEY_SECRET = String(process.env.RAZORPAY_KEY_SECRET || "");
+const hasRazorpayConfig = Boolean(
+    RAZORPAY_KEY_ID &&
+    RAZORPAY_KEY_SECRET &&
+    !RAZORPAY_KEY_ID.includes("placeholder") &&
+    !RAZORPAY_KEY_SECRET.includes("placeholder")
+);
+
 const safeParse = (value) => {
     try { return typeof value === "string" ? JSON.parse(value) : value; } catch { return []; }
 };
@@ -81,12 +90,22 @@ function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
     return R * c;
 }
 
-const razorpay = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_placeholder',
-    key_secret: process.env.RAZORPAY_KEY_SECRET || 'secret_placeholder',
-});
+const razorpay = hasRazorpayConfig
+    ? new Razorpay({
+        key_id: RAZORPAY_KEY_ID,
+        key_secret: RAZORPAY_KEY_SECRET,
+    })
+    : null;
 
 const router = express.Router();
+
+const ensureRazorpayConfigured = (res) => {
+    if (hasRazorpayConfig) return true;
+    res.status(503).json({
+        error: "Payment gateway is not configured. Please contact support."
+    });
+    return false;
+};
 
 // Allowed statuses and a small normalization helper to accept variants used in the UI
 const VALID_STATUSES = new Set([
@@ -774,6 +793,7 @@ router.get("/:id", verifyUser, async (req, res) => {
  */
 router.post("/:id/payment-order", verifyUser, async (req, res) => {
     try {
+        if (!ensureRazorpayConfigured(res)) return;
         const requestId = req.params.id;
         const pool = await getPool();
         const pricingConfig = await getPlatformPricingConfig();
@@ -816,6 +836,7 @@ router.post("/:id/payment-order", verifyUser, async (req, res) => {
  */
 router.post("/:id/verify-payment", verifyUser, async (req, res) => {
     try {
+        if (!ensureRazorpayConfigured(res)) return;
         console.log('--------------------------------------------------');
         console.log('[VERIFY PAYMENT] Hit /verify-payment endpoint');
         console.log('[VERIFY PAYMENT] Params:', req.params);
@@ -828,7 +849,7 @@ router.post("/:id/verify-payment", verifyUser, async (req, res) => {
 
         const body = razorpay_order_id + "|" + razorpay_payment_id;
         const expectedSignature = crypto
-            .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET || 'secret_placeholder')
+            .createHmac("sha256", RAZORPAY_KEY_SECRET)
             .update(body.toString())
             .digest("hex");
 
