@@ -1,8 +1,8 @@
 import { Router } from "express";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import * as db from "../db.js";
-import * as mail from "../mail.js";
+import * as mail from "../services/mailer.js";
 import { addClient } from "../sse.js";
 import { getAdminCredentials, signAdminToken, verifyAdmin } from "../middleware/auth.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../services/serviceNormalization.js";

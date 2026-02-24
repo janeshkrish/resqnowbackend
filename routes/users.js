@@ -2,7 +2,7 @@ import { Router } from "express";
 import * as db from "../db.js";
 import * as mail from "../services/mailer.js";
 import { socketService } from "../services/socket.js";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { verifyUser } from "../middleware/auth.js";
 

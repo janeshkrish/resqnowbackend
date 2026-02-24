@@ -7,7 +7,7 @@ import {
   serviceDomainsFromCosts,
 } from "./serviceNormalization.js";
 
-export const DEFAULT_AUDIT_SERVICE_DOMAINS = [
+const DEFAULT_AUDIT_SERVICE_DOMAINS = [
   "towing",
   "flat-tire",
   "battery",
@@ -18,7 +18,7 @@ export const DEFAULT_AUDIT_SERVICE_DOMAINS = [
   "ev-charging",
 ];
 
-export const DEFAULT_AUDIT_VEHICLE_TYPES = ["bike", "car", "commercial", "ev"];
+const DEFAULT_AUDIT_VEHICLE_TYPES = ["bike", "car", "commercial", "ev"];
 
 const FALLBACK_AUDIT_LOCATION = { lat: 11.0168, lng: 76.9558 }; // Coimbatore
 

@@ -208,7 +208,7 @@ export const jobDispatchService = {
                             tech.etaText = `${Math.ceil(route.duration / 60)} mins`;
                             tech.distanceText = `${(route.distance / 1000).toFixed(1)} km`;
                         } else throw new Error("No route found");
-                    } catch (e) { }
+                    } catch { }
                 }));
 
             } catch (err) {

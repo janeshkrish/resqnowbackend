@@ -2,7 +2,31 @@ import mysql from "mysql2/promise";
 
 let pool = null;
 
+function isProductionLike() {
+  return (
+    String(process.env.NODE_ENV || "").toLowerCase() === "production" ||
+    String(process.env.RENDER || "").toLowerCase() === "true" ||
+    Boolean(process.env.RENDER_EXTERNAL_URL)
+  );
+}
+
+function assertDatabaseConfig() {
+  if (!isProductionLike()) return;
+
+  const requiredKeys = ["DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"];
+  const missing = requiredKeys.filter((key) => !String(process.env[key] || "").trim());
+  if (missing.length > 0) {
+    throw new Error(`[DB CONFIG] Missing required environment variables: ${missing.join(", ")}`);
+  }
+
+  const host = String(process.env.DB_HOST || "").trim().toLowerCase();
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+    throw new Error("[DB CONFIG] DB_HOST cannot point to localhost in production/Render.");
+  }
+}
+
 export async function getPool() {
+  assertDatabaseConfig();
   if (pool) return pool;
   const port = process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 4000;
   const useSsl = process.env.DB_SSL === "true" || process.env.DB_SSL === "1";
@@ -32,6 +56,17 @@ export async function getPool() {
   }
 
   return pool;
+}
+
+export async function closePool() {
+  if (!pool) return;
+  const current = pool;
+  pool = null;
+  try {
+    await current.end();
+  } catch (err) {
+    console.error("Error while closing DB pool:", err?.message || err);
+  }
 }
 
 export async function query(sql, params = []) {

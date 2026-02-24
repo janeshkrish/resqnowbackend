@@ -45,7 +45,7 @@ const toStringList = (value, fallback = []) => {
   return items.length ? items : fallback;
 };
 
-export const DEFAULT_SERVICE_BASE_PRICES = Object.freeze({
+const DEFAULT_SERVICE_BASE_PRICES = Object.freeze({
   towing: { car: 599, bike: 399, commercial: 2499, ev: 699 },
   "flat-tire": { car: 349, bike: 99, commercial: 999, ev: 299 },
   battery: { car: 399, bike: 199, commercial: 899, ev: 499 },
@@ -57,7 +57,7 @@ export const DEFAULT_SERVICE_BASE_PRICES = Object.freeze({
   other: { car: 500, bike: 500, commercial: 500, ev: 500 },
 });
 
-export const DEFAULT_SUBSCRIPTION_PLANS = Object.freeze([
+const DEFAULT_SUBSCRIPTION_PLANS = Object.freeze([
   {
     id: "free",
     name: "PAY-AS-YOU-GO",
@@ -262,11 +262,6 @@ async function fetchConfigFromDb() {
   }
 
   return normalizeConfigRow(rows?.[0] || null);
-}
-
-export function invalidatePlatformPricingCache() {
-  cachedConfig = null;
-  cacheTimestamp = 0;
 }
 
 export async function getPlatformPricingConfig({ forceRefresh = false } = {}) {

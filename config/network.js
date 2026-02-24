@@ -3,6 +3,8 @@ const LOCAL_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:8080",
   "http://127.0.0.1:5173",
+  "https://reqnow.org",
+  "https://www.reqnow.org",
 ];
 
 const TUNNEL_ORIGIN_PATTERNS = [
@@ -10,6 +12,8 @@ const TUNNEL_ORIGIN_PATTERNS = [
   /^https:\/\/[a-z0-9-]+\.ngrok\.io$/i,
   /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i,
 ];
+
+const VERCEL_ORIGIN_PATTERN = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i;
 
 const LAN_ORIGIN_PATTERN =
   /^https?:\/\/(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(?::\d{1,5})?$/i;
@@ -28,12 +32,14 @@ function parseEnvOrigins(raw) {
 }
 
 function defaultFrontendUrl() {
-  return normalizeUrl(process.env.FRONTEND_URL) || "http://localhost:8080";
+  return normalizeUrl(process.env.FRONTEND_URL) || "https://reqnow.org";
 }
 
 function defaultBackendUrl() {
   const configured = normalizeUrl(process.env.BACKEND_URL);
   if (configured) return configured;
+  const renderPublicUrl = normalizeUrl(process.env.RENDER_EXTERNAL_URL);
+  if (renderPublicUrl) return renderPublicUrl;
   const port = process.env.PORT || "3001";
   return `http://localhost:${port}`;
 }
@@ -46,13 +52,7 @@ export function getBackendPublicUrl() {
   return normalizeUrl(process.env.BACKEND_PUBLIC_URL) || defaultBackendUrl();
 }
 
-export function getGoogleRedirectUri() {
-  const fromEnv = normalizeUrl(process.env.GOOGLE_OAUTH_REDIRECT_URI);
-  if (fromEnv) return fromEnv;
-  return `${getBackendPublicUrl()}/api/auth/google/callback`;
-}
-
-export function getCorsAllowedOrigins() {
+function getCorsAllowedOrigins() {
   const explicit = parseEnvOrigins(process.env.CORS_ALLOWED_ORIGINS);
   const dynamic = [
     normalizeUrl(process.env.FRONTEND_URL),
@@ -78,6 +78,10 @@ export function isOriginAllowed(origin) {
     if (TUNNEL_ORIGIN_PATTERNS.some((pattern) => pattern.test(normalizedOrigin))) return true;
   }
 
+  if (String(process.env.CORS_ALLOW_VERCEL_ORIGINS || "true").toLowerCase() === "true") {
+    if (VERCEL_ORIGIN_PATTERN.test(normalizedOrigin)) return true;
+  }
+
   return false;
 }
 
@@ -96,18 +100,4 @@ export function buildCorsOptions() {
 
 export function getAllowedOriginsForLogs() {
   return Array.from(getCorsAllowedOrigins());
-}
-
-export function isSecureUrl(url) {
-  if (!url) return false;
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === "https:") return true;
-    if (parsed.protocol === "http:" && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")) {
-      return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
 }

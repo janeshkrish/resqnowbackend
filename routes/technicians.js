@@ -1,12 +1,12 @@
 
 import { Router } from "express";
 import { socketService } from "../services/socket.js";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 import * as db from "../db.js";
 import * as mail from "../services/mailer.js";
 import Razorpay from "razorpay";
 import crypto from "crypto";
-import { verifyTechnician, verifyAdmin, signTechnicianToken, verifyUser } from "../middleware/auth.js";
+import { verifyTechnician, verifyAdmin, signTechnicianToken } from "../middleware/auth.js";
 import {
   canonicalizeServiceDomain,
   canonicalizeVehicleFamily,
@@ -348,7 +348,7 @@ router.post("/register", async (req, res) => {
 
       // Use SocketService to broadcast to admins (if they are listening on a channel)
       socketService.broadcast("admin:notification", { title, message, created_at: new Date() });
-    } catch (ignore) { }
+    } catch { }
 
     // Send Confirmation Email
     try {
@@ -513,8 +513,6 @@ router.patch("/me/status", verifyTechnician, async (req, res) => {
     const pool = await db.getPool();
     await pool.execute("UPDATE technicians SET is_active = ?, is_available = ? WHERE id = ?", [active, active, req.technicianId]);
 
-    // Broadcast status change
-    const statusEvent = active ? "technician:online" : "technician:offline";
     // We could use socketService to handle this event if we were receiving it from client socket,
     // but here we are doing it via REST, so we can emit it to the system.
     // However, clients (technician UI) might emit 'technician:online' directly to socket too.
@@ -600,7 +598,7 @@ router.get("/me/active-job", verifyTechnician, async (req, res) => {
       distance: 0,
       amount: resolvedAmount
     });
-  } catch (err) {
+  } catch {
     return res.status(500).json({ error: "Failed to fetch active job." });
   }
 });
@@ -1393,7 +1391,6 @@ router.get("/me/reviews", verifyTechnician, async (req, res) => {
 
 router.get("/me/notifications", verifyTechnician, async (req, res) => {
   try {
-    const technicianId = req.technicianId;
     const pool = await db.getPool();
     // In a real app, notifications might be filtered by receiver_id, 
     // but the current schema suggests a global notifications table or we need to add receiver_id.

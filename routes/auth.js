@@ -3,7 +3,6 @@ import { OAuth2Client } from "google-auth-library";
 import jwt from "jsonwebtoken";
 import * as db from "../db.js";
 import { verifyUser } from "../middleware/auth.js";
-import { getBackendPublicUrl, getFrontendUrl } from "../config/network.js"; // Ensure these exist or use env
 
 const router = express.Router();
 
@@ -87,7 +86,7 @@ router.get("/google/callback", async (req, res) => {
         const response = await oAuth2Client.request({ url });
         const data = response.data;
 
-        const { id: googleId, email, name, picture } = data;
+        const { id: googleId, email, name } = data;
 
         if (!email) return res.status(400).send("Google account has no email.");
 
@@ -154,7 +153,7 @@ router.get("/verify", async (req, res) => {
         if (rows.length === 0) return res.status(401).json({ error: "User not found" });
 
         res.json({ user: rows[0], valid: true });
-    } catch (err) {
+    } catch {
         res.status(401).json({ error: "Invalid token" });
     }
 });

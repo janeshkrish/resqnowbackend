@@ -16,10 +16,3 @@ export function addClient(res) {
         console.log(`[SSE] Client disconnected. Total: ${clients.length}`);
     });
 }
-
-export function broadcast(data) {
-    console.log(`[SSE] Broadcasting to ${clients.length} clients`, data);
-    clients.forEach(client => {
-        client.write(`data: ${JSON.stringify(data)}\n\n`);
-    });
-}

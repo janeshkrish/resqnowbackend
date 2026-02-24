@@ -74,15 +74,6 @@ export const normalizeText = (value) =>
 const toTokenSet = (value) => new Set(normalizeText(value).split(" ").filter(Boolean));
 const tokenCount = (value) => normalizeText(value).split(" ").filter(Boolean).length;
 
-export const hasTokenOverlap = (a, b) => {
-  const sa = toTokenSet(a);
-  const sb = toTokenSet(b);
-  for (const token of sa) {
-    if (sb.has(token)) return true;
-  }
-  return false;
-};
-
 const tokenOverlapCount = (a, b) => {
   const sa = toTokenSet(a);
   const sb = toTokenSet(b);

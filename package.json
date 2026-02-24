@@ -3,11 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "node scripts/build-check.mjs",
     "start": "node index.js",
     "dev": "node --watch index.js"
   },
   "dependencies": {
-    "@googlemaps/google-maps-services-js": "^3.4.2",
     "axios": "^1.13.4",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
