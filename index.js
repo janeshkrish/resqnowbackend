@@ -18,6 +18,8 @@ import chatbotRouter from "./routes/chatbot.js";
 import {
   getApiBaseUrl,
   getBackendPublicUrl,
+  getAllowedOriginsForLogs,
+  buildCorsOptions,
   getFrontendUrl,
   getGoogleCallbackUrl,
 } from "./config/network.js";
@@ -84,10 +86,9 @@ function createApp() {
   const app = express();
   app.set("trust proxy", true);
 
-  app.use(cors({
-    origin: String(process.env.FRONTEND_URL || getFrontendUrl() || "").trim(),
-    credentials: true,
-  }));
+  const corsOptions = buildCorsOptions();
+  app.use(cors(corsOptions));
+  app.options("*", cors(corsOptions));
 
   // Razorpay webhook must receive the untouched raw body for signature verification.
   app.post("/api/payments/razorpay/webhook", express.raw({ type: "application/json" }), razorpayWebhookHandler);
@@ -235,7 +236,7 @@ async function startServer() {
   console.log(`Frontend URL: ${getFrontendUrl()}`);
   console.log(`Backend Public URL: ${getBackendPublicUrl()}`);
   console.log(`Google Callback URL: ${getGoogleCallbackUrl()}`);
-  console.log(`Allowed Origin: ${String(process.env.FRONTEND_URL || getFrontendUrl() || "")}`);
+  console.log(`Allowed Origins: ${getAllowedOriginsForLogs().join(", ")}`);
   console.log("========================================\n");
 
   // Mail connectivity should not block API startup on Render; log and continue if SMTP is unreachable.
