@@ -5,6 +5,8 @@ import crypto from "crypto";
 import { getPool } from "../db.js";
 import { verifyAdmin, verifyTechnician, verifyUser } from "../middleware/auth.js";
 import { socketService } from "../services/socket.js";
+import { generateInvoicePDF } from "../services/invoiceService.js";
+import { sendInvoiceEmail } from "../services/mailer.js";
 import {
     computePaymentAmounts,
     getPlatformPricingConfig,
@@ -16,6 +18,7 @@ import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/p
 const router = express.Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
 const RAZORPAY_KEY_SECRET = String(process.env.RAZORPAY_KEY_SECRET || "");
+const RAZORPAY_WEBHOOK_SECRET = String(process.env.RAZORPAY_WEBHOOK_SECRET || RAZORPAY_KEY_SECRET || "");
 const hasRazorpayConfig = Boolean(
     RAZORPAY_KEY_ID &&
     RAZORPAY_KEY_SECRET &&
@@ -93,6 +96,512 @@ async function resolveRequestBaseAmount(requestRow, pricingConfig) {
         null,
         pricingConfig
     );
+}
+
+function timingSafeEqualHex(left, right) {
+    const a = Buffer.from(String(left || ""), "utf8");
+    const b = Buffer.from(String(right || ""), "utf8");
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+}
+
+async function upsertPendingRazorpayPayment({
+    pool,
+    userId,
+    requestId,
+    orderId,
+    breakdown
+}) {
+    const [existing] = await pool.query(
+        `SELECT id
+         FROM payments
+         WHERE service_request_id = ? AND razorpay_order_id = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [requestId, orderId]
+    );
+
+    if (existing.length > 0) {
+        await pool.execute(
+            `UPDATE payments
+             SET status = ?, amount = ?, platform_fee = ?, technician_amount = ?, is_settled = TRUE
+             WHERE id = ?`,
+            ["PENDING", breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, existing[0].id]
+        );
+        return existing[0].id;
+    }
+
+    const [insertResult] = await pool.execute(
+        `INSERT INTO payments (
+            user_id,
+            service_request_id,
+            payment_method,
+            status,
+            amount,
+            platform_fee,
+            technician_amount,
+            is_settled,
+            razorpay_order_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            userId,
+            requestId,
+            "razorpay",
+            "PENDING",
+            breakdown.totalAmount,
+            breakdown.platformFee,
+            breakdown.baseAmount,
+            true,
+            orderId
+        ]
+    );
+
+    return insertResult.insertId;
+}
+
+async function markClientSideVerification({
+    pool,
+    userId,
+    requestId,
+    orderId,
+    paymentId,
+    signature,
+    breakdown
+}) {
+    const [existing] = await pool.query(
+        `SELECT id
+         FROM payments
+         WHERE service_request_id = ? AND razorpay_order_id = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [requestId, orderId]
+    );
+
+    if (existing.length > 0) {
+        await pool.execute(
+            `UPDATE payments
+             SET status = ?, razorpay_payment_id = ?, razorpay_signature = ?, amount = ?, platform_fee = ?, technician_amount = ?, is_settled = TRUE
+             WHERE id = ?`,
+            ["PROCESSING", paymentId, signature, breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, existing[0].id]
+        );
+        return existing[0].id;
+    }
+
+    const [insertResult] = await pool.execute(
+        `INSERT INTO payments (
+            user_id,
+            service_request_id,
+            payment_method,
+            status,
+            amount,
+            platform_fee,
+            technician_amount,
+            is_settled,
+            razorpay_order_id,
+            razorpay_payment_id,
+            razorpay_signature
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            userId,
+            requestId,
+            "razorpay",
+            "PROCESSING",
+            breakdown.totalAmount,
+            breakdown.platformFee,
+            breakdown.baseAmount,
+            true,
+            orderId,
+            paymentId,
+            signature
+        ]
+    );
+
+    return insertResult.insertId;
+}
+
+function buildInvoiceData({ invoiceId, request, breakdown, paymentId, orderId }) {
+    return {
+        invoiceId,
+        orderId,
+        requestId: request.id,
+        customerName: request.customer_name || "Customer",
+        customerPhone: request.customer_phone || "N/A",
+        customerAddress: request.address || "N/A",
+        serviceType: request.service_type || "Roadside Assistance",
+        vehicleType: request.vehicle_type || "Vehicle",
+        technicianName: request.technician_name || "Assigned Technician",
+        amount: breakdown.baseAmount,
+        platformFee: breakdown.platformFee,
+        gst: 0,
+        totalAmount: breakdown.totalAmount,
+        paymentMethod: "razorpay",
+        transactionId: paymentId || orderId
+    };
+}
+
+async function sendInvoiceEmailFromDatabase({ pool, invoiceId, toEmail, invoiceData }) {
+    if (!toEmail) return false;
+
+    const [invoiceRows] = await pool.query(
+        "SELECT invoice_pdf FROM invoices WHERE id = ? LIMIT 1",
+        [invoiceId]
+    );
+    if (invoiceRows.length === 0 || !invoiceRows[0].invoice_pdf) {
+        throw new Error(`Invoice PDF not found in DB for invoice id ${invoiceId}`);
+    }
+
+    await sendInvoiceEmail(toEmail, invoiceData, invoiceRows[0].invoice_pdf);
+    await pool.execute("UPDATE invoices SET status = ? WHERE id = ?", ["EMAILED", invoiceId]);
+    return true;
+}
+
+async function finalizeCapturedServicePayment({ orderId, paymentId }) {
+    const pool = await getPool();
+    const conn = await pool.getConnection();
+
+    let result = {
+        processed: false,
+        duplicate: false,
+        requestId: null,
+        userId: null,
+        technicianId: null,
+        invoiceId: null,
+        invoiceStatus: null,
+        customerEmail: null,
+        invoiceData: null,
+    };
+
+    try {
+        await conn.beginTransaction();
+
+        const [paymentRows] = await conn.query(
+            `SELECT *
+             FROM payments
+             WHERE razorpay_order_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+             FOR UPDATE`,
+            [orderId]
+        );
+
+        if (paymentRows.length === 0) {
+            await conn.rollback();
+            return {
+                ...result,
+                processed: false,
+                duplicate: false,
+                reason: "payment_row_not_found"
+            };
+        }
+
+        const paymentRow = paymentRows[0];
+        const requestId = Number(paymentRow.service_request_id);
+        if (!Number.isFinite(requestId) || requestId <= 0) {
+            await conn.rollback();
+            return {
+                ...result,
+                processed: false,
+                duplicate: false,
+                reason: "service_request_missing_on_payment"
+            };
+        }
+
+        const [requestRows] = await conn.query(
+            `SELECT sr.id, sr.user_id, sr.technician_id, sr.service_type, sr.vehicle_type, sr.amount, sr.service_charge,
+                    sr.address, sr.status, sr.payment_status,
+                    u.email AS customer_email, u.full_name AS customer_name, u.phone AS customer_phone,
+                    t.name AS technician_name, t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
+             FROM service_requests sr
+             JOIN users u ON u.id = sr.user_id
+             LEFT JOIN technicians t ON t.id = sr.technician_id
+             WHERE sr.id = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [requestId]
+        );
+
+        if (requestRows.length === 0) {
+            await conn.rollback();
+            return {
+                ...result,
+                processed: false,
+                duplicate: false,
+                reason: "service_request_not_found"
+            };
+        }
+
+        const request = requestRows[0];
+        const pricingConfig = await getPlatformPricingConfig();
+        const baseAmount = await resolveRequestBaseAmount(request, pricingConfig);
+        const breakdown = computePaymentAmounts(baseAmount, pricingConfig);
+
+        const requestWasPaid = (
+            String(request.status || "").toLowerCase() === "paid" ||
+            String(request.payment_status || "").toLowerCase() === "completed"
+        );
+
+        await conn.execute(
+            `UPDATE payments
+             SET status = ?, amount = ?, platform_fee = ?, technician_amount = ?, is_settled = TRUE, razorpay_payment_id = ?
+             WHERE id = ?`,
+            ["completed", breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, paymentId, paymentRow.id]
+        );
+
+        await conn.execute(
+            `UPDATE service_requests
+             SET payment_status = ?, payment_method = ?, status = ?, amount = ?
+             WHERE id = ?`,
+            ["completed", "razorpay", "paid", breakdown.baseAmount, requestId]
+        );
+
+        let invoiceId = null;
+        let invoiceStatus = null;
+        const [invoiceRows] = await conn.query(
+            `SELECT id, status
+             FROM invoices
+             WHERE order_id = ? OR razorpay_payment_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+             FOR UPDATE`,
+            [orderId, paymentId]
+        );
+
+        if (invoiceRows.length > 0) {
+            invoiceId = invoiceRows[0].id;
+            invoiceStatus = invoiceRows[0].status || "GENERATED";
+
+            await conn.execute(
+                `UPDATE invoices
+                 SET user_id = ?, order_id = ?, service_request_id = ?, technician_id = ?, razorpay_payment_id = ?, amount = ?,
+                     platform_fee = ?, technician_amount = ?, gst = ?, total_amount = ?
+                 WHERE id = ?`,
+                [
+                    request.user_id,
+                    orderId,
+                    requestId,
+                    request.technician_id || null,
+                    paymentId,
+                    breakdown.totalAmount,
+                    breakdown.platformFee,
+                    breakdown.baseAmount,
+                    0,
+                    breakdown.totalAmount,
+                    invoiceId
+                ]
+            );
+        } else {
+            const provisionalInvoiceData = buildInvoiceData({
+                invoiceId: 0,
+                request,
+                breakdown,
+                paymentId,
+                orderId
+            });
+            const invoicePdfBuffer = await generateInvoicePDF(provisionalInvoiceData);
+
+            const [insertInvoiceResult] = await conn.execute(
+                `INSERT INTO invoices (
+                    user_id,
+                    order_id,
+                    razorpay_payment_id,
+                    amount,
+                    invoice_pdf,
+                    status,
+                    service_request_id,
+                    technician_id,
+                    platform_fee,
+                    technician_amount,
+                    gst,
+                    total_amount
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    request.user_id,
+                    orderId,
+                    paymentId,
+                    breakdown.totalAmount,
+                    invoicePdfBuffer,
+                    "GENERATED",
+                    requestId,
+                    request.technician_id || null,
+                    breakdown.platformFee,
+                    breakdown.baseAmount,
+                    0,
+                    breakdown.totalAmount
+                ]
+            );
+            invoiceId = insertInvoiceResult.insertId;
+            invoiceStatus = "GENERATED";
+        }
+
+        if (request.technician_id && !requestWasPaid) {
+            await conn.execute(
+                `UPDATE technicians
+                 SET jobs_completed = jobs_completed + 1,
+                     total_earnings = total_earnings + ?
+                 WHERE id = ?`,
+                [breakdown.baseAmount, request.technician_id]
+            );
+        }
+
+        await conn.commit();
+
+        result = {
+            processed: true,
+            duplicate: requestWasPaid && String(paymentRow.status || "").toLowerCase() === "completed",
+            requestId,
+            userId: request.user_id,
+            technicianId: request.technician_id || null,
+            invoiceId,
+            invoiceStatus,
+            customerEmail: request.customer_email || null,
+            invoiceData: buildInvoiceData({
+                invoiceId,
+                request,
+                breakdown,
+                paymentId,
+                orderId
+            }),
+        };
+
+        return result;
+    } catch (error) {
+        try {
+            await conn.rollback();
+        } catch { }
+        throw error;
+    } finally {
+        conn.release();
+    }
+}
+
+export async function razorpayWebhookHandler(req, res) {
+    if (!RAZORPAY_WEBHOOK_SECRET) {
+        return res.status(503).json({ error: "Razorpay webhook verification secret is not configured." });
+    }
+
+    const signature = req.headers["x-razorpay-signature"];
+    const rawBody = Buffer.isBuffer(req.body)
+        ? req.body
+        : Buffer.from(typeof req.body === "string" ? req.body : JSON.stringify(req.body || {}));
+
+    const expected = crypto
+        .createHmac("sha256", RAZORPAY_WEBHOOK_SECRET)
+        .update(rawBody)
+        .digest("hex");
+
+    if (!signature || !timingSafeEqualHex(signature, expected)) {
+        paymentDiag("webhook_signature_invalid", { signaturePresent: Boolean(signature) });
+        return res.status(401).json({ error: "Invalid webhook signature." });
+    }
+
+    let event;
+    try {
+        event = JSON.parse(rawBody.toString("utf8"));
+    } catch (parseErr) {
+        return res.status(400).json({ error: "Invalid webhook payload." });
+    }
+
+    const eventName = String(event?.event || "");
+    if (eventName !== "payment.captured") {
+        paymentDiag("webhook_ignored_event", { event: eventName });
+        return res.status(200).json({ received: true, ignored: true, event: eventName });
+    }
+
+    const paymentEntity = event?.payload?.payment?.entity || {};
+    const orderId = String(paymentEntity.order_id || "").trim();
+    const paymentId = String(paymentEntity.id || "").trim();
+
+    if (!orderId || !paymentId) {
+        paymentDiag("webhook_missing_fields", { orderIdPresent: Boolean(orderId), paymentIdPresent: Boolean(paymentId) });
+        return res.status(400).json({ error: "Missing order_id or payment_id in webhook payload." });
+    }
+
+    try {
+        let finalized = await finalizeCapturedServicePayment({ orderId, paymentId });
+
+        // Backfill support: if no payment row exists yet, attempt to reconstruct it from Razorpay notes.
+        if (!finalized.processed && finalized.reason === "payment_row_not_found") {
+            const requestIdFromNotes = Number(paymentEntity?.notes?.requestId || paymentEntity?.notes?.request_id);
+            const userIdFromNotes = Number(paymentEntity?.notes?.userId || paymentEntity?.notes?.user_id);
+
+            if (Number.isFinite(requestIdFromNotes) && requestIdFromNotes > 0 && Number.isFinite(userIdFromNotes) && userIdFromNotes > 0) {
+                const pool = await getPool();
+                const pricingConfig = await getPlatformPricingConfig();
+                const [reqRows] = await pool.query(
+                    `SELECT amount, service_charge, service_type, vehicle_type, technician_id
+                     FROM service_requests
+                     WHERE id = ? AND user_id = ?
+                     LIMIT 1`,
+                    [requestIdFromNotes, userIdFromNotes]
+                );
+
+                if (reqRows.length > 0) {
+                    const baseAmount = await resolveRequestBaseAmount(reqRows[0], pricingConfig);
+                    const breakdown = computePaymentAmounts(baseAmount, pricingConfig);
+                    await upsertPendingRazorpayPayment({
+                        pool,
+                        userId: userIdFromNotes,
+                        requestId: requestIdFromNotes,
+                        orderId,
+                        breakdown
+                    });
+                    finalized = await finalizeCapturedServicePayment({ orderId, paymentId });
+                }
+            }
+        }
+
+        if (!finalized.processed && finalized.reason) {
+            paymentDiag("webhook_not_processed", { orderId, paymentId, reason: finalized.reason });
+            return res.status(200).json({ received: true, processed: false, reason: finalized.reason });
+        }
+
+        const pool = await getPool();
+        if (finalized.invoiceId && finalized.customerEmail && finalized.invoiceStatus !== "EMAILED") {
+            await sendInvoiceEmailFromDatabase({
+                pool,
+                invoiceId: finalized.invoiceId,
+                toEmail: finalized.customerEmail,
+                invoiceData: finalized.invoiceData
+            });
+        }
+
+        socketService.broadcast("admin:payment_update", {
+            requestId: finalized.requestId,
+            paymentMethod: "razorpay",
+            status: "completed",
+            at: new Date().toISOString()
+        });
+        if (finalized.technicianId) {
+            socketService.notifyTechnician(finalized.technicianId, "job:status_update", {
+                requestId: finalized.requestId,
+                status: "paid"
+            });
+        }
+        if (finalized.userId) {
+            socketService.notifyUser(finalized.userId, "payment_completed", {
+                requestId: finalized.requestId,
+                status: "paid"
+            });
+            socketService.notifyUser(finalized.userId, "job:status_update", {
+                requestId: finalized.requestId,
+                status: "paid"
+            });
+        }
+
+        paymentDiag("webhook_payment_captured_processed", {
+            orderId,
+            paymentId,
+            requestId: finalized.requestId,
+            invoiceId: finalized.invoiceId,
+            duplicate: finalized.duplicate
+        });
+
+        return res.status(200).json({ received: true, processed: true, duplicate: finalized.duplicate });
+    } catch (err) {
+        console.error("[Razorpay Webhook] Failed to process payment.captured:", err);
+        paymentDiag("webhook_processing_failed", { orderId, paymentId, error: err?.message || String(err) });
+        return res.status(500).json({ error: "Failed to process webhook." });
+    }
 }
 
 /**
@@ -305,7 +814,12 @@ router.post('/create-order', verifyUser, async (req, res) => {
             amount: Math.round(breakdown.totalAmount * 100),
             currency: breakdown.currency,
             receipt: `receipt_${requestId}_${Date.now()}`,
-            payment_capture: 1
+            payment_capture: 1,
+            notes: {
+                requestId: String(requestId),
+                userId: String(userId),
+                type: "service_request"
+            }
         };
 
         const order = await razorpay.orders.create(options);
@@ -319,6 +833,19 @@ router.post('/create-order', verifyUser, async (req, res) => {
             totalAmount: breakdown.totalAmount,
             platformFeePercent: breakdown.platformFeePercent
         });
+
+        await upsertPendingRazorpayPayment({
+            pool,
+            userId,
+            requestId,
+            orderId: order.id,
+            breakdown
+        });
+
+        await pool.execute(
+            "UPDATE service_requests SET payment_method = ?, payment_status = ? WHERE id = ?",
+            ["razorpay", "pending", requestId]
+        );
 
         // Return breakdown so frontend can display consistent info
         res.json({
@@ -358,133 +885,54 @@ router.post('/confirm', verifyUser, async (req, res) => {
         }
 
         const pool = await getPool();
-        const pricingConfig = await getPlatformPricingConfig();
         const authUserId = req.user.userId;
+        const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
-            `SELECT sr.amount, sr.service_charge, sr.vehicle_type, sr.technician_id, sr.user_id, sr.service_type, sr.address, 
-                    sr.status, sr.payment_status,
-                    u.email as customer_email, u.full_name as customer_name, u.phone as customer_phone, 
-                    t.name as technician_name
-             FROM service_requests sr 
-             JOIN users u ON sr.user_id = u.id 
-             LEFT JOIN technicians t ON sr.technician_id = t.id
-             WHERE sr.id = ? AND sr.user_id = ?`,
+            `SELECT amount, service_charge, service_type, vehicle_type, technician_id, user_id, status, payment_status
+             FROM service_requests
+             WHERE id = ? AND user_id = ?
+             LIMIT 1`,
             [requestId, authUserId]
         );
         if (reqRows.length === 0) return res.status(404).json({ error: 'Request not found' });
 
-        const invDetails = reqRows[0];
-        if (invDetails.payment_status === 'completed' || invDetails.status === 'paid') {
+        const requestRow = reqRows[0];
+        if (String(requestRow.payment_status || "").toLowerCase() === 'completed' || String(requestRow.status || "").toLowerCase() === 'paid') {
             return res.json({ success: true, alreadyPaid: true });
         }
-        const baseAmount = await resolveRequestBaseAmount(invDetails, pricingConfig);
-        const technicianId = invDetails.technician_id;
-        const userId = invDetails.user_id;
 
+        const baseAmount = await resolveRequestBaseAmount(requestRow, pricingConfig);
         const breakdown = computePaymentAmounts(baseAmount, pricingConfig);
-        const techAmount = breakdown.baseAmount;
 
-        const conn = await pool.getConnection();
-        try {
-            await conn.beginTransaction();
+        await markClientSideVerification({
+            pool,
+            userId: authUserId,
+            requestId,
+            orderId: razorpay_order_id,
+            paymentId: razorpay_payment_id,
+            signature: razorpay_signature,
+            breakdown
+        });
 
-            await conn.execute(
-                "UPDATE service_requests SET payment_status = ?, payment_method = ?, status = ?, amount = ? WHERE id = ?",
-                ['completed', 'razorpay', 'paid', breakdown.baseAmount, requestId]
-            );
-            console.log('REQUEST STATUS UPDATED:', { requestId, status: 'paid', amount: breakdown.baseAmount });
+        await pool.execute(
+            "UPDATE service_requests SET payment_method = ? WHERE id = ?",
+            ["razorpay", requestId]
+        );
 
-            await conn.execute(
-                `INSERT INTO payments (user_id, service_request_id, payment_method, status, amount, platform_fee, technician_amount, is_settled, razorpay_order_id, razorpay_payment_id, razorpay_signature)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [userId, requestId, 'razorpay', 'completed', breakdown.totalAmount, breakdown.platformFee, techAmount, true, razorpay_order_id, razorpay_payment_id, razorpay_signature]
-            );
+        paymentDiag("confirm_payment_acknowledged", {
+            requestId,
+            userId: authUserId,
+            orderId: razorpay_order_id,
+            paymentId: razorpay_payment_id
+        });
 
-            const [invResult] = await conn.execute(
-                `INSERT INTO invoices (service_request_id, user_id, technician_id, amount, platform_fee, technician_amount, gst, total_amount)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                [requestId, userId, technicianId || null, breakdown.baseAmount, breakdown.platformFee, techAmount, 0, breakdown.totalAmount]
-            );
-
-            const invoiceId = invResult.insertId;
-            let pdfPath = '';
-
-            // Generate Invoice PDF
-            try {
-                const fs = await import('fs');
-                const { generateInvoicePDF } = await import('../services/invoiceService.js');
-
-                // Construct invoice data object
-                const invoiceData = {
-                    invoiceId: invoiceId,
-                    requestId: requestId,
-                    customerName: invDetails.customer_name,
-                    customerPhone: invDetails.customer_phone,
-                    customerAddress: invDetails.address,
-                    serviceType: invDetails.service_type,
-                    technicianName: invDetails.technician_name,
-                    amount: breakdown.baseAmount,
-                    platformFee: breakdown.platformFee,
-                    totalAmount: breakdown.totalAmount,
-                    paymentMethod: 'Razorpay',
-                    transactionId: razorpay_payment_id
-                };
-
-                pdfPath = await generateInvoicePDF(invoiceData);
-                await conn.execute('UPDATE invoices SET pdf_path = ? WHERE id = ?', [pdfPath, invoiceId]);
-
-                // Send Email
-                if (invDetails.customer_email) {
-                    console.log(`Sending invoice email to: ${invDetails.customer_email}`);
-                    const pdfBuffer = fs.readFileSync(pdfPath);
-                    const { sendInvoiceEmail } = await import('../services/mailer.js');
-                    await sendInvoiceEmail(invDetails.customer_email, invoiceData, pdfBuffer);
-                    console.log('Invoice email sent successfully');
-                }
-
-            } catch (err) {
-                console.error('Invoice generation/email failed:', err);
-                // Non-critical failure, continue
-            }
-
-            if (technicianId) {
-                await conn.execute('UPDATE technicians SET jobs_completed = jobs_completed + 1, total_earnings = total_earnings + ? WHERE id = ?', [techAmount, technicianId]);
-            }
-
-            await conn.commit();
-            paymentDiag("confirm_payment_success", {
-                requestId,
-                userId,
-                technicianId,
-                paymentMethod: "razorpay",
-                totalAmount: breakdown.totalAmount,
-                platformFee: breakdown.platformFee,
-                technicianAmount: techAmount
-            });
-            socketService.broadcast("admin:payment_update", {
-                requestId,
-                paymentMethod: "razorpay",
-                status: "completed",
-                totalAmount: breakdown.totalAmount,
-                at: new Date().toISOString()
-            });
-
-            // Notify parties
-            if (technicianId) socketService.notifyTechnician(technicianId, 'job:status_update', { requestId, status: 'paid' });
-            socketService.notifyUser(userId, 'payment_completed', { requestId, status: 'paid' });
-            socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'paid' });
-
-            const [updatedRows] = await pool.query('SELECT * FROM service_requests WHERE id = ?', [requestId]);
-            res.json({ success: true, request: updatedRows[0] });
-
-        } catch (txErr) {
-            await conn.rollback();
-            console.error('Confirm payment transaction error:', txErr);
-            paymentDiag("confirm_payment_tx_failed", { requestId, userId: req.user.userId, error: txErr?.message || String(txErr) });
-            return res.status(500).json({ error: 'Payment confirmation failed' });
-        } finally {
-            conn.release();
-        }
+        res.json({
+            success: true,
+            requestId,
+            order_id: razorpay_order_id,
+            payment_id: razorpay_payment_id,
+            message: "Payment signature verified. Awaiting Razorpay webhook capture confirmation."
+        });
 
     } catch (err) {
         console.error('Confirm payment error:', err);
@@ -536,40 +984,46 @@ router.post('/cash', verifyUser, async (req, res) => {
             );
 
             const [invResult] = await conn.execute(
-                `INSERT INTO invoices (service_request_id, user_id, technician_id, amount, platform_fee, technician_amount, gst, total_amount)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                [requestId, userId, technicianId || null, breakdown.baseAmount, breakdown.platformFee, techAmount, 0, breakdown.totalAmount]
+                `INSERT INTO invoices (
+                    user_id, order_id, razorpay_payment_id, amount, invoice_pdf, status,
+                    service_request_id, technician_id, platform_fee, technician_amount, gst, total_amount
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    userId,
+                    `cash_${requestId}_${Date.now()}`,
+                    null,
+                    breakdown.totalAmount,
+                    null,
+                    "GENERATED",
+                    requestId,
+                    technicianId || null,
+                    breakdown.platformFee,
+                    techAmount,
+                    0,
+                    breakdown.totalAmount
+                ]
             );
 
             const invoiceId = invResult.insertId;
-            // generate pdf invoice (best effort)
+            // generate PDF invoice and store bytes in DB (best effort)
             try {
-                const fs = await import('fs');
-                const PDFDocument = (await import('pdfkit')).default;
-                const uploadsDir = './server/uploads/invoices';
-                fs.mkdirSync(uploadsDir, { recursive: true });
-
-                const pdfPath = `${uploadsDir}/invoice_${invoiceId}.pdf`;
-                const doc = new PDFDocument({ size: 'A4' });
-                const stream = fs.createWriteStream(pdfPath);
-                doc.pipe(stream);
-
-                doc.fontSize(18).text('ResQNow Invoice (Cash)', { align: 'center' });
-                doc.moveDown();
-                doc.fontSize(12).text(`Invoice ID: ${invoiceId}`);
-                doc.text(`Request ID: ${requestId}`);
-                doc.text(`Service Amount: INR ${breakdown.baseAmount.toFixed(2)}`);
-                doc.text(`Platform Fee: INR ${breakdown.platformFee.toFixed(2)}`);
-                doc.moveDown();
-                doc.fontSize(14).text(`Total Paid: INR ${breakdown.totalAmount.toFixed(2)}`, { underline: true });
-
-                doc.end();
-                await new Promise((resolve, reject) => {
-                    stream.on('finish', resolve);
-                    stream.on('error', reject);
-                });
-
-                await conn.execute('UPDATE invoices SET pdf_path = ? WHERE id = ?', [pdfPath, invoiceId]);
+                const invoiceData = {
+                    invoiceId,
+                    requestId,
+                    customerName: "Customer",
+                    customerPhone: "N/A",
+                    customerAddress: "N/A",
+                    serviceType: reqRows[0].service_type || "Roadside Assistance",
+                    vehicleType: reqRows[0].vehicle_type || "Vehicle",
+                    technicianName: "Assigned Technician",
+                    amount: breakdown.baseAmount,
+                    platformFee: breakdown.platformFee,
+                    totalAmount: breakdown.totalAmount,
+                    paymentMethod: "cash",
+                    transactionId: `CASH_${requestId}`
+                };
+                const pdfBuffer = await generateInvoicePDF(invoiceData);
+                await conn.execute('UPDATE invoices SET invoice_pdf = ? WHERE id = ?', [pdfBuffer, invoiceId]);
             } catch (pdfErr) {
                 console.error('Invoice generation failed for cash:', pdfErr);
             }
@@ -710,7 +1164,7 @@ router.get('/diagnostics/request/:requestId', verifyAdmin, async (req, res) => {
         );
 
         const [invoiceRows] = await pool.query(
-            `SELECT id, total_amount, pdf_path, created_at
+            `SELECT id, total_amount, status, (invoice_pdf IS NOT NULL) AS has_invoice_pdf, created_at
              FROM invoices
              WHERE service_request_id = ?
              ORDER BY created_at DESC`,
@@ -734,7 +1188,7 @@ router.get('/diagnostics/request/:requestId', verifyAdmin, async (req, res) => {
             paid_status_consistent: !(['paid'].includes(String(request.status)) && String(request.payment_status) !== 'completed'),
             payment_row_exists_if_paid: !(['paid'].includes(String(request.status)) && paymentRows.length === 0),
             invoice_exists_if_paid: !(['paid'].includes(String(request.status)) && invoiceRows.length === 0),
-            invoice_pdf_present: !latestInvoice || !!latestInvoice.pdf_path,
+            invoice_pdf_present: !latestInvoice || !!latestInvoice.has_invoice_pdf,
             cash_due_record_present: !latestPayment || latestPayment.payment_method !== 'cash' || dueRows.length > 0,
         };
 

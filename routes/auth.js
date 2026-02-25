@@ -15,7 +15,7 @@ if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
     console.error("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variables.");
 }
 
-const getRedirectUri = () => getGoogleCallbackUrl();
+const getRedirectUri = () => String(process.env.GOOGLE_CALLBACK_URL || getGoogleCallbackUrl() || "").trim();
 
 function ensureGoogleAuthConfigured(res) {
     if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {

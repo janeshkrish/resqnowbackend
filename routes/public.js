@@ -1,6 +1,6 @@
 import { Router } from "express";
 import * as db from "../db.js";
-import nodemailer from "nodemailer";
+import { sendMail } from "../services/mailer.js";
 
 const router = Router();
 
@@ -47,24 +47,19 @@ router.post("/contact", async (req, res) => {
     }
 
     try {
-        // Configure transporter
-        const transporter = nodemailer.createTransport({
-            service: "gmail",
-            auth: {
-                user: process.env.EMAIL_USER,
-                pass: process.env.EMAIL_PASS
-            }
-        });
-        const contactReceiver = String(process.env.CONTACT_RECEIVER_EMAIL || process.env.EMAIL_USER || "").trim();
+        const contactReceiver = String(
+            process.env.CONTACT_RECEIVER_EMAIL ||
+            process.env.EMAIL_USER ||
+            ""
+        ).trim();
         if (!contactReceiver) {
             return res.status(503).json({ error: "Contact email receiver is not configured." });
         }
 
-        const mailOptions = {
-            from: `"${name}" <${email}>`, // sender address
-            to: contactReceiver, // list of receivers
-            subject: `ResQNow Contact: ${subject}`, // Subject line
-            text: `Name: ${name}\nEmail: ${email}\n\nMessage:\n${message}`, // plain text body
+        await sendMail({
+            to: contactReceiver,
+            subject: `ResQNow Contact: ${subject}`,
+            text: `Name: ${name}\nEmail: ${email}\n\nMessage:\n${message}`,
             html: `
         <h3>New Contact Message</h3>
         <p><strong>Name:</strong> ${name}</p>
@@ -73,10 +68,9 @@ router.post("/contact", async (req, res) => {
         <br/>
         <p><strong>Message:</strong></p>
         <p>${message.replace(/\n/g, "<br>")}</p>
-      `
-        };
-
-        await transporter.sendMail(mailOptions);
+      `,
+            replyTo: email
+        });
         res.json({ success: true, message: "Message sent successfully" });
 
     } catch (error) {

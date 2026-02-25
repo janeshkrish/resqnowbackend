@@ -55,7 +55,7 @@ npm install
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
 - `GOOGLE_CALLBACK_URL`
-- `FRONTEND_URL` or `FRONTEND_PUBLIC_URL`
+- `FRONTEND_URL`
 
 ### Production (Render + Vercel)
 
@@ -109,6 +109,7 @@ Base prefix: `/api`
 - `POST /api/service-requests/:id/payment-order`
 - `POST /api/payments/create-order`
 - `POST /api/payments/confirm`
+- `POST /api/payments/razorpay/webhook`
 - `GET /api/payments/config`
 - `GET /api/public/stats`
 - `POST /api/public/contact`
@@ -123,7 +124,7 @@ resqnowbackend/
   middleware/     # Auth middlewares and token helpers
   routes/         # Route modules (auth, users, technicians, payments, etc.)
   services/       # Business/domain services
-  server/uploads/ # Generated files (invoices/uploads)
+  uploads/        # Optional static assets (legacy/non-critical)
   scripts/        # Build and maintenance scripts
   db.js           # MySQL connection pool + schema assurance
   index.js        # App bootstrap, startup, routes, health checks

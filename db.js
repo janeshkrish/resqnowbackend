@@ -123,6 +123,22 @@ export async function ensureUsersTable() {
   await p.execute(USERS_TABLE_SQL);
 }
 
+const OTP_REQUESTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS otp_requests (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  email VARCHAR(255) NOT NULL,
+  otp_hash VARCHAR(255) NOT NULL,
+  expires_at DATETIME NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_otp_email_created (email, created_at)
+)
+`.trim();
+
+export async function ensureOtpRequestsTable() {
+  const p = await getPool();
+  await p.execute(OTP_REQUESTS_TABLE_SQL);
+}
+
 const SERVICE_REQUESTS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS service_requests (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -327,33 +343,39 @@ const TECHNICIAN_DUES_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS technician_dues (
   id INT AUTO_INCREMENT PRIMARY KEY,
   technician_id INT NOT NULL,
+  service_request_id INT,
   amount DECIMAL(10, 2) NOT NULL,
   reason VARCHAR(255),
   status ENUM('pending', 'paid') DEFAULT 'pending',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (technician_id) REFERENCES technicians(id)
+  FOREIGN KEY (technician_id) REFERENCES technicians(id),
+  FOREIGN KEY (service_request_id) REFERENCES service_requests(id)
 )
 `.trim();
 
 export async function ensureTechnicianDuesTable() {
   const p = await getPool();
   await p.execute(TECHNICIAN_DUES_TABLE_SQL);
+  await addColumnIfNotExists(p, 'technician_dues', 'service_request_id INT');
 }
 
-// Invoices table to store invoice metadata and PDF path for issued invoices
+// Invoices table keeps generated invoice PDF in TiDB (LONGBLOB) for Render-safe storage.
 const INVOICES_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS invoices (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  service_request_id INT NOT NULL,
   user_id INT NOT NULL,
+  order_id VARCHAR(255) NOT NULL,
+  razorpay_payment_id VARCHAR(255),
+  amount DECIMAL(10,2),
+  invoice_pdf LONGBLOB,
+  status VARCHAR(50) DEFAULT 'GENERATED',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  service_request_id INT,
   technician_id INT,
-  amount DECIMAL(12,2) NOT NULL,
   platform_fee DECIMAL(12,2) DEFAULT 0.00,
   technician_amount DECIMAL(12,2) DEFAULT 0.00,
   gst DECIMAL(12,2) DEFAULT 0.00,
-  total_amount DECIMAL(12,2) NOT NULL,
-  pdf_path VARCHAR(1024),
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  total_amount DECIMAL(12,2) DEFAULT 0.00,
   FOREIGN KEY (service_request_id) REFERENCES service_requests(id)
 )
 `.trim();
@@ -361,6 +383,18 @@ CREATE TABLE IF NOT EXISTS invoices (
 export async function ensureInvoicesTable() {
   const p = await getPool();
   await p.execute(INVOICES_TABLE_SQL);
+  await addColumnIfNotExists(p, 'invoices', 'user_id INT NOT NULL DEFAULT 0');
+  await addColumnIfNotExists(p, 'invoices', 'order_id VARCHAR(255) NOT NULL DEFAULT ""');
+  await addColumnIfNotExists(p, 'invoices', 'razorpay_payment_id VARCHAR(255)');
+  await addColumnIfNotExists(p, 'invoices', 'amount DECIMAL(10,2)');
+  await addColumnIfNotExists(p, 'invoices', 'invoice_pdf LONGBLOB');
+  await addColumnIfNotExists(p, 'invoices', 'status VARCHAR(50) DEFAULT "GENERATED"');
+  await addColumnIfNotExists(p, 'invoices', 'service_request_id INT');
+  await addColumnIfNotExists(p, 'invoices', 'technician_id INT');
+  await addColumnIfNotExists(p, 'invoices', 'platform_fee DECIMAL(12,2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'invoices', 'technician_amount DECIMAL(12,2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'invoices', 'gst DECIMAL(12,2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'invoices', 'total_amount DECIMAL(12,2) DEFAULT 0.00');
 }
 
 const PLATFORM_PRICING_CONFIG_TABLE_SQL = `
@@ -423,6 +457,8 @@ export async function updateServiceRequestsTableSchema() {
   await addColumnIfNotExists(p, 'service_requests', 'vehicle_model VARCHAR(255)');
   await addColumnIfNotExists(p, 'service_requests', 'vehicle_type VARCHAR(100)');
   await addColumnIfNotExists(p, 'service_requests', 'description TEXT');
+  await addColumnIfNotExists(p, 'service_requests', 'service_charge DECIMAL(10,2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'service_requests', 'payment_method VARCHAR(50)');
   await addColumnIfNotExists(p, 'service_requests', 'contact_name VARCHAR(255)');
   await addColumnIfNotExists(p, 'service_requests', 'contact_email VARCHAR(255)');
   await addColumnIfNotExists(p, 'service_requests', 'contact_phone VARCHAR(50)');
@@ -431,6 +467,7 @@ export async function updateServiceRequestsTableSchema() {
   await addColumnIfNotExists(p, 'service_requests', 'location_lng FLOAT');
   await addColumnIfNotExists(p, 'service_requests', 'started_at TIMESTAMP NULL');
   await addColumnIfNotExists(p, 'service_requests', 'completed_at TIMESTAMP NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'cancelled_at TIMESTAMP NULL');
   await addColumnIfNotExists(p, 'service_requests', 'cancellation_reason VARCHAR(512)');
 
   // Ensure status column can hold longer status strings like 'payment_pending'
@@ -445,6 +482,7 @@ export async function updateServiceRequestsTableSchema() {
 
 export async function updateUsersTableSchema() {
   const p = await getPool();
+  await addColumnIfNotExists(p, 'users', 'role VARCHAR(32) DEFAULT "user"');
   await addColumnIfNotExists(p, 'users', 'subscription VARCHAR(50) DEFAULT "free"');
   await addColumnIfNotExists(p, 'users', 'phone VARCHAR(50)');
   await addColumnIfNotExists(p, 'users', 'birthday DATE');

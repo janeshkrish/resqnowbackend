@@ -1,12 +1,12 @@
 
 import express from "express";
 import { getPool } from "../db.js";
-import path from 'path';
 import crypto from 'crypto';
 import { verifyUser, verifyTechnician } from "../middleware/auth.js";
 import { socketService } from "../services/socket.js";
 import * as mail from "../services/mailer.js";
 import Razorpay from "razorpay";
+import { generateInvoicePDF } from "../services/invoiceService.js";
 import {
     canonicalizeServiceDomain,
     canonicalizeVehicleFamily,
@@ -795,12 +795,17 @@ router.post("/:id/payment-order", verifyUser, async (req, res) => {
     try {
         if (!ensureRazorpayConfigured(res)) return;
         const requestId = req.params.id;
+        const userId = req.user.userId;
         const pool = await getPool();
         const pricingConfig = await getPlatformPricingConfig();
-        const [rows] = await pool.query("SELECT * FROM service_requests WHERE id = ?", [requestId]);
+        const [rows] = await pool.query("SELECT * FROM service_requests WHERE id = ? AND user_id = ? LIMIT 1", [requestId, userId]);
 
         if (rows.length === 0) return res.status(404).json({ error: "Request not found" });
         const request = rows[0];
+
+        if (String(request.payment_status || "").toLowerCase() === "completed" || String(request.status || "").toLowerCase() === "paid") {
+            return res.status(409).json({ error: "Request already paid" });
+        }
 
         const serviceCharge = await resolveRequestBaseAmount(request, pricingConfig);
         const breakdown = computePaymentAmounts(serviceCharge, pricingConfig);
@@ -813,10 +818,47 @@ router.post("/:id/payment-order", verifyUser, async (req, res) => {
             amount: Math.round(breakdown.totalAmount * 100),
             currency: breakdown.currency,
             receipt: `receipt_${requestId}_${Date.now()}`,
-            payment_capture: 1
+            payment_capture: 1,
+            notes: {
+                requestId: String(requestId),
+                userId: String(userId),
+                type: "service_request"
+            }
         };
 
         const order = await razorpay.orders.create(options);
+
+        const [existingPayment] = await pool.query(
+            `SELECT id
+             FROM payments
+             WHERE service_request_id = ? AND razorpay_order_id = ?
+             ORDER BY id DESC
+             LIMIT 1`,
+            [requestId, order.id]
+        );
+
+        if (existingPayment.length > 0) {
+            await pool.execute(
+                `UPDATE payments
+                 SET status = ?, amount = ?, platform_fee = ?, technician_amount = ?, is_settled = TRUE
+                 WHERE id = ?`,
+                ["PENDING", breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, existingPayment[0].id]
+            );
+        } else {
+            await pool.execute(
+                `INSERT INTO payments (
+                    user_id, service_request_id, payment_method, status, amount,
+                    platform_fee, technician_amount, is_settled, razorpay_order_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [userId, requestId, "razorpay", "PENDING", breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, true, order.id]
+            );
+        }
+
+        await pool.execute(
+            "UPDATE service_requests SET payment_method = ?, payment_status = ? WHERE id = ?",
+            ["razorpay", "pending", requestId]
+        );
+
         res.json({
             ...order,
             base_amount: breakdown.baseAmount,
@@ -837,15 +879,12 @@ router.post("/:id/payment-order", verifyUser, async (req, res) => {
 router.post("/:id/verify-payment", verifyUser, async (req, res) => {
     try {
         if (!ensureRazorpayConfigured(res)) return;
-        console.log('--------------------------------------------------');
-        console.log('[VERIFY PAYMENT] Hit /verify-payment endpoint');
-        console.log('[VERIFY PAYMENT] Params:', req.params);
-        console.log('[VERIFY PAYMENT] Body:', JSON.stringify(req.body, null, 2));
-        console.log('[VERIFY PAYMENT] User:', req.user);
-
         const requestId = req.params.id;
         const userId = req.user.userId;
         const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+        if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+            return res.status(400).json({ error: "Missing payment verification fields." });
+        }
 
         const body = razorpay_order_id + "|" + razorpay_payment_id;
         const expectedSignature = crypto
@@ -860,152 +899,72 @@ router.post("/:id/verify-payment", verifyUser, async (req, res) => {
         const pool = await getPool();
         const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
-            "SELECT amount, service_charge, service_type, vehicle_type, technician_id FROM service_requests WHERE id = ?",
-            [requestId]
+            "SELECT amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status FROM service_requests WHERE id = ? AND user_id = ? LIMIT 1",
+            [requestId, userId]
         );
         if (reqRows.length === 0) {
             return res.status(404).json({ error: "Request not found" });
         }
 
-        const amount = await resolveRequestBaseAmount(reqRows[0], pricingConfig);
-        const breakdown = computePaymentAmounts(amount, pricingConfig);
-        const technicianId = reqRows[0]?.technician_id;
-        const techAmount = breakdown.baseAmount;
-
-        console.log("PAYMENT VERIFIED. Amount:", breakdown.baseAmount, " Mode: ONLINE");
-
-        // Fetch user and tech details for invoice
-        // Re-query to get user_id properly if not in reqRows (reqRows only requested amount, tech_id)
-        // Also ensure we get phone number and address for invoice
-        const [details] = await pool.query(
-            `SELECT sr.service_type, sr.address, u.full_name as customer_name, u.email as customer_email, u.phone as customer_phone, t.name as technician_name 
-             FROM service_requests sr
-             LEFT JOIN users u ON sr.user_id = u.id
-             LEFT JOIN technicians t ON sr.technician_id = t.id
-             WHERE sr.id = ?`,
-            [requestId]
-        );
-        const invDetails = details[0];
-
-        // Begin transaction to safely update request, payments and create invoice
-        const conn = await pool.getConnection();
-        try {
-            await conn.beginTransaction();
-
-            // Update Service Request to mark paid
-            await conn.execute(
-                "UPDATE service_requests SET payment_status = 'completed', payment_method = 'razorpay', status = 'paid', amount = ? WHERE id = ?",
-                [breakdown.baseAmount, requestId]
-            );
-            console.log('REQUEST STATUS UPDATED:', { requestId, status: 'paid' });
-
-            // Insert Payment Record
-            await conn.execute(
-                `INSERT INTO payments (user_id, service_request_id, payment_method, status, 
-                  amount, platform_fee, technician_amount, is_settled,
-                  razorpay_order_id, razorpay_payment_id, razorpay_signature) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [userId, requestId, 'razorpay', 'completed', breakdown.totalAmount, breakdown.platformFee, techAmount, true, razorpay_order_id, razorpay_payment_id, razorpay_signature]
-            );
-
-            // Create Invoice
-            const [invResult] = await conn.execute(
-                `INSERT INTO invoices (service_request_id, user_id, technician_id, amount, platform_fee, technician_amount, gst, total_amount)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                [requestId, userId, technicianId || null, breakdown.baseAmount, breakdown.platformFee, techAmount, 0, breakdown.totalAmount]
-            );
-
-            const invoiceId = invResult.insertId;
-
-            // Generate PDF invoice using dedicated service
-            try {
-                const { generateInvoicePDF } = await import('../services/invoiceService.js');
-
-                const invoiceData = {
-                    invoiceId: invoiceId,
-                    requestId: requestId,
-                    customerName: invDetails.customer_name,
-                    customerPhone: invDetails.customer_phone,
-                    customerAddress: invDetails.address, // Correctly fetched from invDetails
-                    serviceType: invDetails.service_type,
-                    vehicleType: invDetails.vehicle_type, // Fetch if needed
-                    amount: breakdown.baseAmount,
-                    platformFee: breakdown.platformFee,
-                    totalAmount: breakdown.totalAmount,
-                    paymentMethod: 'Razorpay',
-                    transactionId: razorpay_payment_id
-                };
-
-                const pdfPath = await generateInvoicePDF(invoiceData);
-
-                // Update invoice record with pdf path
-                await conn.execute("UPDATE invoices SET pdf_path = ? WHERE id = ?", [pdfPath, invoiceId]);
-
-                // Email the Invoice
-                if (invDetails.customer_email) {
-                    console.log(`Sending invoice email to: ${invDetails.customer_email}`);
-                    const fs = await import('fs');
-                    const pdfBuffer = fs.readFileSync(pdfPath);
-
-                    try {
-                        const { sendInvoiceEmail } = await import('../services/mailer.js');
-                        await sendInvoiceEmail(invDetails.customer_email, invoiceData, pdfBuffer);
-                        console.log('Invoice email sent successfully');
-                    } catch (e) {
-                        console.error('Failed to send invoice email:', e);
-                    }
-                } else {
-                    console.warn(`No customer email found for request ${requestId}, skipping invoice email.`);
-                }
-
-                // Update technician stats (jobs completed and earnings)
-                if (technicianId) {
-                    await conn.execute(
-                        "UPDATE technicians SET jobs_completed = jobs_completed + 1, total_earnings = total_earnings + ? WHERE id = ?",
-                        [techAmount, technicianId]
-                    );
-
-                    // Fetch updated stats for real-time dashboard update
-                    const [statsRows] = await conn.query(
-                        "SELECT total_earnings, jobs_completed FROM technicians WHERE id = ?",
-                        [technicianId]
-                    );
-
-                    const [todayRows] = await conn.query(
-                        "SELECT SUM(amount) as total FROM service_requests WHERE technician_id = ? AND status IN ('completed', 'paid') AND DATE(created_at) = CURDATE()",
-                        [technicianId]
-                    );
-
-                    const updatedStats = {
-                        totalEarnings: statsRows[0]?.total_earnings || 0,
-                        completedJobs: statsRows[0]?.jobs_completed || 0,
-                        todayEarnings: todayRows[0]?.total || 0,
-                        newJobAmount: techAmount
-                    };
-
-                    socketService.notifyTechnician(technicianId, 'dashboard:stats_update', updatedStats);
-                }
-
-                const [updatedRows] = await pool.query('SELECT * FROM service_requests WHERE id = ?', [requestId]);
-                res.json({ success: true, request: updatedRows[0] });
-
-            } catch (genErr) {
-                await conn.rollback();
-                console.error('Failed to generate invoice PDF or send email:', genErr);
-                // We still fail the request? Or succeed with warning? 
-                // Better to fail so user/admin knows invoice didn't generate.
-                return res.status(500).json({ error: 'Payment processed but invoice generation failed' });
-            }
-
-        } catch (txErr) {
-            await conn.rollback();
-            console.error('Verify payment transaction error:', txErr);
-            // Log full error details
-            if (txErr.sqlMessage) console.error("SQL Error:", txErr.sqlMessage);
-            return res.status(500).json({ error: 'Payment verification failed: ' + (txErr.message || 'Transaction error') });
-        } finally {
-            conn.release();
+        const requestRow = reqRows[0];
+        if (String(requestRow.payment_status || "").toLowerCase() === "completed" || String(requestRow.status || "").toLowerCase() === "paid") {
+            return res.json({ success: true, alreadyPaid: true });
         }
+
+        const amount = await resolveRequestBaseAmount(requestRow, pricingConfig);
+        const breakdown = computePaymentAmounts(amount, pricingConfig);
+
+        const [existing] = await pool.query(
+            `SELECT id
+             FROM payments
+             WHERE service_request_id = ? AND razorpay_order_id = ?
+             ORDER BY id DESC
+             LIMIT 1`,
+            [requestId, razorpay_order_id]
+        );
+
+        if (existing.length > 0) {
+            await pool.execute(
+                `UPDATE payments
+                 SET status = ?, amount = ?, platform_fee = ?, technician_amount = ?, is_settled = TRUE,
+                     razorpay_payment_id = ?, razorpay_signature = ?
+                 WHERE id = ?`,
+                ["PROCESSING", breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, razorpay_payment_id, razorpay_signature, existing[0].id]
+            );
+        } else {
+            await pool.execute(
+                `INSERT INTO payments (
+                    user_id, service_request_id, payment_method, status, amount,
+                    platform_fee, technician_amount, is_settled, razorpay_order_id, razorpay_payment_id, razorpay_signature
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    userId,
+                    requestId,
+                    "razorpay",
+                    "PROCESSING",
+                    breakdown.totalAmount,
+                    breakdown.platformFee,
+                    breakdown.baseAmount,
+                    true,
+                    razorpay_order_id,
+                    razorpay_payment_id,
+                    razorpay_signature
+                ]
+            );
+        }
+
+        await pool.execute(
+            "UPDATE service_requests SET payment_method = ? WHERE id = ?",
+            ["razorpay", requestId]
+        );
+
+        return res.json({
+            success: true,
+            requestId,
+            order_id: razorpay_order_id,
+            payment_id: razorpay_payment_id,
+            message: "Payment signature verified. Awaiting Razorpay webhook capture confirmation."
+        });
     } catch (err) {
         console.error("Critical Payment Error:", err);
         res.status(500).json({ error: 'Internal server error during payment verification.' });
@@ -1024,8 +983,8 @@ router.post("/:id/payment-cash", verifyUser, async (req, res) => {
         const pool = await getPool();
         const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
-            "SELECT amount, service_charge, service_type, vehicle_type, technician_id FROM service_requests WHERE id = ?",
-            [requestId]
+            "SELECT amount, service_charge, service_type, vehicle_type, technician_id FROM service_requests WHERE id = ? AND user_id = ? LIMIT 1",
+            [requestId, userId]
         );
         if (reqRows.length === 0) {
             return res.status(404).json({ error: "Request not found" });
@@ -1049,7 +1008,7 @@ router.post("/:id/payment-cash", verifyUser, async (req, res) => {
              WHERE sr.id = ?`,
             [requestId]
         );
-        const invDetails = details[0];
+        const invDetails = details[0] || {};
 
         const conn = await pool.getConnection();
 
@@ -1081,46 +1040,46 @@ router.post("/:id/payment-cash", verifyUser, async (req, res) => {
 
             // 4. Create Invoice
             const [invResult] = await conn.execute(
-                `INSERT INTO invoices (service_request_id, user_id, technician_id, amount, platform_fee, technician_amount, gst, total_amount)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                [requestId, userId, technicianId || null, breakdown.baseAmount, breakdown.platformFee, breakdown.baseAmount, 0, breakdown.totalAmount]
+                `INSERT INTO invoices (
+                    user_id, order_id, razorpay_payment_id, amount, invoice_pdf, status,
+                    service_request_id, technician_id, platform_fee, technician_amount, gst, total_amount
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    userId,
+                    `cash_${requestId}_${Date.now()}`,
+                    null,
+                    breakdown.totalAmount,
+                    null,
+                    "GENERATED",
+                    requestId,
+                    technicianId || null,
+                    breakdown.platformFee,
+                    breakdown.baseAmount,
+                    0,
+                    breakdown.totalAmount
+                ]
             );
             const invoiceId = invResult.insertId;
 
-            // Generate and save PDF invoice
+            // Generate and persist PDF invoice bytes
             try {
-                const fs = await import('fs');
-                const path = await import('path');
-                const PDFDocument = (await import('pdfkit')).default;
-                const uploadsDir = path.resolve(process.cwd(), 'server', 'uploads', 'invoices');
-                fs.mkdirSync(uploadsDir, { recursive: true });
-
-                const pdfPath = path.join(uploadsDir, `invoice_${invoiceId}.pdf`);
-                const doc = new PDFDocument({ size: 'A4' });
-                const stream = fs.createWriteStream(pdfPath);
-                doc.pipe(stream);
-
-                doc.fontSize(18).text('ResQNow Invoice (Cash Payment)', { align: 'center' });
-                doc.moveDown();
-                doc.fontSize(12).text(`Invoice ID: ${invoiceId}`);
-                doc.text(`Request ID: ${requestId}`);
-                doc.text(`Customer: ${invDetails.customer_name || 'Customer'}`);
-                doc.text(`Technician: ${invDetails.technician_name || 'Technician'}`);
-                doc.moveDown();
-                doc.text(`Service Amount: INR ${breakdown.baseAmount.toFixed(2)}`);
-                doc.text(`Platform Fee: INR ${breakdown.platformFee.toFixed(2)}`);
-                doc.text(`Technician Amount: INR ${breakdown.baseAmount.toFixed(2)}`); // Tech keeps full amount, owes platform fee
-                doc.moveDown();
-                doc.fontSize(14).text(`Total: INR ${breakdown.totalAmount.toFixed(2)}`, { underline: true });
-
-                doc.end();
-
-                await new Promise((resolve, reject) => {
-                    stream.on('finish', resolve);
-                    stream.on('error', reject);
+                const pdfBuffer = await generateInvoicePDF({
+                    invoiceId,
+                    requestId,
+                    customerName: invDetails.customer_name || "Customer",
+                    customerPhone: invDetails.customer_phone || "N/A",
+                    customerAddress: invDetails.address || "N/A",
+                    serviceType: invDetails.service_type || "Roadside Assistance",
+                    vehicleType: reqRows[0]?.vehicle_type || "Vehicle",
+                    technicianName: invDetails.technician_name || "Technician",
+                    amount: breakdown.baseAmount,
+                    platformFee: breakdown.platformFee,
+                    totalAmount: breakdown.totalAmount,
+                    paymentMethod: "cash",
+                    transactionId: `CASH_${requestId}`
                 });
 
-                await conn.execute("UPDATE invoices SET pdf_path = ? WHERE id = ?", [pdfPath, invoiceId]);
+                await conn.execute("UPDATE invoices SET invoice_pdf = ? WHERE id = ?", [pdfBuffer, invoiceId]);
 
                 // Update tech stats (earnings = full amount in cash, but they owe fee)
                 if (technicianId) {
@@ -1144,8 +1103,9 @@ router.post("/:id/payment-cash", verifyUser, async (req, res) => {
                 // Send invoice email if we have customer email
                 if (invDetails?.customer_email) {
                     try {
-                        const pdfBuffer = await fs.promises.readFile(pdfPath);
-                        mail.sendInvoiceEmail(invDetails.customer_email, {
+                        const [invoiceRows] = await pool.query("SELECT invoice_pdf FROM invoices WHERE id = ? LIMIT 1", [invoiceId]);
+                        const invoicePdf = invoiceRows[0]?.invoice_pdf || null;
+                        await mail.sendInvoiceEmail(invDetails.customer_email, {
                             requestId,
                             customerName: invDetails.customer_name || 'Customer',
                             serviceType: invDetails.service_type,
@@ -1155,9 +1115,10 @@ router.post("/:id/payment-cash", verifyUser, async (req, res) => {
                             totalAmount: breakdown.totalAmount,
                             paymentMethod: 'cash',
                             transactionId: `CASH_${Date.now()}`
-                        }, pdfBuffer).catch(console.error);
-                    } catch (pdfErr) {
-                        console.error('Failed to read/send PDF invoice:', pdfErr);
+                        }, invoicePdf);
+                        await pool.execute("UPDATE invoices SET status = ? WHERE id = ?", ["EMAILED", invoiceId]);
+                    } catch (emailErr) {
+                        console.error('Failed to send cash invoice email:', emailErr);
                     }
                 }
 
@@ -1194,26 +1155,72 @@ router.get("/:id/invoice", verifyUser, async (req, res) => {
         const userId = req.user.userId;
         const pool = await getPool();
 
-        const [rows] = await pool.query("SELECT * FROM invoices WHERE service_request_id = ? AND user_id = ? LIMIT 1", [requestId, userId]);
+        const [rows] = await pool.query(
+            `SELECT
+                id, service_request_id, user_id, order_id, razorpay_payment_id,
+                amount, platform_fee, technician_amount, gst, total_amount, status,
+                (invoice_pdf IS NOT NULL) AS has_invoice_pdf,
+                created_at
+             FROM invoices
+             WHERE service_request_id = ? AND user_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [requestId, userId]
+        );
         if (rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
 
         const inv = rows[0];
-        const pdfRelative = inv.pdf_path ? inv.pdf_path.split(path.sep).join('/').split('/server/uploads/').pop() : null;
         res.json({
             id: inv.id,
             service_request_id: inv.service_request_id,
+            order_id: inv.order_id || null,
+            razorpay_payment_id: inv.razorpay_payment_id || null,
             amount: parseFloat(inv.amount || 0),
             platform_fee: parseFloat(inv.platform_fee || 0),
             technician_amount: parseFloat(inv.technician_amount || 0),
             gst: parseFloat(inv.gst || 0),
             total_amount: parseFloat(inv.total_amount || 0),
-            pdf_path: inv.pdf_path || null,
-            pdf_url: pdfRelative ? `/uploads/${pdfRelative}` : null,
+            status: inv.status || "GENERATED",
+            pdf_available: !!inv.has_invoice_pdf,
+            pdf_url: inv.has_invoice_pdf ? `/api/service-requests/${requestId}/invoice/pdf` : null,
             created_at: inv.created_at
         });
     } catch (err) {
         console.error('[Invoices] Error fetching invoice:', err);
         res.status(500).json({ error: 'Failed to fetch invoice' });
+    }
+});
+
+router.get("/:id/invoice/pdf", verifyUser, async (req, res) => {
+    try {
+        const requestId = req.params.id;
+        const userId = req.user.userId;
+        const pool = await getPool();
+
+        const [rows] = await pool.query(
+            `SELECT id, order_id, invoice_pdf
+             FROM invoices
+             WHERE service_request_id = ? AND user_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [requestId, userId]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: "Invoice not found" });
+        }
+
+        const invoice = rows[0];
+        if (!invoice.invoice_pdf) {
+            return res.status(404).json({ error: "Invoice PDF not available" });
+        }
+
+        const fileName = `invoice_${invoice.order_id || requestId}.pdf`;
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename=\"${fileName}\"`);
+        return res.send(invoice.invoice_pdf);
+    } catch (err) {
+        console.error("[Invoices] Error fetching invoice PDF:", err);
+        return res.status(500).json({ error: "Failed to fetch invoice PDF" });
     }
 });
 
