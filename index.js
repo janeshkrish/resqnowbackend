@@ -218,10 +218,6 @@ process.on("uncaughtException", (err) => {
 async function startServer() {
   validateEnvironmentOrThrow();
   logEnvironmentSummary();
-  const mailerReady = await verifyMailerConnection();
-  if (!mailerReady) {
-    throw new Error("SMTP transporter verification failed during startup.");
-  }
 
   await bootstrapDatabase();
   dbState.ready = true;
@@ -241,6 +237,13 @@ async function startServer() {
   console.log(`Google Callback URL: ${getGoogleCallbackUrl()}`);
   console.log(`Allowed Origin: ${String(process.env.FRONTEND_URL || getFrontendUrl() || "")}`);
   console.log("========================================\n");
+
+  // Mail connectivity should not block API startup on Render; log and continue if SMTP is unreachable.
+  void verifyMailerConnection().then((mailerReady) => {
+    if (!mailerReady) {
+      console.error("[Mailer] Connectivity check failed after startup. API is running, but email sending may fail.");
+    }
+  });
 }
 
 startServer().catch((err) => {
