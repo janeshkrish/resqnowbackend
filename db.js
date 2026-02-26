@@ -139,6 +139,24 @@ export async function ensureOtpRequestsTable() {
   await p.execute(OTP_REQUESTS_TABLE_SQL);
 }
 
+const OTP_RATE_LIMITS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS otp_rate_limits (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  otp_request_count INT NOT NULL DEFAULT 0,
+  otp_last_request_time DATETIME NULL,
+  otp_window_start_time DATETIME NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_otp_rate_limits_email (email)
+)
+`.trim();
+
+export async function ensureOtpRateLimitsTable() {
+  const p = await getPool();
+  await p.execute(OTP_RATE_LIMITS_TABLE_SQL);
+}
+
 const SERVICE_REQUESTS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS service_requests (
   id INT AUTO_INCREMENT PRIMARY KEY,

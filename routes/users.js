@@ -105,10 +105,107 @@ function maskEmail(email) {
 }
 
 const OTP_TTL_MINUTES = toPositiveInt(process.env.OTP_TTL_MINUTES, 5);
-const OTP_RESEND_COOLDOWN_SECONDS = toPositiveInt(process.env.OTP_RESEND_COOLDOWN_SECONDS, 45);
-const OTP_DAILY_LIMIT = toPositiveInt(process.env.OTP_DAILY_LIMIT, 12);
+const OTP_MAX_REQUESTS_PER_HOUR = 3;
+const OTP_COOLDOWN_SECONDS = 60;
+const OTP_HOUR_WINDOW_SECONDS = 60 * 60;
 const OTP_DEBUG_ROUTE_ENABLED = String(process.env.OTP_DEBUG_ROUTE_ENABLED || "").toLowerCase() === "true";
 const OTP_DEBUG_TOKEN = String(process.env.OTP_DEBUG_TOKEN || "").trim();
+
+function toEpochMs(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  const ms = date.getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+async function enforceOtpRateLimit(pool, normalizedEmail) {
+  const now = new Date();
+  const nowMs = now.getTime();
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    // Ensure a row exists for this email before locking it.
+    await connection.execute(
+      `INSERT INTO otp_rate_limits (email, otp_request_count, otp_last_request_time, otp_window_start_time)
+       VALUES (?, 0, NULL, NULL)
+       ON DUPLICATE KEY UPDATE email = VALUES(email)`,
+      [normalizedEmail]
+    );
+
+    const [rows] = await connection.query(
+      `SELECT otp_request_count, otp_last_request_time, otp_window_start_time
+       FROM otp_rate_limits
+       WHERE email = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [normalizedEmail]
+    );
+
+    const row = rows[0] || {};
+    let count = Number(row.otp_request_count || 0);
+    const lastRequestMs = toEpochMs(row.otp_last_request_time);
+    let windowStartMs = toEpochMs(row.otp_window_start_time);
+
+    if (windowStartMs == null) {
+      windowStartMs = lastRequestMs ?? nowMs;
+    }
+
+    if (lastRequestMs != null) {
+      const secondsSinceLastRequest = Math.floor((nowMs - lastRequestMs) / 1000);
+      if (secondsSinceLastRequest < OTP_COOLDOWN_SECONDS) {
+        const retryAfterSeconds = OTP_COOLDOWN_SECONDS - secondsSinceLastRequest;
+        await connection.rollback();
+        return {
+          allowed: false,
+          retryAfterSeconds,
+          error: `Please wait ${retryAfterSeconds} seconds before requesting another OTP.`,
+        };
+      }
+    }
+
+    const windowElapsedSeconds = Math.floor((nowMs - windowStartMs) / 1000);
+    if (windowElapsedSeconds >= OTP_HOUR_WINDOW_SECONDS) {
+      count = 0;
+      windowStartMs = nowMs;
+    }
+
+    if (count >= OTP_MAX_REQUESTS_PER_HOUR) {
+      const retryAfterSeconds = Math.max(1, OTP_HOUR_WINDOW_SECONDS - windowElapsedSeconds);
+      await connection.rollback();
+      return {
+        allowed: false,
+        retryAfterSeconds,
+        error: "Too many OTP requests. Please try again later.",
+      };
+    }
+
+    const nextCount = count + 1;
+    await connection.execute(
+      `UPDATE otp_rate_limits
+       SET otp_request_count = ?, otp_last_request_time = ?, otp_window_start_time = ?
+       WHERE email = ?`,
+      [nextCount, now, new Date(windowStartMs), normalizedEmail]
+    );
+
+    await connection.commit();
+    return {
+      allowed: true,
+      requestCount: nextCount,
+      lastRequestTime: now,
+    };
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch {
+      // ignore rollback errors; original error is more important.
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
 
 async function handleSendOtp(req, res, { debug = false } = {}) {
   const requestId = buildRequestId(req);
@@ -157,34 +254,14 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
     }
 
     const pool = await db.getPool();
-
-    const [recentRows] = await pool.query(
-      "SELECT created_at FROM otp_requests WHERE email = ? ORDER BY created_at DESC LIMIT 1",
-      [normalizedEmail]
-    );
-    if (recentRows.length > 0) {
-      const lastCreatedAtMs = new Date(recentRows[0].created_at).getTime();
-      if (!Number.isNaN(lastCreatedAtMs)) {
-        const secondsSinceLastOtp = Math.floor((Date.now() - lastCreatedAtMs) / 1000);
-        if (secondsSinceLastOtp < OTP_RESEND_COOLDOWN_SECONDS) {
-          const waitSeconds = OTP_RESEND_COOLDOWN_SECONDS - secondsSinceLastOtp;
-          return res.status(429).json({
-            success: false,
-            error: `Please wait ${waitSeconds} seconds before requesting another OTP.`,
-          });
-        }
+    const rateLimit = await enforceOtpRateLimit(pool, normalizedEmail);
+    if (!rateLimit.allowed) {
+      if (rateLimit.retryAfterSeconds) {
+        res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
       }
-    }
-
-    const [dailyCountRows] = await pool.query(
-      "SELECT COUNT(*) AS total FROM otp_requests WHERE email = ? AND created_at >= (NOW() - INTERVAL 1 DAY)",
-      [normalizedEmail]
-    );
-    const dailyCount = Number(dailyCountRows[0]?.total || 0);
-    if (dailyCount >= OTP_DAILY_LIMIT) {
       return res.status(429).json({
         success: false,
-        error: "OTP request limit reached for today. Please try again tomorrow.",
+        error: rateLimit.error,
       });
     }
 
