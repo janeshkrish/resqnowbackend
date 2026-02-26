@@ -14,6 +14,13 @@ import uploadRouter from "./routes/upload.js";
 import vehiclesRouter from "./routes/vehicles.js";
 import paymentsRouter, { razorpayWebhookHandler } from "./routes/payments.js";
 import chatbotRouter from "./routes/chatbot.js";
+import adminExtendedDashboardRouter from "./routes/adminExtended.dashboard.js";
+import adminExtendedRequestsRouter from "./routes/adminExtended.requests.js";
+import adminExtendedTechniciansRouter from "./routes/adminExtended.technicians.js";
+import adminExtendedFinanceRouter from "./routes/adminExtended.finance.js";
+import adminExtendedAnalyticsRouter from "./routes/adminExtended.analytics.js";
+import adminExtendedNotificationsRouter from "./routes/adminExtended.notifications.js";
+import adminExtendedComplaintsRouter from "./routes/adminExtended.complaints.js";
 
 import {
   getApiBaseUrl,
@@ -135,6 +142,13 @@ function createApp() {
   app.use("/api/payments", paymentsRouter);
   app.use("/api/vehicles", vehiclesRouter);
   app.use("/api/chatbot", chatbotRouter);
+  app.use("/api/admin-extended", adminExtendedDashboardRouter);
+  app.use("/api/admin-extended", adminExtendedRequestsRouter);
+  app.use("/api/admin-extended", adminExtendedTechniciansRouter);
+  app.use("/api/admin-extended", adminExtendedFinanceRouter);
+  app.use("/api/admin-extended", adminExtendedAnalyticsRouter);
+  app.use("/api/admin-extended", adminExtendedNotificationsRouter);
+  app.use("/api/admin-extended", adminExtendedComplaintsRouter);
 
   app.get("/health", (_req, res) => {
     return res.status(200).send("OK");
