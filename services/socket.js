@@ -1,5 +1,6 @@
 import { Server } from "socket.io";
 import { isOriginAllowed } from "../config/network.js";
+import { notificationService } from "./notificationService.js";
 
 class SocketService {
   constructor() {
@@ -66,6 +67,11 @@ class SocketService {
   notifyTechnician(technicianId, event, data) {
     if (!this.io || !technicianId) return;
     this.io.to(`technician_${String(technicianId)}`).emit(event, data);
+
+    // Also send push notification
+    notificationService.sendPushNotification(technicianId, 'technician', event, data).catch(err => {
+      console.error("[SocketService] Push notification error:", err);
+    });
   }
 
   notifyUser(userId, event, data) {
@@ -75,6 +81,11 @@ class SocketService {
     if (data?.requestId) {
       this.io.to(`request_${String(data.requestId)}`).emit(event, data);
     }
+
+    // Also send push notification
+    notificationService.sendPushNotification(userId, 'user', event, data).catch(err => {
+      console.error("[SocketService] Push notification error:", err);
+    });
   }
 
   notifyAllTechnicians(event, data) {

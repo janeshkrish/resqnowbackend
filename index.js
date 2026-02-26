@@ -21,6 +21,7 @@ import adminExtendedFinanceRouter from "./routes/adminExtended.finance.js";
 import adminExtendedAnalyticsRouter from "./routes/adminExtended.analytics.js";
 import adminExtendedNotificationsRouter from "./routes/adminExtended.notifications.js";
 import adminExtendedComplaintsRouter from "./routes/adminExtended.complaints.js";
+import notificationsRouter from "./routes/notifications.js";
 
 import {
   getApiBaseUrl,
@@ -149,6 +150,7 @@ function createApp() {
   app.use("/api/admin-extended", adminExtendedAnalyticsRouter);
   app.use("/api/admin-extended", adminExtendedNotificationsRouter);
   app.use("/api/admin-extended", adminExtendedComplaintsRouter);
+  app.use("/api/notifications", notificationsRouter);
 
   app.get("/health", (_req, res) => {
     return res.status(200).send("OK");

@@ -328,6 +328,23 @@ export async function ensureUserVehiclesTable() {
   await addColumnIfNotExists(p, 'user_vehicles', "status VARCHAR(32) DEFAULT 'ready'");
 }
 
+const DEVICE_TOKENS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS device_tokens (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  user_type ENUM('user', 'technician') NOT NULL,
+  token VARCHAR(512) NOT NULL UNIQUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_user (user_id, user_type)
+)
+`.trim();
+
+export async function ensureDeviceTokensTable() {
+  const p = await getPool();
+  await p.execute(DEVICE_TOKENS_TABLE_SQL);
+}
+
 const PAYMENTS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS payments (
   id INT AUTO_INCREMENT PRIMARY KEY,
