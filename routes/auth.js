@@ -17,7 +17,7 @@ if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
 
 // Always use normalized callback URL to avoid redirect_uri mismatches caused by trailing slashes.
 const getRedirectUri = () => {
-    return "https://resqnowbackend.onrender.com/auth/google/callback";
+    return getGoogleCallbackUrl();
 };
 
 function ensureGoogleAuthConfigured(res) {
@@ -56,11 +56,9 @@ router.get("/google/url", (req, res) => {
 
     const authorizeUrl = oAuth2Client.generateAuthUrl({
         access_type: "offline",
-        scope: [
-            "https://www.googleapis.com/auth/userinfo.profile",
-            "https://www.googleapis.com/auth/userinfo.email",
-        ],
-        prompt: "consent",
+        scope: ["openid", "email", "profile"],
+        include_granted_scopes: true,
+        prompt: "select_account",
     });
 
     res.json({ url: authorizeUrl, redirectUri });
@@ -133,14 +131,15 @@ router.get("/google/callback", async (req, res) => {
         // We need to know where the frontend is.
         // Use referrer or env var.
         const frontendUrl = getFrontendUrl();
-        // Append token as query param
-        const target = `${frontendUrl}/auth/success?token=${token}`;
-
-        res.redirect(target);
+        const target = new URL("/auth/success", `${frontendUrl}/`);
+        target.searchParams.set("token", token);
+        return res.redirect(target.toString());
 
     } catch (err) {
         console.error("[Auth] Google Callback Error:", err);
-        res.redirect(`${getFrontendUrl()}/auth/failed?error=google_auth_failed`);
+        const target = new URL("/auth/failed", `${getFrontendUrl()}/`);
+        target.searchParams.set("error", "google_auth_failed");
+        return res.redirect(target.toString());
     }
 });
 
