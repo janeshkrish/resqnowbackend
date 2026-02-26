@@ -81,12 +81,65 @@ const normalizeUserSettings = (existingValue, patchValue = null) => {
   return merged;
 };
 
-// 1. Send OTP (Step 1 of Registration)
-router.post("/send-otp", async (req, res) => {
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function toPositiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (Number.isNaN(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function buildRequestId(req) {
+  const incoming = String(req.get("x-request-id") || "").trim();
+  if (incoming) return incoming;
+  return `otp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function maskEmail(email) {
+  const value = String(email || "").trim();
+  if (!value || !value.includes("@")) return "";
+  const [name, domain] = value.split("@");
+  if (!name || !domain) return "";
+  if (name.length < 3) return `${name[0] || "*"}***@${domain}`;
+  return `${name.slice(0, 2)}***@${domain}`;
+}
+
+const OTP_TTL_MINUTES = toPositiveInt(process.env.OTP_TTL_MINUTES, 5);
+const OTP_RESEND_COOLDOWN_SECONDS = toPositiveInt(process.env.OTP_RESEND_COOLDOWN_SECONDS, 45);
+const OTP_DAILY_LIMIT = toPositiveInt(process.env.OTP_DAILY_LIMIT, 12);
+const OTP_DEBUG_ROUTE_ENABLED = String(process.env.OTP_DEBUG_ROUTE_ENABLED || "").toLowerCase() === "true";
+const OTP_DEBUG_TOKEN = String(process.env.OTP_DEBUG_TOKEN || "").trim();
+
+async function handleSendOtp(req, res, { debug = false } = {}) {
+  const requestId = buildRequestId(req);
+  const startedAt = Date.now();
+  const clientIp = req.ip || req.connection?.remoteAddress || "unknown";
+
   try {
     const { name, email, password } = req.body;
     const normalizedEmail = (email || "").trim().toLowerCase();
     const trimmedName = (name || "").trim();
+
+    if (debug) {
+      console.log("[OTP][DEBUG] Incoming request", {
+        requestId,
+        clientIp,
+        hasName: !!trimmedName,
+        hasEmail: !!normalizedEmail,
+        hasPassword: !!password,
+        email: maskEmail(normalizedEmail),
+        headers: {
+          origin: req.get("origin") || null,
+          userAgent: req.get("user-agent") || null,
+        },
+      });
+    } else {
+      console.log("[OTP] Request received", {
+        requestId,
+        clientIp,
+        email: maskEmail(normalizedEmail),
+      });
+    }
 
     if (!trimmedName || !normalizedEmail || !password) {
       return res.status(400).json({ error: "Name, email and password are required." });
@@ -94,60 +147,159 @@ router.post("/send-otp", async (req, res) => {
     if (password.length < 6) {
       return res.status(400).json({ error: "Password must be at least 6 characters." });
     }
-
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(normalizedEmail)) {
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
       return res.status(400).json({ error: "Invalid email format." });
     }
 
-    // Check if user already exists
     const existingUser = await db.query("SELECT id FROM users WHERE email = ? LIMIT 1", [normalizedEmail]);
     if (existingUser.length > 0) {
       return res.status(409).json({ error: "This email is already registered. Please log in." });
     }
 
-    // Generate 6-digit OTP
+    const pool = await db.getPool();
+
+    const [recentRows] = await pool.query(
+      "SELECT created_at FROM otp_requests WHERE email = ? ORDER BY created_at DESC LIMIT 1",
+      [normalizedEmail]
+    );
+    if (recentRows.length > 0) {
+      const lastCreatedAtMs = new Date(recentRows[0].created_at).getTime();
+      if (!Number.isNaN(lastCreatedAtMs)) {
+        const secondsSinceLastOtp = Math.floor((Date.now() - lastCreatedAtMs) / 1000);
+        if (secondsSinceLastOtp < OTP_RESEND_COOLDOWN_SECONDS) {
+          const waitSeconds = OTP_RESEND_COOLDOWN_SECONDS - secondsSinceLastOtp;
+          return res.status(429).json({
+            success: false,
+            error: `Please wait ${waitSeconds} seconds before requesting another OTP.`,
+          });
+        }
+      }
+    }
+
+    const [dailyCountRows] = await pool.query(
+      "SELECT COUNT(*) AS total FROM otp_requests WHERE email = ? AND created_at >= (NOW() - INTERVAL 1 DAY)",
+      [normalizedEmail]
+    );
+    const dailyCount = Number(dailyCountRows[0]?.total || 0);
+    if (dailyCount >= OTP_DAILY_LIMIT) {
+      return res.status(429).json({
+        success: false,
+        error: "OTP request limit reached for today. Please try again tomorrow.",
+      });
+    }
+
+    const mailerCheck = await mail.verifyMailerConnectionDetailed({ requestId });
+    if (!mailerCheck.ok) {
+      console.error("[OTP] Mailer verification failed", {
+        requestId,
+        clientIp,
+        email: maskEmail(normalizedEmail),
+        reason: mailerCheck.reason,
+        snapshot: mailerCheck.snapshot,
+        error: mailerCheck.error || null,
+      });
+      return res.status(500).json({
+        success: false,
+        error: "Unable to send OTP email right now. Please try again shortly.",
+      });
+    }
+
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const otpHash = await bcrypt.hash(otp, 10);
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 mins
+    const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
 
-    const pool = await db.getPool();
-    await pool.execute(
+    const [insertResult] = await pool.execute(
       "INSERT INTO otp_requests (email, otp_hash, expires_at) VALUES (?, ?, ?)",
       [normalizedEmail, otpHash, expiresAt]
     );
+    const otpRequestId = insertResult.insertId;
 
-    // verify that mailer is available before attempting send – avoids confusing 500s when config is missing
-    try {
-      const mailerReady = await mail.verifyMailerConnection();
-      if (!mailerReady) {
-        console.error("[OTP] Email service unavailable or misconfigured.");
-        return res.status(503).json({ success: false, error: "Email service unavailable." });
-      }
-    } catch (verifyErr) {
-      console.error("[OTP] Mailer connectivity check failed:", verifyErr?.message || verifyErr);
-      // continue anyway; sendMail will throw if transporter is not usable
-    }
-
-    // Send Email
     try {
       await mail.sendMail({
         to: normalizedEmail,
         subject: "Your OTP for ResQNow",
-        html: `Hello ${trimmedName}, <br><br>Your OTP for verification is: <b>${otp}</b><br><br>It expires in 5 minutes.<br><br>Regards,<br>ResQNow Team`,
+        html: `Hello ${trimmedName},<br><br>Your OTP for verification is: <b>${otp}</b><br><br>It expires in ${OTP_TTL_MINUTES} minutes.<br><br>Regards,<br>ResQNow Team`,
       });
-      console.log(`[OTP] ✅ Sent to ${normalizedEmail}`);
-      return res.status(200).json({ success: true, message: "OTP sent to your email." });
-    } catch (mailErr) {
-      console.error("[OTP] Email send failed:", mailErr);
-      return res.status(500).json({ success: false, error: "Failed to send OTP email.", details: mailErr?.message || mailErr?.toString() || "" });
+    } catch (sendError) {
+      const smtpError = mail.getSmtpErrorDetails(sendError);
+      console.error("[OTP] SMTP send failed", {
+        requestId,
+        clientIp,
+        email: maskEmail(normalizedEmail),
+        otpRequestId,
+        smtpError,
+      });
+      try {
+        await pool.execute("DELETE FROM otp_requests WHERE id = ? LIMIT 1", [otpRequestId]);
+      } catch (cleanupError) {
+        console.error("[OTP] Failed to cleanup OTP row after SMTP failure", {
+          requestId,
+          otpRequestId,
+          cleanupError: cleanupError?.stack || cleanupError?.message || cleanupError,
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        error: "Unable to deliver OTP email at the moment. Please try again.",
+      });
     }
 
+    const durationMs = Date.now() - startedAt;
+    console.log("[OTP] Sent successfully", {
+      requestId,
+      clientIp,
+      email: maskEmail(normalizedEmail),
+      durationMs,
+    });
+
+    const responsePayload = {
+      success: true,
+      message: "OTP sent to your email.",
+    };
+
+    if (debug) {
+      responsePayload.debug = {
+        requestId,
+        durationMs,
+        mailer: mailerCheck.snapshot,
+      };
+    }
+
+    return res.status(200).json(responsePayload);
   } catch (error) {
-    console.error("SEND OTP ERROR:", error);
-    res.status(500).json({ success: false, error: "Server error.", details: error?.message || error?.toString() || "" });
+    console.error("[OTP] send-otp route failed", {
+      requestId,
+      clientIp,
+      error: error?.stack || error?.message || error,
+    });
+    const responsePayload = {
+      success: false,
+      error: "Internal server error while processing OTP request.",
+    };
+    if (debug) {
+      responsePayload.debug = {
+        requestId,
+        message: error?.message || String(error),
+      };
+    }
+    return res.status(500).json(responsePayload);
   }
+}
+
+// 1. Send OTP (Step 1 of Registration)
+router.post("/send-otp", async (req, res) => {
+  return handleSendOtp(req, res, { debug: false });
+});
+
+// Temporary production debug endpoint for OTP mail flow.
+router.post("/send-otp-debug", async (req, res) => {
+  if (!OTP_DEBUG_ROUTE_ENABLED) {
+    return res.status(404).json({ error: "Not found." });
+  }
+  if (OTP_DEBUG_TOKEN && req.get("x-debug-token") !== OTP_DEBUG_TOKEN) {
+    return res.status(403).json({ error: "Forbidden." });
+  }
+  return handleSendOtp(req, res, { debug: true });
 });
 
 // 2. Verify OTP and Create User (Step 2 of Registration)
@@ -467,3 +619,4 @@ router.post('/reviews', verifyUser, async (req, res) => {
 });
 
 export default router;
+

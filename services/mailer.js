@@ -3,6 +3,7 @@ import nodemailer from "nodemailer";
 let transporter = null;
 let verifyPromise = null;
 let transportVerified = false;
+let transporterMeta = null;
 
 function isProductionLike() {
     return (
@@ -12,6 +13,32 @@ function isProductionLike() {
     );
 }
 
+function toBool(value, defaultValue = false) {
+    const normalized = String(value ?? "").trim().toLowerCase();
+    if (!normalized) return defaultValue;
+    return normalized === "true" || normalized === "1" || normalized === "yes";
+}
+
+function toInt(value, fallback) {
+    const parsed = Number.parseInt(String(value ?? ""), 10);
+    if (Number.isNaN(parsed) || parsed <= 0) return fallback;
+    return parsed;
+}
+
+function maskEmail(value) {
+    const email = String(value || "").trim();
+    if (!email || !email.includes("@")) return "";
+    const [name, domain] = email.split("@");
+    if (!name || !domain) return "";
+    if (name.length <= 2) return `${name[0] || "*"}***@${domain}`;
+    return `${name.slice(0, 2)}***@${domain}`;
+}
+
+function normalizeHost(value, fallback = "smtp.gmail.com") {
+    const host = String(value || "").trim();
+    return host || fallback;
+}
+
 function buildMailerConfig() {
     const user = String(process.env.EMAIL_USER || "").trim();
     const pass = String(process.env.EMAIL_PASS || "").trim();
@@ -19,31 +46,30 @@ function buildMailerConfig() {
         return null;
     }
 
-    // Support both Gmail service and custom SMTP
     const smtpHost = String(process.env.SMTP_HOST || "").trim();
-    const smtpPort = String(process.env.SMTP_PORT || "").trim();
+    const smtpPort = toInt(process.env.SMTP_PORT, 587);
+    const isSecure = smtpPort === 465;
+    const tlsRejectUnauthorized = toBool(process.env.SMTP_TLS_REJECT_UNAUTHORIZED, true);
+    const smtpDebug = toBool(process.env.SMTP_DEBUG, false);
 
-    if (smtpHost && smtpPort) {
-        return {
-            host: smtpHost,
-            port: parseInt(smtpPort, 10),
-            secure: String(smtpPort) === "465",
-            auth: { user, pass },
-            user,
-        };
-    }
-
-    // Default to explicit Gmail SMTP settings instead of relying on nodemailer's
-    // "service" shorthand. This is clearer in logs and matches typical Render
-    // / Gmail setup: port 587 (STARTTLS) and secure=false.
     return {
-        host: "smtp.gmail.com",
-        port: 587,
-        secure: false,
+        host: normalizeHost(smtpHost),
+        port: smtpPort,
+        secure: isSecure,
+        requireTLS: !isSecure,
         auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS,
+            user,
+            pass,
         },
+        user,
+        tls: {
+            rejectUnauthorized: tlsRejectUnauthorized,
+        },
+        connectionTimeout: toInt(process.env.SMTP_CONNECTION_TIMEOUT_MS, 15000),
+        greetingTimeout: toInt(process.env.SMTP_GREETING_TIMEOUT_MS, 10000),
+        socketTimeout: toInt(process.env.SMTP_SOCKET_TIMEOUT_MS, 20000),
+        logger: smtpDebug,
+        debug: smtpDebug,
     };
 }
 
@@ -53,6 +79,51 @@ function getFromAddress(configUser = "") {
         configUser ||
         String(process.env.EMAIL_USER || "").trim()
     );
+}
+
+export function getMailerConfigSnapshot() {
+    const config = buildMailerConfig();
+    const user = String(process.env.EMAIL_USER || "").trim();
+    const pass = String(process.env.EMAIL_PASS || "").trim();
+
+    return {
+        configured: !!config,
+        transportVerified,
+        host: config?.host || null,
+        port: config?.port || null,
+        secure: !!config?.secure,
+        requireTLS: !!config?.requireTLS,
+        tlsRejectUnauthorized: config?.tls?.rejectUnauthorized ?? null,
+        smtpDebugEnabled: !!config?.debug,
+        emailUserSet: !!user,
+        emailPassSet: !!pass,
+        emailUserMasked: maskEmail(user),
+        emailFrom: getFromAddress(config?.user || ""),
+    };
+}
+
+export function getSmtpErrorDetails(error) {
+    const err = error || {};
+    return {
+        name: err.name || "Error",
+        message: err.message || String(err),
+        code: err.code || null,
+        command: err.command || null,
+        responseCode: err.responseCode || null,
+        response: err.response || null,
+        errno: err.errno || null,
+        syscall: err.syscall || null,
+        address: err.address || null,
+        port: err.port || null,
+        stack: err.stack || null,
+    };
+}
+
+function logSmtpError(prefix, error, extra = {}) {
+    console.error(prefix, {
+        ...extra,
+        error: getSmtpErrorDetails(error),
+    });
 }
 
 async function getTransporter() {
@@ -71,18 +142,26 @@ async function getTransporter() {
         return null;
     }
 
+    transporterMeta = {
+        host: config.host || null,
+        port: config.port || null,
+        secure: !!config.secure,
+        requireTLS: !!config.requireTLS,
+    };
+
     transporter = nodemailer.createTransport(config);
 
     verifyPromise = transporter
         .verify()
         .then(() => {
             transportVerified = true;
-            const configType = config.service ? `service=${config.service}` : `host=${config.host}:${config.port}`;
-            console.log(`[Mailer] ✅ Email transporter verified (${configType}).`);
+            console.log(`[Mailer] Email transporter verified (host=${config.host}:${config.port}).`);
         })
         .catch((err) => {
             transportVerified = false;
-            console.error("[Mailer] ❌ SMTP transporter verification failed:", err?.message || err);
+            logSmtpError("[Mailer] SMTP transporter verification failed", err, {
+                transport: transporterMeta,
+            });
             throw err;
         });
 
@@ -91,20 +170,49 @@ async function getTransporter() {
 }
 
 export async function verifyMailerConnection() {
+    const result = await verifyMailerConnectionDetailed();
+    return result.ok;
+}
+
+export async function verifyMailerConnectionDetailed(context = {}) {
+    const requestId = String(context.requestId || "").trim();
+    const snapshot = getMailerConfigSnapshot();
+
     try {
         const mailer = await getTransporter();
         if (!mailer) {
-            return false;
+            return {
+                ok: false,
+                reason: "not_configured",
+                requestId,
+                snapshot,
+            };
         }
-        return transportVerified;
-    } catch {
-        return false;
+
+        return {
+            ok: transportVerified,
+            reason: transportVerified ? "verified" : "unverified",
+            requestId,
+            snapshot: getMailerConfigSnapshot(),
+        };
+    } catch (error) {
+        logSmtpError("[Mailer] verifyMailerConnectionDetailed failed", error, {
+            requestId,
+            snapshot,
+        });
+        return {
+            ok: false,
+            reason: "verify_failed",
+            requestId,
+            snapshot,
+            error: getSmtpErrorDetails(error),
+        };
     }
 }
 
-// Simple duplicate-prevention cache to avoid sending the exact same email multiple times in a short window
-const recentEmails = new Map(); // key -> timestamp
-const EMAIL_DEDUP_WINDOW_MS = 10 * 1000; // 10 seconds
+// Simple duplicate-prevention cache to avoid sending the exact same email multiple times in a short window.
+const recentEmails = new Map();
+const EMAIL_DEDUP_WINDOW_MS = 10 * 1000;
 
 export async function sendMail({
     to,
@@ -140,10 +248,14 @@ export async function sendMail({
             replyTo,
             attachments,
         });
-        console.log(`[Mailer] ✅ Email sent to ${to} (messageId=${result.messageId || "n/a"})`);
+        console.log(`[Mailer] Email sent to ${to} (messageId=${result.messageId || "n/a"})`);
         return result;
     } catch (error) {
-        console.error("[Mailer] ❌ Error sending email:", error?.message || error);
+        logSmtpError("[Mailer] Error sending email", error, {
+            to,
+            subject,
+            transport: transporterMeta,
+        });
         throw error;
     }
 }
