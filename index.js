@@ -217,6 +217,14 @@ process.on("uncaughtException", (err) => {
 });
 
 async function startServer() {
+  // explicit early guard for email configuration to produce an immediate
+  // and clear error in Render logs if missing.
+  if (!String(process.env.EMAIL_USER || "").trim() || !String(process.env.EMAIL_PASS || "").trim()) {
+    console.error("Missing email environment variables: EMAIL_USER or EMAIL_PASS");
+    // exit so deployment platform shows a failing startup rather than intermittent 503s
+    process.exit(1);
+  }
+
   validateEnvironmentOrThrow();
   logEnvironmentSummary();
 

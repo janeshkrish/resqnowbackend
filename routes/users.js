@@ -145,8 +145,8 @@ router.post("/send-otp", async (req, res) => {
     }
 
   } catch (err) {
-    console.error("[Send OTP Error]", err?.message || err);
-    res.status(500).json({ success: false, error: "Server error.", details: err?.message || "" });
+    console.error("SEND OTP ERROR:", err);
+    res.status(500).json({ success: false, error: "Server error.", details: err?.message || err?.toString() || "" });
   }
 });
 

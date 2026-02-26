@@ -27,14 +27,19 @@ function buildMailerConfig() {
         return {
             host: smtpHost,
             port: parseInt(smtpPort, 10),
-            secure: smtpPort === "465",
+            secure: String(smtpPort) === "465",
             auth: { user, pass },
             user,
         };
     }
 
+    // Default to explicit Gmail SMTP settings instead of relying on nodemailer's
+    // "service" shorthand. This is clearer in logs and matches typical Render
+    // / Gmail setup: port 587 (STARTTLS) and secure=false.
     return {
-        service: "gmail",
+        host: "smtp.gmail.com",
+        port: 587,
+        secure: false,
         auth: { user, pass },
         user,
     };
