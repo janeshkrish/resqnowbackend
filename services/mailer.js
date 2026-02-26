@@ -22,7 +22,7 @@ function buildMailerConfig() {
     // Support both Gmail service and custom SMTP
     const smtpHost = String(process.env.SMTP_HOST || "").trim();
     const smtpPort = String(process.env.SMTP_PORT || "").trim();
-    
+
     if (smtpHost && smtpPort) {
         return {
             host: smtpHost,
@@ -40,8 +40,10 @@ function buildMailerConfig() {
         host: "smtp.gmail.com",
         port: 587,
         secure: false,
-        auth: { user, pass },
-        user,
+        auth: {
+            user: process.env.EMAIL_USER,
+            pass: process.env.EMAIL_PASS,
+        },
     };
 }
 

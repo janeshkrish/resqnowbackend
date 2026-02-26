@@ -106,7 +106,7 @@ function createApp() {
       const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
       console.log(
         `[${new Date().toISOString()}] ${requestId} ${req.method} ${req.originalUrl} ` +
-          `status=${res.statusCode} duration_ms=${durationMs.toFixed(1)} origin=${origin} ip=${req.ip}`
+        `status=${res.statusCode} duration_ms=${durationMs.toFixed(1)} origin=${origin} ip=${req.ip}`
       );
     });
     next();
@@ -135,19 +135,7 @@ function createApp() {
   app.use("/api/chatbot", chatbotRouter);
 
   app.get("/health", (_req, res) => {
-    res.json({
-      ok: true,
-      timestamp: new Date().toISOString(),
-      apiBaseUrl: getApiBaseUrl(),
-      backendPublicUrl: getBackendPublicUrl(),
-      frontendUrl: getFrontendUrl(),
-      googleCallbackUrl: getGoogleCallbackUrl(),
-      database: {
-        ready: dbState.ready,
-        lastCheckedAt: dbState.lastCheckedAt,
-        lastError: dbState.lastError,
-      },
-    });
+    return res.status(200).send("OK");
   });
 
   app.get("/ready", (_req, res) => {
@@ -219,9 +207,8 @@ process.on("uncaughtException", (err) => {
 async function startServer() {
   // explicit early guard for email configuration to produce an immediate
   // and clear error in Render logs if missing.
-  if (!String(process.env.EMAIL_USER || "").trim() || !String(process.env.EMAIL_PASS || "").trim()) {
-    console.error("Missing email environment variables: EMAIL_USER or EMAIL_PASS");
-    // exit so deployment platform shows a failing startup rather than intermittent 503s
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.error("Missing email environment variables");
     process.exit(1);
   }
 
