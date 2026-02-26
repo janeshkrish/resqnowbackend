@@ -14,6 +14,10 @@ class NotificationService {
                 const serviceAccountStr = process.env.FIREBASE_SERVICE_ACCOUNT;
                 if (serviceAccountStr) {
                     const serviceAccount = JSON.parse(serviceAccountStr);
+                    // Render/Vercel often escape \n in env vars to \\n
+                    if (serviceAccount.private_key) {
+                        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+                    }
                     admin.initializeApp({
                         credential: admin.credential.cert(serviceAccount)
                     });
