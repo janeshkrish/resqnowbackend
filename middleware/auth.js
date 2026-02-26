@@ -8,6 +8,10 @@ function getJwtSecret() {
   return secret;
 }
 
+function resolveTokenRole(payload) {
+  return String(payload?.role || payload?.type || "").trim().toLowerCase();
+}
+
 export function verifyTechnician(req, res, next) {
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith("Bearer ")) {
@@ -16,12 +20,12 @@ export function verifyTechnician(req, res, next) {
   }
   try {
     const payload = jwt.verify(auth.slice(7), getJwtSecret());
-    // console.log("[Auth] Payload:", payload);
-    if (payload.type !== "technician") {
-      console.log(`[Auth] Forbidden: Expected technician, got ${payload.type}`);
+    const role = resolveTokenRole(payload);
+    if (role !== "technician") {
+      console.log(`[Auth] Forbidden: Expected technician, got ${role || "unknown"}`);
       return res.status(403).json({ error: "Forbidden" });
     }
-    req.technicianId = payload.id;
+    req.technicianId = payload.id || payload.technicianId;
     req.technicianEmail = payload.email;
     next();
   } catch (err) {
@@ -40,9 +44,9 @@ export function verifyUser(req, res, next) {
   }
   try {
     const payload = jwt.verify(auth.slice(7), getJwtSecret());
-    if (payload.type !== "user") {
-      // Optional: STRICT check for type='user'
-      // return res.status(403).json({ error: "Forbidden" });
+    const role = resolveTokenRole(payload);
+    if (role && role !== "user" && role !== "admin") {
+      return res.status(403).json({ error: "Forbidden" });
     }
     req.user = payload;
     next();
@@ -61,9 +65,11 @@ export function verifyAdmin(req, res, next) {
   }
   try {
     const payload = jwt.verify(auth.slice(7), getJwtSecret());
-    if (payload.type !== "admin") {
+    const role = resolveTokenRole(payload);
+    if (role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
+    req.admin = payload;
     req.adminEmail = payload.email;
     next();
   } catch (err) {
@@ -82,9 +88,9 @@ export function getAdminCredentials() {
 }
 
 export function signTechnicianToken(id, email) {
-  return jwt.sign({ id, email, type: "technician" }, getJwtSecret(), { expiresIn: "7d" });
+  return jwt.sign({ id, email, type: "technician", role: "technician" }, getJwtSecret(), { expiresIn: "7d" });
 }
 
 export function signAdminToken(email) {
-  return jwt.sign({ email, type: "admin" }, getJwtSecret(), { expiresIn: "1d" });
+  return jwt.sign({ email, type: "admin", role: "admin" }, getJwtSecret(), { expiresIn: "1d" });
 }

@@ -3,8 +3,9 @@ import * as db from "../db.js";
 import * as mail from "../services/mailer.js";
 import { socketService } from "../services/socket.js";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { verifyUser } from "../middleware/auth.js";
+import { getAdminCredentials, signAdminToken, verifyUser } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -15,7 +16,7 @@ function signUserToken(userId, email) {
   if (!JWT_SECRET) {
     throw new Error("JWT is not configured.");
   }
-  return jwt.sign({ userId, email, type: "user" }, JWT_SECRET, { expiresIn: "7d" });
+  return jwt.sign({ userId, email, type: "user", role: "user" }, JWT_SECRET, { expiresIn: "7d" });
 }
 
 const DEFAULT_USER_SETTINGS = Object.freeze({
@@ -102,6 +103,23 @@ function maskEmail(email) {
   if (!name || !domain) return "";
   if (name.length < 3) return `${name[0] || "*"}***@${domain}`;
   return `${name.slice(0, 2)}***@${domain}`;
+}
+
+function secureEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left || ""), "utf8");
+  const rightBuffer = Buffer.from(String(right || ""), "utf8");
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isAdminCredentialMatch(normalizedEmail, password) {
+  const { email: adminEmail, password: adminPassword } = getAdminCredentials();
+  const normalizedAdminEmail = String(adminEmail || "").trim().toLowerCase();
+  const configuredAdminPassword = String(adminPassword || "");
+
+  if (!normalizedAdminEmail || !configuredAdminPassword) return false;
+  if (normalizedEmail !== normalizedAdminEmail) return false;
+  return secureEqual(password, configuredAdminPassword);
 }
 
 const OTP_TTL_MINUTES = toPositiveInt(process.env.OTP_TTL_MINUTES, 5);
@@ -455,13 +473,30 @@ router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     const normalizedEmail = (email || "").trim().toLowerCase();
+    const rawPassword = String(password || "");
     const clientIp = req.ip || req.connection.remoteAddress;
 
     console.log(`[AUTH LOGIN] Attempt from ${clientIp} for ${normalizedEmail}`);
 
-    if (!normalizedEmail || !password) {
+    if (!normalizedEmail || !rawPassword) {
       console.warn(`[AUTH LOGIN] Missing credentials from ${clientIp}`);
       return res.status(400).json({ error: "Email and password are required." });
+    }
+
+    if (isAdminCredentialMatch(normalizedEmail, rawPassword)) {
+      const token = signAdminToken(normalizedEmail);
+      console.log(`[AUTH LOGIN] Admin login success from ${clientIp} for ${normalizedEmail}`);
+      return res.json({
+        token,
+        role: "admin",
+        user: {
+          id: "admin",
+          name: "Admin",
+          email: normalizedEmail,
+          isVerified: true,
+          role: "admin",
+        },
+      });
     }
 
     const [user] = await db.query("SELECT * FROM users WHERE email = ? LIMIT 1", [normalizedEmail]);
@@ -482,7 +517,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: "Please login with Google." });
     }
 
-    const valid = await bcrypt.compare(password, user.password_hash);
+    const valid = await bcrypt.compare(rawPassword, user.password_hash);
     if (!valid) {
       console.warn(`[AUTH LOGIN] Invalid password for ${normalizedEmail} from ${clientIp}`);
       return res.status(401).json({ error: "Invalid email or password." });
@@ -493,11 +528,13 @@ router.post('/login', async (req, res) => {
 
     res.json({
       token,
+      role: "user",
       user: {
         id: user.id,
         name: user.full_name,
         email: user.email,
-        isVerified: true
+        isVerified: true,
+        role: "user",
       },
     });
 

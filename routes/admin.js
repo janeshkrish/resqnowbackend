@@ -28,6 +28,11 @@ router.post("/login", (req, res) => {
   });
 });
 
+// Protect every admin endpoint except /login.
+router.use((req, res, next) => {
+  return verifyAdmin(req, res, next);
+});
+
 // --- Notifications ---
 
 // 1. Get notifications stream (SSE)
@@ -45,7 +50,7 @@ router.get("/notifications/stream", (req, res) => {
 });
 
 // 2. Get notification count (unread)
-router.get("/notifications/count", verifyAdmin, async (req, res) => {
+router.get("/notifications/count", async (req, res) => {
   try {
     const pool = await db.getPool();
     // Count unread notifications
@@ -65,7 +70,7 @@ router.get("/notifications/count", verifyAdmin, async (req, res) => {
 });
 
 // 3. Get list of notifications (pagination)
-router.get("/notifications", verifyAdmin, async (req, res) => {
+router.get("/notifications", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
     const offset = parseInt(req.query.offset) || 0;
@@ -84,7 +89,7 @@ router.get("/notifications", verifyAdmin, async (req, res) => {
 });
 
 // 4. Mark as read
-router.post("/notifications/:id/read", verifyAdmin, async (req, res) => {
+router.post("/notifications/:id/read", async (req, res) => {
   try {
     const id = req.params.id;
     const pool = await db.getPool();
@@ -97,7 +102,7 @@ router.post("/notifications/:id/read", verifyAdmin, async (req, res) => {
 });
 
 // --- Analytics ---
-router.get("/analytics", verifyAdmin, async (req, res) => {
+router.get("/analytics", async (req, res) => {
   try {
     const pool = await db.getPool();
 
@@ -190,7 +195,7 @@ router.get("/analytics", verifyAdmin, async (req, res) => {
   }
 });
 
-router.get("/dispatch-audit/:requestId", verifyAdmin, async (req, res) => {
+router.get("/dispatch-audit/:requestId", async (req, res) => {
   try {
     const requestId = Number(req.params.requestId);
     if (!Number.isFinite(requestId)) {
@@ -286,7 +291,7 @@ router.get("/dispatch-audit/:requestId", verifyAdmin, async (req, res) => {
   }
 });
 
-router.get("/dispatch-matrix-audit", verifyAdmin, async (req, res) => {
+router.get("/dispatch-matrix-audit", async (req, res) => {
   try {
     const parseList = (value) =>
       String(value || "")
@@ -325,7 +330,7 @@ router.get("/dispatch-matrix-audit", verifyAdmin, async (req, res) => {
   }
 });
 
-router.post("/dispatch-retry/:requestId", verifyAdmin, async (req, res) => {
+router.post("/dispatch-retry/:requestId", async (req, res) => {
   try {
     const requestId = Number(req.params.requestId);
     if (!Number.isFinite(requestId)) {
@@ -389,7 +394,7 @@ router.post("/dispatch-retry/:requestId", verifyAdmin, async (req, res) => {
 
 // --- Technician management (admin only) ---
 
-router.get("/technicians", verifyAdmin, async (req, res) => {
+router.get("/technicians", async (req, res) => {
   try {
     const status = (req.query.status || "").toLowerCase();
     let rows;
@@ -409,7 +414,7 @@ router.get("/technicians", verifyAdmin, async (req, res) => {
   }
 });
 
-router.put("/technicians/:id", verifyAdmin, async (req, res) => {
+router.put("/technicians/:id", async (req, res) => {
   try {
     const id = req.params.id;
     const { name, email, phone, service_type, status } = req.body;
@@ -446,7 +451,7 @@ router.put("/technicians/:id", verifyAdmin, async (req, res) => {
   }
 });
 
-router.delete("/technicians/:id", verifyAdmin, async (req, res) => {
+router.delete("/technicians/:id", async (req, res) => {
   try {
     const id = req.params.id;
     const pool = await db.getPool();
@@ -463,7 +468,7 @@ router.delete("/technicians/:id", verifyAdmin, async (req, res) => {
 
 // --- User management (admin only) ---
 
-router.get("/users", verifyAdmin, async (req, res) => {
+router.get("/users", async (req, res) => {
   try {
     const rows = await db.query(
       "SELECT id, full_name, email, email_confirmed, created_at FROM users ORDER BY created_at DESC"
@@ -481,7 +486,7 @@ router.get("/users", verifyAdmin, async (req, res) => {
   }
 });
 
-router.post("/users", verifyAdmin, async (req, res) => {
+router.post("/users", async (req, res) => {
   try {
     const { name, email, password } = req.body;
     const normalizedEmail = (email || "").trim().toLowerCase();
@@ -531,7 +536,7 @@ router.post("/users", verifyAdmin, async (req, res) => {
   }
 });
 
-router.put("/users/:id", verifyAdmin, async (req, res) => {
+router.put("/users/:id", async (req, res) => {
   try {
     const id = req.params.id;
     const { name, password } = req.body;
@@ -571,7 +576,7 @@ router.put("/users/:id", verifyAdmin, async (req, res) => {
   }
 });
 
-router.delete("/users/:id", verifyAdmin, async (req, res) => {
+router.delete("/users/:id", async (req, res) => {
   try {
     const id = req.params.id;
     const pool = await db.getPool();
