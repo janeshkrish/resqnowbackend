@@ -95,6 +95,12 @@ router.post("/send-otp", async (req, res) => {
       return res.status(400).json({ error: "Password must be at least 6 characters." });
     }
 
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({ error: "Invalid email format." });
+    }
+
     // Check if user already exists
     const existingUser = await db.query("SELECT id FROM users WHERE email = ? LIMIT 1", [normalizedEmail]);
     if (existingUser.length > 0) {
@@ -112,6 +118,18 @@ router.post("/send-otp", async (req, res) => {
       [normalizedEmail, otpHash, expiresAt]
     );
 
+    // verify that mailer is available before attempting send – avoids confusing 500s when config is missing
+    try {
+      const mailerReady = await mail.verifyMailerConnection();
+      if (!mailerReady) {
+        console.error("[OTP] Email service unavailable or misconfigured.");
+        return res.status(503).json({ success: false, error: "Email service unavailable." });
+      }
+    } catch (verifyErr) {
+      console.error("[OTP] Mailer connectivity check failed:", verifyErr?.message || verifyErr);
+      // continue anyway; sendMail will throw if transporter is not usable
+    }
+
     // Send Email
     try {
       await mail.sendMail({
@@ -119,17 +137,16 @@ router.post("/send-otp", async (req, res) => {
         subject: "Your OTP for ResQNow",
         html: `Hello ${trimmedName}, <br><br>Your OTP for verification is: <b>${otp}</b><br><br>It expires in 5 minutes.<br><br>Regards,<br>ResQNow Team`,
       });
-      console.log(`[OTP] Sent to ${normalizedEmail}`);
+      console.log(`[OTP] ✅ Sent to ${normalizedEmail}`);
+      return res.status(200).json({ success: true, message: "OTP sent to your email." });
     } catch (mailErr) {
-      console.error("[OTP] Email failed", mailErr);
-      return res.status(500).json({ error: "Failed to send OTP email." });
+      console.error("[OTP] Email send failed:", mailErr);
+      return res.status(500).json({ success: false, error: "Failed to send OTP email.", details: mailErr?.message || mailErr?.toString() || "" });
     }
 
-    res.status(200).json({ message: "OTP sent to your email." });
-
   } catch (err) {
-    console.error("[Send OTP Error]", err);
-    res.status(500).json({ error: "Server error." });
+    console.error("[Send OTP Error]", err?.message || err);
+    res.status(500).json({ success: false, error: "Server error.", details: err?.message || "" });
   }
 });
 

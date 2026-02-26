@@ -48,14 +48,25 @@ npm install
 - `JWT_SECRET`
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
-- `EMAIL_USER`
-- `EMAIL_PASS`
+- `EMAIL_USER` *(Gmail address; for other providers supply the full sender address)*
+- `EMAIL_PASS` *(use an app-specific password for Gmail/Google Workspace accounts)*
+- `SMTP_HOST` and `SMTP_PORT` *(optional – both must be set together; if omitted the code falls back to the Gmail service)*
 - `RAZORPAY_KEY_ID`
 - `RAZORPAY_KEY_SECRET`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
-- `GOOGLE_CALLBACK_URL`
+- `GOOGLE_CALLBACK_URL` *(must equal `https://<backend-public-url>/auth/google/callback`)*
 - `FRONTEND_URL`
+
+> Example email block for `.env`:
+> ```
+> EMAIL_USER=youremail@gmail.com
+> EMAIL_PASS=my-app-password
+> # optional custom SMTP
+> SMTP_HOST=smtp.gmail.com
+> SMTP_PORT=587
+> ```
+> Never store your normal login password; create an app password in Google Security settings.
 
 ### Production (Render + Vercel)
 
@@ -63,6 +74,12 @@ npm install
 - `BACKEND_PUBLIC_URL=https://resqnowbackend.onrender.com`
 - `FRONTEND_URL=https://resqnow.org`
 - `FRONTEND_PUBLIC_URL=https://resqnow.org`
+
+> **Google OAuth setup:** make sure the _full_ callback URI is configured in Google Cloud (not just the domain).
+> Example authorized redirect URI in Cloud Console:
+> `https://resqnowbackend.onrender.com/auth/google/callback`
+> and match the value of `GOOGLE_CALLBACK_URL` below.
+
 - `GOOGLE_CALLBACK_URL=https://resqnowbackend.onrender.com/auth/google/callback`
 - `CORS_ALLOWED_ORIGINS=https://resqnow.org,https://www.resqnow.org`
 

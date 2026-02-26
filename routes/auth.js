@@ -15,7 +15,8 @@ if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
     console.error("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variables.");
 }
 
-const getRedirectUri = () => String(process.env.GOOGLE_CALLBACK_URL || getGoogleCallbackUrl() || "").trim();
+// Always use normalized callback URL to avoid redirect_uri mismatches caused by trailing slashes.
+const getRedirectUri = () => String(getGoogleCallbackUrl() || "").trim();
 
 function ensureGoogleAuthConfigured(res) {
     if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
@@ -24,6 +25,11 @@ function ensureGoogleAuthConfigured(res) {
     }
     if (!JWT_SECRET) {
         res.status(503).json({ error: "JWT is not configured." });
+        return false;
+    }
+    const redirect = getRedirectUri();
+    if (!redirect) {
+        res.status(503).json({ error: "Google callback URI is not configured." });
         return false;
     }
     return true;
@@ -38,6 +44,9 @@ router.get("/google/url", (req, res) => {
 
     const redirectUri = getRedirectUri();
     console.log("[Auth] Generating Google Auth URL with redirect:", redirectUri);
+    if (!redirectUri.endsWith("/auth/google/callback")) {
+        console.warn("[Auth] computed redirect URI does not include expected callback path:", redirectUri);
+    }
 
     const oAuth2Client = new OAuth2Client(
         GOOGLE_CLIENT_ID,
@@ -54,7 +63,7 @@ router.get("/google/url", (req, res) => {
         prompt: "consent",
     });
 
-    res.json({ url: authorizeUrl });
+    res.json({ url: authorizeUrl, redirectUri });
 });
 
 /**
@@ -70,6 +79,9 @@ router.get("/google/callback", async (req, res) => {
     try {
         const redirectUri = getRedirectUri();
         console.log("[Auth] Verifying code with redirect:", redirectUri);
+        if (!redirectUri.endsWith("/auth/google/callback")) {
+            console.warn("[Auth] callback URI during verification does not include expected path:", redirectUri);
+        }
 
         const oAuth2Client = new OAuth2Client(
             GOOGLE_CLIENT_ID,

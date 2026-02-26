@@ -85,6 +85,13 @@ export function validateEnvironmentOrThrow() {
   const backendPublicUrl = normalizeUrl(getBackendPublicUrl());
   const googleCallbackUrl = normalizeUrl(getGoogleCallbackUrl());
 
+  // if custom SMTP settings are partially provided, that's a configuration error
+  const smtpHost = String(process.env.SMTP_HOST || "").trim();
+  const smtpPort = String(process.env.SMTP_PORT || "").trim();
+  if ((smtpHost && !smtpPort) || (smtpPort && !smtpHost)) {
+    throw new Error("Both SMTP_HOST and SMTP_PORT must be set together or omitted.");
+  }
+
   const frontend = parseUrlOrThrow("FRONTEND_URL", frontendUrl);
   const backend = parseUrlOrThrow("BACKEND_URL/BACKEND_PUBLIC_URL", backendPublicUrl);
   const googleCallback = parseUrlOrThrow("GOOGLE_CALLBACK_URL", googleCallbackUrl);

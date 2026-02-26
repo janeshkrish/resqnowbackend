@@ -77,8 +77,28 @@ export function getApiBaseUrl() {
 }
 
 export function getGoogleCallbackUrl() {
-  const explicit = normalizeUrl(process.env.GOOGLE_CALLBACK_URL);
-  if (explicit) return explicit;
+  let explicit = normalizeUrl(process.env.GOOGLE_CALLBACK_URL);
+  if (explicit) {
+    // make sure we always include the standard callback path; if the value is just the
+    // domain the developer probably forgot to append it.  append automatically so the
+    // API still works, but log a warning to make the misconfiguration visible.
+    const expectedSuffix = "/auth/google/callback";
+    if (!explicit.endsWith(expectedSuffix)) {
+      // simple domain case (no path)
+      if (/^https?:\/\/[^\/]+$/i.test(explicit)) {
+        console.warn(
+          `[network] GOOGLE_CALLBACK_URL appears to be missing callback path, auto‑appending ${expectedSuffix}`
+        );
+        explicit = explicit + expectedSuffix;
+      } else {
+        // custom path provided that doesn't match convention; keep as‑is but log
+        console.warn(
+          `[network] GOOGLE_CALLBACK_URL does not end with ${expectedSuffix}; using provided value ${explicit}`
+        );
+      }
+    }
+    return explicit;
+  }
   return `${getBackendPublicUrl()}/auth/google/callback`;
 }
 

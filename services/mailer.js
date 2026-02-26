@@ -19,6 +19,20 @@ function buildMailerConfig() {
         return null;
     }
 
+    // Support both Gmail service and custom SMTP
+    const smtpHost = String(process.env.SMTP_HOST || "").trim();
+    const smtpPort = String(process.env.SMTP_PORT || "").trim();
+    
+    if (smtpHost && smtpPort) {
+        return {
+            host: smtpHost,
+            port: parseInt(smtpPort, 10),
+            secure: smtpPort === "465",
+            auth: { user, pass },
+            user,
+        };
+    }
+
     return {
         service: "gmail",
         auth: { user, pass },
@@ -50,20 +64,18 @@ async function getTransporter() {
         return null;
     }
 
-    transporter = nodemailer.createTransport({
-        service: config.service,
-        auth: config.auth,
-    });
+    transporter = nodemailer.createTransport(config);
 
     verifyPromise = transporter
         .verify()
         .then(() => {
             transportVerified = true;
-            console.log(`[Mailer] Email transporter verified (service=${config.service}).`);
+            const configType = config.service ? `service=${config.service}` : `host=${config.host}:${config.port}`;
+            console.log(`[Mailer] ✅ Email transporter verified (${configType}).`);
         })
         .catch((err) => {
             transportVerified = false;
-            console.error("[Mailer] SMTP transporter verification failed:", err?.message || err);
+            console.error("[Mailer] ❌ SMTP transporter verification failed:", err?.message || err);
             throw err;
         });
 
@@ -106,7 +118,7 @@ export async function sendMail({
     const now = Date.now();
     const last = recentEmails.get(key);
     if (last && (now - last) < EMAIL_DEDUP_WINDOW_MS) {
-        console.warn(`Duplicate email suppressed to ${to} for '${subject}'`);
+        console.warn(`[Mailer] Duplicate email suppressed to ${to} for '${subject}'`);
         return;
     }
     recentEmails.set(key, now);
@@ -121,10 +133,10 @@ export async function sendMail({
             replyTo,
             attachments,
         });
-        console.log(`Email sent to ${to} (messageId=${result.messageId || "n/a"})`);
+        console.log(`[Mailer] ✅ Email sent to ${to} (messageId=${result.messageId || "n/a"})`);
         return result;
     } catch (error) {
-        console.error("Error sending email:", error?.message || error);
+        console.error("[Mailer] ❌ Error sending email:", error?.message || error);
         throw error;
     }
 }
