@@ -267,13 +267,15 @@ export const jobDispatchService = {
                 address: jobRequest.address,
                 customerName: jobRequest.contact_name || "Valued Customer",
                 amount: estimatedAmount,
+                priceAmount: estimatedAmount,
                 distance: t.distanceText,
+                locationDistance: t.distanceText,
                 eta: t.etaText,
                 expiresIn: 20 // 20 seconds countdown
             };
 
-            // Emit to technician room
-            socketService.io.to(`technician_${t.id}`).emit("job_offer", offerPayload);
+            // Emit to technician room and push notification
+            socketService.notifyTechnician(t.id, "job_offer", offerPayload);
             socketService.io.to(`technician_${t.id}`).emit("job:list_update", {
                 requestId: jobRequest.id,
                 action: "created"

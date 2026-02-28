@@ -54,6 +54,156 @@ const toPositiveMoney = (value) => {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const normalizeCouponCode = (value) => String(value || "").trim().toUpperCase();
+
+const toPercentOrZero = (value) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+    return Math.min(1, Math.max(0, parsed));
+};
+
+const isRequestAlreadyPaid = (requestRow) => {
+    const status = String(requestRow?.status || "").toLowerCase();
+    const paymentStatus = String(requestRow?.payment_status || "").toLowerCase();
+    return status === "paid" || paymentStatus === "completed";
+};
+
+function getStoredDiscountOptions(requestRow) {
+    const storedPercent = toPercentOrZero(requestRow?.applied_discount_percent);
+    const storedAmount = Number(requestRow?.applied_discount_amount);
+    if (Number.isFinite(storedAmount) && storedAmount > 0) {
+        return {
+            platformFeeDiscountAmount: storedAmount,
+            platformFeeDiscountPercent: storedPercent,
+        };
+    }
+    if (storedPercent > 0) {
+        return {
+            platformFeeDiscountPercent: storedPercent,
+        };
+    }
+    return {};
+}
+
+async function evaluateWelcomeCouponForRequest({
+    pool,
+    userId,
+    requestRow,
+    pricingConfig,
+    couponCode,
+    preserveExistingApplied = false,
+}) {
+    const configuredCode = normalizeCouponCode(pricingConfig?.welcome_coupon_code);
+    const providedCode = normalizeCouponCode(couponCode);
+    const couponDiscountPercent = toPercentOrZero(pricingConfig?.welcome_coupon_discount_percent);
+    const maxUsesPerUser = Math.max(
+        0,
+        Number.parseInt(String(pricingConfig?.welcome_coupon_max_uses_per_user || 0), 10) || 0
+    );
+    const couponActive =
+        Boolean(pricingConfig?.welcome_coupon_active) &&
+        Boolean(configuredCode) &&
+        couponDiscountPercent > 0 &&
+        maxUsesPerUser > 0;
+    const requestId = Number(requestRow?.id);
+
+    const [completedRows] = await pool.query(
+        `SELECT COUNT(*) AS count
+         FROM service_requests
+         WHERE user_id = ?
+           AND id <> ?
+           AND (LOWER(COALESCE(payment_status, '')) = 'completed' OR LOWER(COALESCE(status, '')) = 'paid')`,
+        [userId, requestId]
+    );
+    const completedServicesCount = Number(completedRows?.[0]?.count || 0);
+
+    let reservedCouponCount = 0;
+    if (configuredCode) {
+        const [reservedRows] = await pool.query(
+            `SELECT COUNT(*) AS count
+             FROM service_requests
+             WHERE user_id = ?
+               AND id <> ?
+               AND LOWER(COALESCE(status, '')) <> 'cancelled'
+               AND LOWER(COALESCE(payment_status, '')) <> 'completed'
+               AND UPPER(COALESCE(applied_coupon_code, '')) = ?`,
+            [userId, requestId, configuredCode]
+        );
+        reservedCouponCount = Number(reservedRows?.[0]?.count || 0);
+    }
+
+    const remainingEligibleUses = Math.max(
+        0,
+        maxUsesPerUser - completedServicesCount - reservedCouponCount
+    );
+
+    const existingAppliedCode = normalizeCouponCode(requestRow?.applied_coupon_code);
+    const hasExistingCouponReservation =
+        existingAppliedCode === configuredCode &&
+        toPercentOrZero(requestRow?.applied_discount_percent) > 0 &&
+        String(requestRow?.status || "").toLowerCase() !== "cancelled";
+
+    let isApplied = false;
+    let reason = null;
+
+    if (!providedCode) {
+        if (preserveExistingApplied && hasExistingCouponReservation && couponActive) {
+            isApplied = true;
+        }
+    } else if (!couponActive) {
+        reason = "This coupon is currently inactive.";
+    } else if (providedCode !== configuredCode) {
+        reason = "Invalid coupon code.";
+    } else if (!hasExistingCouponReservation && remainingEligibleUses <= 0) {
+        reason = `Coupon is valid only for your first ${maxUsesPerUser} paid services.`;
+    } else {
+        isApplied = true;
+    }
+
+    return {
+        active: couponActive,
+        configuredCode,
+        providedCode,
+        discountPercent: couponDiscountPercent,
+        maxUsesPerUser,
+        completedServicesCount,
+        reservedCouponCount,
+        remainingEligibleUses,
+        hasExistingCouponReservation,
+        isApplied,
+        appliedCode: isApplied ? configuredCode : null,
+        reason,
+    };
+}
+
+async function buildServiceRequestPaymentQuote({
+    pool,
+    requestRow,
+    pricingConfig,
+    couponCode = "",
+    preserveExistingApplied = false,
+}) {
+    const userId = Number(requestRow?.user_id);
+    const baseAmount = await resolveRequestBaseAmount(requestRow, pricingConfig);
+    const coupon = await evaluateWelcomeCouponForRequest({
+        pool,
+        userId,
+        requestRow,
+        pricingConfig,
+        couponCode,
+        preserveExistingApplied,
+    });
+
+    const breakdown = computePaymentAmounts(baseAmount, pricingConfig, {
+        platformFeeDiscountPercent: coupon.isApplied ? coupon.discountPercent : 0,
+    });
+
+    return {
+        breakdown,
+        coupon,
+    };
+}
+
 async function resolveRequestBaseAmount(requestRow, pricingConfig) {
     const technicianId = Number(requestRow?.technician_id);
     let technicianProfile = null;
@@ -309,6 +459,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
         const [requestRows] = await conn.query(
             `SELECT sr.id, sr.user_id, sr.technician_id, sr.service_type, sr.vehicle_type, sr.amount, sr.service_charge,
                     sr.address, sr.status, sr.payment_status,
+                    sr.applied_coupon_code, sr.applied_discount_percent, sr.applied_discount_amount,
                     u.email AS customer_email, u.full_name AS customer_name, u.phone AS customer_phone,
                     t.name AS technician_name, t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
              FROM service_requests sr
@@ -333,7 +484,11 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
         const request = requestRows[0];
         const pricingConfig = await getPlatformPricingConfig();
         const baseAmount = await resolveRequestBaseAmount(request, pricingConfig);
-        const breakdown = computePaymentAmounts(baseAmount, pricingConfig);
+        const breakdown = computePaymentAmounts(
+            baseAmount,
+            pricingConfig,
+            getStoredDiscountOptions(request)
+        );
 
         const requestWasPaid = (
             String(request.status || "").toLowerCase() === "paid" ||
@@ -474,6 +629,53 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
     }
 }
 
+async function processFinalizedServicePaymentNotifications(finalized, { paymentMethod = "razorpay" } = {}) {
+    if (!finalized || !finalized.processed) return;
+    const pool = await getPool();
+
+    if (finalized.invoiceId && finalized.customerEmail && finalized.invoiceStatus !== "EMAILED") {
+        try {
+            await sendInvoiceEmailFromDatabase({
+                pool,
+                invoiceId: finalized.invoiceId,
+                toEmail: finalized.customerEmail,
+                invoiceData: finalized.invoiceData
+            });
+        } catch (emailErr) {
+            console.error("[Payments] Invoice email send failed:", emailErr);
+        }
+    }
+
+    socketService.broadcast("admin:payment_update", {
+        requestId: finalized.requestId,
+        paymentMethod,
+        status: "completed",
+        at: new Date().toISOString()
+    });
+
+    if (finalized.technicianId) {
+        socketService.notifyTechnician(finalized.technicianId, "job:status_update", {
+            requestId: finalized.requestId,
+            status: "paid"
+        });
+        socketService.notifyTechnician(finalized.technicianId, "job:list_update", {
+            requestId: finalized.requestId,
+            action: "updated"
+        });
+    }
+
+    if (finalized.userId) {
+        socketService.notifyUser(finalized.userId, "payment_completed", {
+            requestId: finalized.requestId,
+            status: "paid"
+        });
+        socketService.notifyUser(finalized.userId, "job:status_update", {
+            requestId: finalized.requestId,
+            status: "paid"
+        });
+    }
+}
+
 export async function razorpayWebhookHandler(req, res) {
     if (!RAZORPAY_WEBHOOK_SECRET) {
         return res.status(503).json({ error: "Razorpay webhook verification secret is not configured." });
@@ -528,7 +730,8 @@ export async function razorpayWebhookHandler(req, res) {
                 const pool = await getPool();
                 const pricingConfig = await getPlatformPricingConfig();
                 const [reqRows] = await pool.query(
-                    `SELECT amount, service_charge, service_type, vehicle_type, technician_id
+                    `SELECT amount, service_charge, service_type, vehicle_type, technician_id,
+                            applied_coupon_code, applied_discount_percent, applied_discount_amount
                      FROM service_requests
                      WHERE id = ? AND user_id = ?
                      LIMIT 1`,
@@ -537,7 +740,11 @@ export async function razorpayWebhookHandler(req, res) {
 
                 if (reqRows.length > 0) {
                     const baseAmount = await resolveRequestBaseAmount(reqRows[0], pricingConfig);
-                    const breakdown = computePaymentAmounts(baseAmount, pricingConfig);
+                    const breakdown = computePaymentAmounts(
+                        baseAmount,
+                        pricingConfig,
+                        getStoredDiscountOptions(reqRows[0])
+                    );
                     await upsertPendingRazorpayPayment({
                         pool,
                         userId: userIdFromNotes,
@@ -555,38 +762,7 @@ export async function razorpayWebhookHandler(req, res) {
             return res.status(200).json({ received: true, processed: false, reason: finalized.reason });
         }
 
-        const pool = await getPool();
-        if (finalized.invoiceId && finalized.customerEmail && finalized.invoiceStatus !== "EMAILED") {
-            await sendInvoiceEmailFromDatabase({
-                pool,
-                invoiceId: finalized.invoiceId,
-                toEmail: finalized.customerEmail,
-                invoiceData: finalized.invoiceData
-            });
-        }
-
-        socketService.broadcast("admin:payment_update", {
-            requestId: finalized.requestId,
-            paymentMethod: "razorpay",
-            status: "completed",
-            at: new Date().toISOString()
-        });
-        if (finalized.technicianId) {
-            socketService.notifyTechnician(finalized.technicianId, "job:status_update", {
-                requestId: finalized.requestId,
-                status: "paid"
-            });
-        }
-        if (finalized.userId) {
-            socketService.notifyUser(finalized.userId, "payment_completed", {
-                requestId: finalized.requestId,
-                status: "paid"
-            });
-            socketService.notifyUser(finalized.userId, "job:status_update", {
-                requestId: finalized.requestId,
-                status: "paid"
-            });
-        }
+        await processFinalizedServicePaymentNotifications(finalized, { paymentMethod: "razorpay" });
 
         paymentDiag("webhook_payment_captured_processed", {
             orderId,
@@ -772,6 +948,10 @@ router.get("/config", async (_req, res) => {
         res.json({
             currency: pricingConfig.currency,
             platform_fee_percent: pricingConfig.platform_fee_percent,
+            welcome_coupon_code: pricingConfig.welcome_coupon_code,
+            welcome_coupon_discount_percent: pricingConfig.welcome_coupon_discount_percent,
+            welcome_coupon_max_uses_per_user: pricingConfig.welcome_coupon_max_uses_per_user,
+            welcome_coupon_active: pricingConfig.welcome_coupon_active,
             registration_fee: pricingConfig.registration_fee,
             booking_fee: pricingConfig.booking_fee,
             pay_now_discount_percent: pricingConfig.pay_now_discount_percent,
@@ -787,28 +967,116 @@ router.get("/config", async (_req, res) => {
 
 // --- New endpoints for service_request payments ---
 
-// Create order for a specific service request
-router.post('/create-order', verifyUser, async (req, res) => {
+// Compute payment quote for a specific service request with optional coupon
+router.post('/quote', verifyUser, async (req, res) => {
     try {
-        if (!ensureRazorpayConfigured(res)) return;
-        console.log('PAYMENT REQUEST: create-order (body):', req.body);
-        const { requestId } = req.body;
+        const { requestId, couponCode, preserveExistingApplied } = req.body || {};
         const userId = req.user.userId;
         if (!requestId) return res.status(400).json({ error: 'requestId is required' });
 
         const pool = await getPool();
         const pricingConfig = await getPlatformPricingConfig();
         const [rows] = await pool.query(
-            'SELECT amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status FROM service_requests WHERE id = ? AND user_id = ?',
+            `SELECT id, user_id, amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status,
+                    applied_coupon_code, applied_discount_percent, applied_discount_amount
+             FROM service_requests
+             WHERE id = ? AND user_id = ?
+             LIMIT 1`,
             [requestId, userId]
         );
         if (rows.length === 0) return res.status(404).json({ error: 'Request not found' });
-        if (rows[0].payment_status === 'completed' || rows[0].status === 'paid') {
+
+        const requestRow = rows[0];
+        if (isRequestAlreadyPaid(requestRow)) {
             return res.status(409).json({ error: 'Request already paid' });
         }
 
-        const baseAmount = await resolveRequestBaseAmount(rows[0], pricingConfig);
-        const breakdown = computePaymentAmounts(baseAmount, pricingConfig);
+        const { breakdown, coupon } = await buildServiceRequestPaymentQuote({
+            pool,
+            requestRow,
+            pricingConfig,
+            couponCode,
+            preserveExistingApplied: preserveExistingApplied !== false,
+        });
+
+        res.json({
+            success: true,
+            request_id: Number(requestId),
+            breakdown: {
+                currency: breakdown.currency,
+                base_amount: breakdown.baseAmount,
+                platform_fee_percent: breakdown.platformFeePercent,
+                original_platform_fee: breakdown.originalPlatformFee,
+                discount_amount: breakdown.discountAmount,
+                platform_fee: breakdown.platformFee,
+                total_amount: breakdown.totalAmount,
+            },
+            coupon: {
+                active: coupon.active,
+                configured_code: coupon.configuredCode,
+                entered_code: coupon.providedCode,
+                applied_coupon_code: coupon.appliedCode,
+                is_applied: coupon.isApplied,
+                reason: coupon.reason,
+                discount_percent: coupon.discountPercent,
+                max_uses_per_user: coupon.maxUsesPerUser,
+                completed_services_count: coupon.completedServicesCount,
+                reserved_coupon_count: coupon.reservedCouponCount,
+                remaining_eligible_uses: coupon.remainingEligibleUses,
+            },
+        });
+    } catch (err) {
+        console.error('Payment quote error:', err);
+        res.status(500).json({ error: 'Failed to compute payment quote' });
+    }
+});
+
+// Create order for a specific service request
+router.post('/create-order', verifyUser, async (req, res) => {
+    try {
+        if (!ensureRazorpayConfigured(res)) return;
+        console.log('PAYMENT REQUEST: create-order (body):', req.body);
+        const { requestId, couponCode } = req.body || {};
+        const userId = req.user.userId;
+        if (!requestId) return res.status(400).json({ error: 'requestId is required' });
+
+        const pool = await getPool();
+        const pricingConfig = await getPlatformPricingConfig();
+        const [rows] = await pool.query(
+            `SELECT id, user_id, amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status,
+                    applied_coupon_code, applied_discount_percent, applied_discount_amount
+             FROM service_requests
+             WHERE id = ? AND user_id = ?`,
+            [requestId, userId]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'Request not found' });
+        if (isRequestAlreadyPaid(rows[0])) {
+            return res.status(409).json({ error: 'Request already paid' });
+        }
+
+        const requestRow = rows[0];
+        const { breakdown, coupon } = await buildServiceRequestPaymentQuote({
+            pool,
+            requestRow,
+            pricingConfig,
+            couponCode,
+            preserveExistingApplied: false,
+        });
+
+        if (coupon.providedCode && !coupon.isApplied) {
+            return res.status(400).json({
+                error: coupon.reason || "Coupon could not be applied.",
+                coupon: {
+                    active: coupon.active,
+                    configured_code: coupon.configuredCode,
+                    entered_code: coupon.providedCode,
+                    reason: coupon.reason,
+                    discount_percent: coupon.discountPercent,
+                    remaining_eligible_uses: coupon.remainingEligibleUses,
+                    max_uses_per_user: coupon.maxUsesPerUser,
+                }
+            });
+        }
 
         const options = {
             amount: Math.round(breakdown.totalAmount * 100),
@@ -829,9 +1097,12 @@ router.post('/create-order', verifyUser, async (req, res) => {
             userId,
             orderId: order.id,
             baseAmount: breakdown.baseAmount,
+            originalPlatformFee: breakdown.originalPlatformFee,
+            discountAmount: breakdown.discountAmount,
             platformFee: breakdown.platformFee,
             totalAmount: breakdown.totalAmount,
-            platformFeePercent: breakdown.platformFeePercent
+            platformFeePercent: breakdown.platformFeePercent,
+            couponCode: coupon.appliedCode || null
         });
 
         await upsertPendingRazorpayPayment({
@@ -843,17 +1114,39 @@ router.post('/create-order', verifyUser, async (req, res) => {
         });
 
         await pool.execute(
-            "UPDATE service_requests SET payment_method = ?, payment_status = ? WHERE id = ?",
-            ["razorpay", "pending", requestId]
+            `UPDATE service_requests
+             SET payment_method = ?,
+                 payment_status = ?,
+                 applied_coupon_code = ?,
+                 applied_discount_percent = ?,
+                 applied_discount_amount = ?
+             WHERE id = ?`,
+            [
+                "razorpay",
+                "pending",
+                coupon.appliedCode || null,
+                coupon.isApplied ? coupon.discountPercent : 0,
+                breakdown.discountAmount,
+                requestId
+            ]
         );
 
         // Return breakdown so frontend can display consistent info
         res.json({
             ...order,
             base_amount: breakdown.baseAmount,
+            original_platform_fee: breakdown.originalPlatformFee,
+            discount_amount: breakdown.discountAmount,
             platform_fee: breakdown.platformFee,
             platform_fee_percent: breakdown.platformFeePercent,
             total_amount: breakdown.totalAmount,
+            coupon: {
+                applied_coupon_code: coupon.appliedCode,
+                is_applied: coupon.isApplied,
+                discount_percent: coupon.discountPercent,
+                remaining_eligible_uses: coupon.remainingEligibleUses,
+                max_uses_per_user: coupon.maxUsesPerUser,
+            },
             key_id: RAZORPAY_KEY_ID
         });
     } catch (err) {
@@ -888,7 +1181,8 @@ router.post('/confirm', verifyUser, async (req, res) => {
         const authUserId = req.user.userId;
         const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
-            `SELECT amount, service_charge, service_type, vehicle_type, technician_id, user_id, status, payment_status
+            `SELECT id, amount, service_charge, service_type, vehicle_type, technician_id, user_id, status, payment_status,
+                    applied_coupon_code, applied_discount_percent, applied_discount_amount
              FROM service_requests
              WHERE id = ? AND user_id = ?
              LIMIT 1`,
@@ -897,12 +1191,16 @@ router.post('/confirm', verifyUser, async (req, res) => {
         if (reqRows.length === 0) return res.status(404).json({ error: 'Request not found' });
 
         const requestRow = reqRows[0];
-        if (String(requestRow.payment_status || "").toLowerCase() === 'completed' || String(requestRow.status || "").toLowerCase() === 'paid') {
+        if (isRequestAlreadyPaid(requestRow)) {
             return res.json({ success: true, alreadyPaid: true });
         }
 
         const baseAmount = await resolveRequestBaseAmount(requestRow, pricingConfig);
-        const breakdown = computePaymentAmounts(baseAmount, pricingConfig);
+        const breakdown = computePaymentAmounts(
+            baseAmount,
+            pricingConfig,
+            getStoredDiscountOptions(requestRow)
+        );
 
         await markClientSideVerification({
             pool,
@@ -919,11 +1217,59 @@ router.post('/confirm', verifyUser, async (req, res) => {
             ["razorpay", requestId]
         );
 
+        let finalized = await finalizeCapturedServicePayment({
+            orderId: razorpay_order_id,
+            paymentId: razorpay_payment_id
+        });
+
+        if (!finalized.processed && finalized.reason === "payment_row_not_found") {
+            await upsertPendingRazorpayPayment({
+                pool,
+                userId: authUserId,
+                requestId,
+                orderId: razorpay_order_id,
+                breakdown
+            });
+            finalized = await finalizeCapturedServicePayment({
+                orderId: razorpay_order_id,
+                paymentId: razorpay_payment_id
+            });
+        }
+
+        if (finalized.processed) {
+            await processFinalizedServicePaymentNotifications(finalized, { paymentMethod: "razorpay" });
+
+            const [updatedRows] = await pool.query(
+                "SELECT * FROM service_requests WHERE id = ? LIMIT 1",
+                [requestId]
+            );
+
+            paymentDiag("confirm_payment_finalized", {
+                requestId,
+                userId: authUserId,
+                orderId: razorpay_order_id,
+                paymentId: razorpay_payment_id,
+                duplicate: finalized.duplicate
+            });
+
+            return res.json({
+                success: true,
+                requestId,
+                order_id: razorpay_order_id,
+                payment_id: razorpay_payment_id,
+                immediateFinalization: true,
+                duplicate: finalized.duplicate,
+                request: updatedRows[0] || null,
+                message: "Payment verified and finalized successfully."
+            });
+        }
+
         paymentDiag("confirm_payment_acknowledged", {
             requestId,
             userId: authUserId,
             orderId: razorpay_order_id,
-            paymentId: razorpay_payment_id
+            paymentId: razorpay_payment_id,
+            finalizeReason: finalized.reason || "awaiting_webhook"
         });
 
         res.json({
@@ -931,6 +1277,7 @@ router.post('/confirm', verifyUser, async (req, res) => {
             requestId,
             order_id: razorpay_order_id,
             payment_id: razorpay_payment_id,
+            immediateFinalization: false,
             message: "Payment signature verified. Awaiting Razorpay webhook capture confirmation."
         });
 
@@ -945,26 +1292,50 @@ router.post('/confirm', verifyUser, async (req, res) => {
 router.post('/cash', verifyUser, async (req, res) => {
     try {
         console.log('PAYMENT REQUEST: cash (body):', req.body);
-        const { requestId } = req.body;
+        const { requestId, couponCode } = req.body || {};
         const authUserId = req.user.userId;
         if (!requestId) return res.status(400).json({ error: 'requestId is required' });
 
         const pool = await getPool();
         const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
-            'SELECT amount, service_charge, service_type, vehicle_type, technician_id, user_id, status, payment_status FROM service_requests WHERE id = ? AND user_id = ?',
+            `SELECT id, user_id, amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status,
+                    applied_coupon_code, applied_discount_percent, applied_discount_amount
+             FROM service_requests
+             WHERE id = ? AND user_id = ?`,
             [requestId, authUserId]
         );
         if (reqRows.length === 0) return res.status(404).json({ error: 'Request not found' });
-        if (reqRows[0].payment_status === 'completed' || reqRows[0].status === 'paid') {
+        if (isRequestAlreadyPaid(reqRows[0])) {
             return res.json({ success: true, alreadyPaid: true });
         }
 
-        const baseAmount = await resolveRequestBaseAmount(reqRows[0], pricingConfig);
-        const technicianId = reqRows[0].technician_id;
-        const userId = reqRows[0].user_id;
+        const requestRow = reqRows[0];
+        const technicianId = requestRow.technician_id;
+        const userId = requestRow.user_id;
+        const { breakdown, coupon } = await buildServiceRequestPaymentQuote({
+            pool,
+            requestRow,
+            pricingConfig,
+            couponCode,
+            preserveExistingApplied: false,
+        });
 
-        const breakdown = computePaymentAmounts(baseAmount, pricingConfig);
+        if (coupon.providedCode && !coupon.isApplied) {
+            return res.status(400).json({
+                error: coupon.reason || "Coupon could not be applied.",
+                coupon: {
+                    active: coupon.active,
+                    configured_code: coupon.configuredCode,
+                    entered_code: coupon.providedCode,
+                    reason: coupon.reason,
+                    discount_percent: coupon.discountPercent,
+                    remaining_eligible_uses: coupon.remainingEligibleUses,
+                    max_uses_per_user: coupon.maxUsesPerUser,
+                }
+            });
+        }
+
         const techAmount = breakdown.baseAmount;
 
         const conn = await pool.getConnection();
@@ -972,8 +1343,25 @@ router.post('/cash', verifyUser, async (req, res) => {
             await conn.beginTransaction();
 
             await conn.execute(
-                "UPDATE service_requests SET payment_status = ?, payment_method = ?, status = ?, amount = ? WHERE id = ?",
-                ['completed', 'cash', 'paid', breakdown.baseAmount, requestId]
+                `UPDATE service_requests
+                 SET payment_status = ?,
+                     payment_method = ?,
+                     status = ?,
+                     amount = ?,
+                     applied_coupon_code = ?,
+                     applied_discount_percent = ?,
+                     applied_discount_amount = ?
+                 WHERE id = ?`,
+                [
+                    'completed',
+                    'cash',
+                    'paid',
+                    breakdown.baseAmount,
+                    coupon.appliedCode || null,
+                    coupon.isApplied ? coupon.discountPercent : 0,
+                    breakdown.discountAmount,
+                    requestId
+                ]
             );
             console.log('REQUEST STATUS UPDATED:', { requestId, status: 'paid', amount: breakdown.baseAmount });
 
@@ -1038,9 +1426,12 @@ router.post('/cash', verifyUser, async (req, res) => {
                 userId,
                 technicianId,
                 paymentMethod: "cash",
+                originalPlatformFee: breakdown.originalPlatformFee,
+                discountAmount: breakdown.discountAmount,
                 totalAmount: breakdown.totalAmount,
                 platformFee: breakdown.platformFee,
-                technicianAmount: techAmount
+                technicianAmount: techAmount,
+                couponCode: coupon.appliedCode || null
             });
             socketService.broadcast("admin:payment_update", {
                 requestId,
@@ -1050,7 +1441,10 @@ router.post('/cash', verifyUser, async (req, res) => {
                 at: new Date().toISOString()
             });
 
-            if (technicianId) socketService.notifyTechnician(technicianId, 'job:status_update', { requestId, status: 'paid' });
+            if (technicianId) {
+                socketService.notifyTechnician(technicianId, 'job:status_update', { requestId, status: 'paid' });
+                socketService.notifyTechnician(technicianId, 'job:list_update', { requestId, action: 'updated' });
+            }
             socketService.notifyUser(userId, 'payment_completed', { requestId, status: 'paid' });
             socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'paid' });
 

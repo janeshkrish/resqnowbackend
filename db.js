@@ -170,6 +170,9 @@ CREATE TABLE IF NOT EXISTS service_requests (
   location_lat FLOAT,
   location_lng FLOAT,
   amount DECIMAL(10, 2) DEFAULT 0.00,
+  applied_coupon_code VARCHAR(64),
+  applied_discount_percent DECIMAL(8,6) DEFAULT 0.000000,
+  applied_discount_amount DECIMAL(10,2) DEFAULT 0.00,
   payment_status VARCHAR(50) DEFAULT 'pending',
   status ENUM('pending','assigned','accepted','en-route','in-progress','completed','cancelled') DEFAULT 'pending',
   contact_phone VARCHAR(50),
@@ -437,6 +440,10 @@ CREATE TABLE IF NOT EXISTS platform_pricing_config (
   id INT AUTO_INCREMENT PRIMARY KEY,
   currency VARCHAR(10) NOT NULL DEFAULT 'INR',
   platform_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000,
+  welcome_coupon_code VARCHAR(64) NOT NULL DEFAULT 'RESQ10',
+  welcome_coupon_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000,
+  welcome_coupon_max_uses_per_user INT NOT NULL DEFAULT 2,
+  welcome_coupon_active BOOLEAN DEFAULT TRUE,
   registration_fee DECIMAL(12,2) NOT NULL DEFAULT 500.00,
   booking_fee DECIMAL(12,2) NOT NULL DEFAULT 199.00,
   pay_now_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.000000,
@@ -454,6 +461,10 @@ export async function ensurePlatformPricingConfigTable() {
   await p.execute(PLATFORM_PRICING_CONFIG_TABLE_SQL);
   await addColumnIfNotExists(p, 'platform_pricing_config', 'currency VARCHAR(10) NOT NULL DEFAULT "INR"');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'platform_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000');
+  await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_code VARCHAR(64) NOT NULL DEFAULT "RESQ10"');
+  await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000');
+  await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_max_uses_per_user INT NOT NULL DEFAULT 2');
+  await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_active BOOLEAN DEFAULT TRUE');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'registration_fee DECIMAL(12,2) NOT NULL DEFAULT 500.00');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'booking_fee DECIMAL(12,2) NOT NULL DEFAULT 199.00');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'pay_now_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.000000');
@@ -493,6 +504,9 @@ export async function updateServiceRequestsTableSchema() {
   await addColumnIfNotExists(p, 'service_requests', 'vehicle_type VARCHAR(100)');
   await addColumnIfNotExists(p, 'service_requests', 'description TEXT');
   await addColumnIfNotExists(p, 'service_requests', 'service_charge DECIMAL(10,2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'service_requests', 'applied_coupon_code VARCHAR(64)');
+  await addColumnIfNotExists(p, 'service_requests', 'applied_discount_percent DECIMAL(8,6) DEFAULT 0.000000');
+  await addColumnIfNotExists(p, 'service_requests', 'applied_discount_amount DECIMAL(10,2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'service_requests', 'payment_method VARCHAR(50)');
   await addColumnIfNotExists(p, 'service_requests', 'contact_name VARCHAR(255)');
   await addColumnIfNotExists(p, 'service_requests', 'contact_email VARCHAR(255)');

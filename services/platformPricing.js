@@ -18,11 +18,30 @@ const toPositiveNumber = (value, fallback, { allowZero = false } = {}) => {
   return parsed;
 };
 
+const toPositiveInteger = (value, fallback, { allowZero = false } = {}) => {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (allowZero ? parsed < 0 : parsed <= 0) return fallback;
+  return parsed;
+};
+
 const toPercent = (value, fallback) => {
   const parsed = toNumber(value);
   if (parsed == null) return fallback;
   if (parsed < 0 || parsed > 1) return fallback;
   return parsed;
+};
+
+const toBoolean = (value, fallback) => {
+  if (typeof value === "boolean") return value;
+  if (value == null) return fallback;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  }
+  return fallback;
 };
 
 const parseJson = (value) => {
@@ -132,6 +151,10 @@ export const DEFAULT_PLATFORM_PRICING_CONFIG = Object.freeze({
   id: null,
   currency: "INR",
   platform_fee_percent: 0.1,
+  welcome_coupon_code: "RESQ10",
+  welcome_coupon_discount_percent: 0.1,
+  welcome_coupon_max_uses_per_user: 2,
+  welcome_coupon_active: true,
   registration_fee: 500,
   booking_fee: 199,
   pay_now_discount_percent: 0,
@@ -217,6 +240,16 @@ function normalizeConfigRow(row) {
     id: row?.id ? Number(row.id) : null,
     currency: String(row?.currency || fallback.currency).trim().toUpperCase() || fallback.currency,
     platform_fee_percent: toPercent(row?.platform_fee_percent, fallback.platform_fee_percent),
+    welcome_coupon_code: String(row?.welcome_coupon_code || fallback.welcome_coupon_code).trim().toUpperCase(),
+    welcome_coupon_discount_percent: toPercent(
+      row?.welcome_coupon_discount_percent,
+      fallback.welcome_coupon_discount_percent
+    ),
+    welcome_coupon_max_uses_per_user: toPositiveInteger(
+      row?.welcome_coupon_max_uses_per_user,
+      fallback.welcome_coupon_max_uses_per_user
+    ),
+    welcome_coupon_active: toBoolean(row?.welcome_coupon_active, fallback.welcome_coupon_active),
     registration_fee: roundMoney(toPositiveNumber(row?.registration_fee, fallback.registration_fee)),
     booking_fee: roundMoney(toPositiveNumber(row?.booking_fee, fallback.booking_fee)),
     pay_now_discount_percent: toPercent(row?.pay_now_discount_percent, fallback.pay_now_discount_percent),
@@ -233,11 +266,29 @@ let inflightFetch = null;
 async function seedDefaultConfig(pool) {
   await pool.execute(
     `INSERT INTO platform_pricing_config
-      (currency, platform_fee_percent, registration_fee, booking_fee, pay_now_discount_percent, default_service_amount, service_base_prices, subscription_plans, is_active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
+      (
+        currency,
+        platform_fee_percent,
+        welcome_coupon_code,
+        welcome_coupon_discount_percent,
+        welcome_coupon_max_uses_per_user,
+        welcome_coupon_active,
+        registration_fee,
+        booking_fee,
+        pay_now_discount_percent,
+        default_service_amount,
+        service_base_prices,
+        subscription_plans,
+        is_active
+      )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
     [
       DEFAULT_PLATFORM_PRICING_CONFIG.currency,
       DEFAULT_PLATFORM_PRICING_CONFIG.platform_fee_percent,
+      DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_code,
+      DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_discount_percent,
+      DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_max_uses_per_user,
+      DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_active,
       DEFAULT_PLATFORM_PRICING_CONFIG.registration_fee,
       DEFAULT_PLATFORM_PRICING_CONFIG.booking_fee,
       DEFAULT_PLATFORM_PRICING_CONFIG.pay_now_discount_percent,
@@ -317,19 +368,33 @@ export function getServiceMatrixAmount(serviceType, vehicleType, pricingConfig =
   return roundMoney(amount);
 }
 
-export function computePaymentAmounts(baseAmount, pricingConfig = null) {
+export function computePaymentAmounts(baseAmount, pricingConfig = null, options = {}) {
   const config = pricingConfig || DEFAULT_PLATFORM_PRICING_CONFIG;
   const safeBase = roundMoney(
     toPositiveNumber(baseAmount, toPositiveNumber(config.default_service_amount, DEFAULT_PLATFORM_PRICING_CONFIG.default_service_amount))
   );
   const feePercent = toPercent(config.platform_fee_percent, DEFAULT_PLATFORM_PRICING_CONFIG.platform_fee_percent);
-  const platformFee = roundMoney(safeBase * feePercent);
+  const originalPlatformFee = roundMoney(safeBase * feePercent);
+  const discountPercent = toPercent(options?.platformFeeDiscountPercent, 0);
+  const discountAmountByPercent = roundMoney(originalPlatformFee * discountPercent);
+  const discountAmountRaw = toPositiveNumber(
+    options?.platformFeeDiscountAmount,
+    discountAmountByPercent,
+    { allowZero: true }
+  );
+  const discountAmount = roundMoney(
+    Math.min(originalPlatformFee, Math.max(0, Number(discountAmountRaw || 0)))
+  );
+  const platformFee = roundMoney(Math.max(0, originalPlatformFee - discountAmount));
   const totalAmount = roundMoney(safeBase + platformFee);
 
   return {
     currency: String(config.currency || "INR").toUpperCase(),
     baseAmount: safeBase,
     platformFeePercent: feePercent,
+    originalPlatformFee,
+    discountAmount,
+    platformFeeDiscountPercent: discountPercent,
     platformFee,
     totalAmount,
   };

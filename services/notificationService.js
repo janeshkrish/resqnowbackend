@@ -1,20 +1,32 @@
 import admin from "firebase-admin";
 import { getPool } from "../db.js";
 
-const JOB_ALERT_TITLE = "🚨 New Job Alert";
+const JOB_ALERT_TITLE = "\uD83D\uDEA8 New Job Alert";
 
 const SERVICE_EMOJI_MAP = [
-  { key: "towing", emoji: "🛻" },
-  { key: "flat", emoji: "🛞" },
-  { key: "tyre", emoji: "🛞" },
-  { key: "battery", emoji: "🔋" },
-  { key: "fuel", emoji: "⛽" },
-  { key: "lockout", emoji: "🔐" },
-  { key: "jump", emoji: "🔋" },
+  { key: "towing", emoji: "\uD83D\uDEFB" },
+  { key: "flat", emoji: "\uD83D\uDEDE" },
+  { key: "tyre", emoji: "\uD83D\uDEDE" },
+  { key: "tire", emoji: "\uD83D\uDEDE" },
+  { key: "battery", emoji: "\uD83D\uDD0B" },
+  { key: "fuel", emoji: "\u26FD" },
+  { key: "lockout", emoji: "\uD83D\uDD10" },
+  { key: "jump", emoji: "\uD83D\uDD0B" },
 ];
 
 function normalizeText(value) {
   return String(value || "").trim();
+}
+
+function stripWrappingQuotes(value) {
+  const raw = normalizeText(value);
+  if (!raw) return "";
+  const first = raw[0];
+  const last = raw[raw.length - 1];
+  if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
+    return raw.slice(1, -1).trim();
+  }
+  return raw;
 }
 
 function normalizeMoney(value) {
@@ -31,9 +43,9 @@ function normalizeDistanceLabel(value) {
 
 function resolveServiceEmoji(serviceType) {
   const normalized = normalizeText(serviceType).toLowerCase();
-  if (!normalized) return "🧰";
+  if (!normalized) return "\uD83E\uDDF0";
   const matched = SERVICE_EMOJI_MAP.find((item) => normalized.includes(item.key));
-  return matched?.emoji || "🧰";
+  return matched?.emoji || "\uD83E\uDDF0";
 }
 
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -59,6 +71,42 @@ function stringifyDataPayload(data) {
   return result;
 }
 
+function parseServiceAccountFromEnv() {
+  const rawJson = stripWrappingQuotes(
+    process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+  );
+  if (rawJson) {
+    const parsed = JSON.parse(rawJson);
+    if (parsed?.private_key) {
+      parsed.private_key = String(parsed.private_key).replace(/\\n/g, "\n");
+    }
+    return parsed;
+  }
+
+  const base64 = stripWrappingQuotes(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64);
+  if (base64) {
+    const decoded = Buffer.from(base64, "base64").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    if (parsed?.private_key) {
+      parsed.private_key = String(parsed.private_key).replace(/\\n/g, "\n");
+    }
+    return parsed;
+  }
+
+  const projectId = normalizeText(process.env.FIREBASE_PROJECT_ID);
+  const clientEmail = normalizeText(process.env.FIREBASE_CLIENT_EMAIL);
+  const privateKeyRaw = stripWrappingQuotes(process.env.FIREBASE_PRIVATE_KEY);
+  if (projectId && clientEmail && privateKeyRaw) {
+    return {
+      project_id: projectId,
+      client_email: clientEmail,
+      private_key: String(privateKeyRaw).replace(/\\n/g, "\n"),
+    };
+  }
+
+  return null;
+}
+
 class NotificationService {
   constructor() {
     this.isInitialized = false;
@@ -73,20 +121,12 @@ class NotificationService {
         return;
       }
 
-      const serviceAccountRaw = normalizeText(
-        process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVICE_ACCOUNT_JSON
-      );
-
-      if (!serviceAccountRaw) {
+      const serviceAccount = parseServiceAccountFromEnv();
+      if (!serviceAccount) {
         console.log(
-          "[NotificationService] Firebase Admin is not configured (missing FIREBASE_SERVICE_ACCOUNT). Push notifications are disabled."
+          "[NotificationService] Firebase Admin is not configured. Set FIREBASE_SERVICE_ACCOUNT(_JSON|_BASE64) or FIREBASE_PROJECT_ID/FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY."
         );
         return;
-      }
-
-      const serviceAccount = JSON.parse(serviceAccountRaw);
-      if (serviceAccount.private_key) {
-        serviceAccount.private_key = String(serviceAccount.private_key).replace(/\\n/g, "\n");
       }
 
       admin.initializeApp({
@@ -153,7 +193,10 @@ class NotificationService {
     );
     const deepLinkUrl = frontendBaseUrl ? `${frontendBaseUrl}${basePath}` : undefined;
 
-    if (userType === "technician" && event === "job:assigned") {
+    if (
+      userType === "technician" &&
+      (event === "job_offer" || event === "job:assigned")
+    ) {
       const serviceType = normalizeText(data?.serviceType || data?.service_type || "Roadside Assistance");
       const customerName = normalizeText(data?.customerName || data?.contact_name || "Customer");
       const locationDistance = await this.resolveDistanceText(userId, userType, data, pool);
@@ -165,9 +208,9 @@ class NotificationService {
           : `${locationDistance} away`;
 
       const body = [
-        `📍 ${serviceEmoji} ${serviceType} • ${distanceSummary}`,
-        `👤 Customer: ${customerName}`,
-        `💰 ₹${priceAmount}`,
+        `\uD83D\uDCCD ${serviceEmoji} ${serviceType} \u2022 ${distanceSummary}`,
+        `\uD83D\uDC64 Customer: ${customerName}`,
+        `\uD83D\uDCB0 \u20B9${priceAmount}`,
       ].join("\n");
 
       const payloadData = stringifyDataPayload({
@@ -182,10 +225,25 @@ class NotificationService {
       });
 
       return {
+        notification: {
+          title: JOB_ALERT_TITLE,
+          body,
+        },
         data: payloadData,
         webpush: {
           headers: {
             Urgency: "high",
+            TTL: "120",
+          },
+          notification: {
+            title: JOB_ALERT_TITLE,
+            body,
+            icon: "/icons/icon-192x192.png",
+            badge: "/icons/icon-192x192.png",
+            tag: jobId ? `job-${jobId}` : `job-${Date.now()}`,
+            requireInteraction: true,
+            renotify: true,
+            vibrate: [200, 100, 200],
           },
           ...(deepLinkUrl ? { fcmOptions: { link: deepLinkUrl } } : {}),
         },
