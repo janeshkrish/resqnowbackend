@@ -347,6 +347,24 @@ export const jobDispatchService = {
                 updated_at: new Date().toISOString()
             };
 
+            const [userRows] = await conn.query(
+                "SELECT full_name FROM users WHERE id = ? LIMIT 1",
+                [jobRows[0]?.user_id]
+            );
+            const customerName = String(
+                jobRows[0]?.contact_name ||
+                userRows?.[0]?.full_name ||
+                "Customer"
+            ).trim();
+
+            const userLat = Number(jobRows[0]?.location_lat);
+            const userLng = Number(jobRows[0]?.location_lng);
+            const techLat = Number(tech?.latitude);
+            const techLng = Number(tech?.longitude);
+            const locationDistance = Number.isFinite(userLat) && Number.isFinite(userLng) && Number.isFinite(techLat) && Number.isFinite(techLng)
+                ? `${getDistanceFromLatLonInKm(userLat, userLng, techLat, techLng).toFixed(1)} km`
+                : "Nearby";
+
             // 3. Update Offers
             await conn.query("UPDATE dispatch_offers SET status = 'accepted' WHERE service_request_id = ? AND technician_id = ?", [requestId, technicianId]);
             await conn.query("UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id != ?", [requestId, technicianId]);
@@ -382,7 +400,24 @@ export const jobDispatchService = {
                 request: assignedJob
             };
             socketService.io.to(`technician_${technicianId}`).emit("job_assigned", assignedPayload);
-            socketService.io.to(`technician_${technicianId}`).emit("job:assigned", assignedPayload);
+
+            socketService.notifyTechnician(technicianId, "job:assigned", {
+                ...assignedPayload,
+                id: String(requestId),
+                jobId: String(requestId),
+                requestId: String(requestId),
+                customerName,
+                serviceType: jobRows[0]?.service_type,
+                locationDistance,
+                priceAmount: assignedAmount ?? 0,
+                amount: assignedAmount ?? 0,
+                location: {
+                    lat: jobRows[0]?.location_lat,
+                    lng: jobRows[0]?.location_lng,
+                    address: jobRows[0]?.address
+                },
+                address: jobRows[0]?.address
+            });
 
             return { success: true, job: assignedJob, technician: tech };
 

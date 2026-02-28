@@ -253,6 +253,7 @@ router.post("/", verifyUser, async (req, res) => {
         const hasDirectTechnician = technician_id !== undefined && technician_id !== null && String(technician_id).trim() !== "";
         let directTechnicianId = hasDirectTechnician ? Number(technician_id) : null;
         let selectedTechnician = null;
+        let directDistanceKm = null;
 
         if (hasDirectTechnician) {
             if (!Number.isFinite(directTechnicianId)) {
@@ -292,6 +293,7 @@ router.post("/", verifyUser, async (req, res) => {
             const uLng = Number(location_lng);
             if (Number.isFinite(tLat) && Number.isFinite(tLng) && Number.isFinite(uLat) && Number.isFinite(uLng)) {
                 const dist = getDistanceFromLatLonInKm(uLat, uLng, tLat, tLng);
+                directDistanceKm = dist;
                 const techRange = Number(tech.service_area_range);
                 if (Number.isFinite(techRange) && techRange > 0 && dist > techRange) {
                     return res.status(400).json({ error: "Selected technician is out of service range for this location." });
@@ -347,9 +349,11 @@ router.post("/", verifyUser, async (req, res) => {
                 if (hasDirectTechnician && directTechnicianId) {
                     socketService.notifyTechnician(directTechnicianId, "job:assigned", {
                         id: String(newRequestId),
+                        jobId: String(newRequestId),
                         requestId: String(newRequestId),
                         customerName: req.body.contact_name || "Customer",
                         serviceType: canonicalServiceType,
+                        locationDistance: Number.isFinite(directDistanceKm) ? `${directDistanceKm.toFixed(1)} km` : "Nearby",
                         vehicleType: inferredVehicle,
                         location: {
                             lat: location_lat,
@@ -357,7 +361,8 @@ router.post("/", verifyUser, async (req, res) => {
                             address
                         },
                         address,
-                        amount: initialAmount || 0
+                        amount: initialAmount || 0,
+                        priceAmount: initialAmount || 0
                     });
                     socketService.notifyTechnician(directTechnicianId, "job:list_update", {
                         requestId: String(newRequestId),
@@ -495,6 +500,8 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                 // Notify new technician
                 socketService.notifyTechnician(newTechId, 'job:assigned', {
                     id: String(requestId),
+                    jobId: String(requestId),
+                    requestId: String(requestId),
                     customerName: userName || "Customer",
                     serviceType: request.service_type,
                     vehicleType: request.vehicle_type,
@@ -503,8 +510,12 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                         lng: request.location_lng,
                         address: request.address
                     },
-                    distance: nextMatch.distance || 0,
-                    amount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0
+                    locationDistance: Number.isFinite(Number(nextMatch.distance))
+                        ? `${Number(nextMatch.distance).toFixed(1)} km`
+                        : (nextMatch.distanceText || "Nearby"),
+                    distance: Number(nextMatch.distance) || 0,
+                    amount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0,
+                    priceAmount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0
                 });
 
                 if (nextMatch.email) {

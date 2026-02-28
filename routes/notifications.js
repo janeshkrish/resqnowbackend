@@ -1,60 +1,78 @@
 import express from "express";
-import { verifyUser, verifyTechnician } from "../middleware/auth.js";
+import jwt from "jsonwebtoken";
 import { notificationService } from "../services/notificationService.js";
 
 const router = express.Router();
 
-// Both users and technicians can register tokens
-// Since we have two different auth middlewares, we check which payload is present
-const authenticateAny = (req, res, next) => {
-  const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith("Bearer ")) {
+function getJwtSecret() {
+  const secret = String(process.env.JWT_SECRET || "").trim();
+  if (!secret) {
+    throw new Error("JWT_SECRET is not configured.");
+  }
+  return secret;
+}
+
+function authenticateAny(req, res, next) {
+  const authHeader = String(req.headers.authorization || "");
+  if (!authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  // A bit hacky, but try user auth, if not, try tech auth
-  verifyUser(req, res, (err) => {
-    if (!err && req.user) return next();
-    
-    // Clear user-specific variables before trying tech
-    delete req.user;
-    
-    verifyTechnician(req, res, (techErr) => {
-      if (!techErr && req.technicianId) return next();
-      return res.status(401).json({ error: "Unauthorized either as user or technician." });
-    });
-  });
-};
+  try {
+    const token = authHeader.slice(7);
+    const payload = jwt.verify(token, getJwtSecret());
+    const role = String(payload?.role || payload?.type || "user").trim().toLowerCase();
 
-/**
- * POST /api/notifications/register-token
- */
+    if (role === "technician") {
+      const userId = payload?.id || payload?.technicianId;
+      if (!userId) return res.status(401).json({ error: "Invalid technician token payload." });
+      req.deviceUser = { userType: "technician", userId: String(userId) };
+      return next();
+    }
+
+    if (role === "user" || role === "admin" || role === "") {
+      const userId = payload?.userId || payload?.id;
+      if (!userId) return res.status(401).json({ error: "Invalid user token payload." });
+      req.deviceUser = { userType: "user", userId: String(userId) };
+      return next();
+    }
+
+    return res.status(403).json({ error: "Unsupported token role." });
+  } catch (error) {
+    if (error?.message === "JWT_SECRET is not configured.") {
+      return res.status(500).json({ error: "Server auth is not configured." });
+    }
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+}
+
 router.post("/register-token", authenticateAny, async (req, res) => {
   try {
-    const { token } = req.body;
+    const token = String(req.body?.token || "").trim();
     if (!token) {
       return res.status(400).json({ error: "FCM token is required." });
     }
 
-    let userId = null;
-    let userType = null;
+    await notificationService.registerToken(req.deviceUser.userId, req.deviceUser.userType, token);
+    return res.json({ success: true, message: "Token registered successfully." });
+  } catch (error) {
+    console.error("[Notifications] register-token failed:", error);
+    return res.status(500).json({ error: "Failed to register token." });
+  }
+});
 
-    if (req.user && req.user.userId) {
-      userId = req.user.userId;
-      userType = "user";
-    } else if (req.technicianId) {
-      userId = req.technicianId;
-      userType = "technician";
-    } else {
-      return res.status(401).json({ error: "Unable to determine user type." });
+router.post("/unregister-token", authenticateAny, async (req, res) => {
+  try {
+    const token = String(req.body?.token || "").trim();
+    if (!token) {
+      return res.status(400).json({ error: "FCM token is required." });
     }
 
-    await notificationService.registerToken(userId, userType, token);
-    res.json({ success: true, message: "Token registered successfully." });
-
-  } catch (err) {
-    console.error("[Notifications] Register Token Error:", err);
-    res.status(500).json({ error: "Failed to register token." });
+    await notificationService.removeToken(token);
+    return res.json({ success: true, message: "Token removed successfully." });
+  } catch (error) {
+    console.error("[Notifications] unregister-token failed:", error);
+    return res.status(500).json({ error: "Failed to remove token." });
   }
 });
 
