@@ -4,17 +4,18 @@ import { getPool } from "../db.js";
 class NotificationService {
     constructor() {
         this.isInitialized = false;
+        this.hasLoggedDisabledState = false;
         this.init();
     }
 
     init() {
         try {
             if (!admin.apps.length) {
-                // Attempt to initialize from FIREBASE_SERVICE_ACCOUNT JSON string or env vars.
+                // Attempt to initialize from FIREBASE_SERVICE_ACCOUNT JSON string.
                 const serviceAccountStr = process.env.FIREBASE_SERVICE_ACCOUNT;
                 if (serviceAccountStr) {
                     const serviceAccount = JSON.parse(serviceAccountStr);
-                    // Render/Vercel often escape \n in env vars to \\n
+                    // Render/Vercel often escape \n in env vars to \\n.
                     if (serviceAccount.private_key) {
                         serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
                     }
@@ -37,11 +38,10 @@ class NotificationService {
     async registerToken(userId, userType, token) {
         if (!token) return;
         const pool = await getPool();
-        // Insert or update (ignore duplicate)
         await pool.query(
-            `INSERT INTO device_tokens (user_id, user_type, token) 
-       VALUES (?, ?, ?) 
-       ON DUPLICATE KEY UPDATE updated_at = NOW()`,
+            `INSERT INTO device_tokens (user_id, user_type, token)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE updated_at = NOW()`,
             [userId, userType, token]
         );
     }
@@ -52,45 +52,63 @@ class NotificationService {
         await pool.query("DELETE FROM device_tokens WHERE token = ?", [token]);
     }
 
-    /**
-     * Translates internal socket events into user-friendly push payloads
-     */
-    getNotificationPayload(userType, event, data) {
+    getNotificationPayload(userType, event, data = {}) {
         let title = "";
         let body = "";
+        const status = String(data?.status || "").toLowerCase();
+        const requestId = data?.requestId || data?.id || "";
 
-        // Technician Events
         if (userType === "technician") {
             switch (event) {
                 case "job:assigned":
-                    title = "🔔 New Job Alert";
-                    body = `Service request for ${data.serviceType || 'vehicle'}. Tap to review.`;
+                    title = "New Service Request";
+                    body = `Service request for ${data.serviceType || "vehicle"}.`;
                     break;
                 case "job:status_update":
-                    if (data.status === "cancelled") {
-                        title = "❌ Job Cancelled";
-                        body = `Customer cancelled request #${data.requestId}.`;
+                    if (status === "cancelled") {
+                        title = "Job Cancelled";
+                        body = `Customer cancelled request #${requestId}.`;
                     }
+                    break;
+                case "technician:new_review": {
+                    const rating = Number(data?.rating || 0);
+                    title = "New Rating Received";
+                    body = Number.isFinite(rating)
+                        ? `You received a ${rating.toFixed(1)} star review.`
+                        : "You received a new customer rating.";
+                    break;
+                }
+                default:
                     break;
             }
-        }
-        // User Events
-        else if (userType === "user") {
+        } else if (userType === "user") {
             switch (event) {
                 case "job:status_update":
-                    if (data.status === "accepted") {
-                        title = "✅ Technician Assigned";
-                        body = "A technician has accepted your request.";
-                    } else if (data.status === "on-the-way" || data.status === "en-route") {
-                        title = "🚗 Technician On The Way";
+                    if (status === "accepted") {
+                        title = "Service Accepted";
+                        body = "A technician has accepted your service request.";
+                    } else if (status === "on-the-way" || status === "en-route") {
+                        title = "Technician On The Way";
                         body = "Your technician is heading towards your location.";
-                    } else if (data.status === "arrived") {
-                        title = "📍 Technician Arrived";
+                    } else if (status === "arrived") {
+                        title = "Technician Arrived";
                         body = "Your technician is at your location.";
-                    } else if (data.status === "payment_pending") {
-                        title = "💳 Payment Pending";
-                        body = "Service completed. Please complete your payment.";
+                    } else if (status === "in-progress") {
+                        title = "Service Started";
+                        body = "Your technician has started working on your request.";
+                    } else if (status === "completed" || status === "payment_pending") {
+                        title = "Service Completed";
+                        body = "Service is complete. Please finish payment to close the request.";
+                    } else if (status === "paid") {
+                        title = "Payment Completed";
+                        body = "Your payment has been successfully processed.";
                     }
+                    break;
+                case "payment_completed":
+                    title = "Payment Completed";
+                    body = "Your payment has been successfully processed.";
+                    break;
+                default:
                     break;
             }
         }
@@ -101,30 +119,36 @@ class NotificationService {
             notification: { title, body },
             data: {
                 event,
-                requestId: data.requestId || data.id || "",
-                click_action: "FLUTTER_NOTIFICATION_CLICK" // Standard action for PWA clicking
+                requestId: requestId ? String(requestId) : "",
+                click_action: "FLUTTER_NOTIFICATION_CLICK"
             }
         };
     }
 
     async sendPushNotification(userId, userType, event, data) {
-        if (!this.isInitialized) return;
+        if (!this.isInitialized) {
+            if (!this.hasLoggedDisabledState) {
+                console.warn("[NotificationService] Push delivery skipped because Firebase is not initialized.");
+                this.hasLoggedDisabledState = true;
+            }
+            return;
+        }
 
         try {
             const payload = this.getNotificationPayload(userType, event, data);
-            if (!payload) return; // Event not tracked for PUSH
+            if (!payload) return;
 
             const pool = await getPool();
 
-            // Enforce Technician Online Constraint for Job Assignments
-            if (userType === 'technician' && event === 'job:assigned') {
+            // Enforce technician-online constraint for assignment pushes.
+            if (userType === "technician" && event === "job:assigned") {
                 const [techCheck] = await pool.query(
                     "SELECT is_active FROM technicians WHERE id = ?",
                     [userId]
                 );
                 if (techCheck.length === 0 || techCheck[0].is_active === 0) {
-                    console.log(`[NotificationService] Aborting Push: Technician ${userId} is offline.`);
-                    return; // Technician is offline, silently drop push alert
+                    console.log(`[NotificationService] Push skipped: Technician ${userId} is offline.`);
+                    return;
                 }
             }
 
@@ -136,7 +160,6 @@ class NotificationService {
             if (tokens.length === 0) return;
 
             const registrationTokens = tokens.map((t) => t.token);
-
             const message = {
                 ...payload,
                 tokens: registrationTokens,
@@ -144,13 +167,14 @@ class NotificationService {
 
             const response = await admin.messaging().sendMulticast(message);
 
-            // Cleanup invalid tokens
+            // Cleanup invalid tokens.
             if (response.failureCount > 0) {
                 const failedTokens = [];
                 response.responses.forEach((resp, idx) => {
-                    if (!resp.success &&
-                        (resp.error.code === 'messaging/invalid-registration-token' ||
-                            resp.error.code === 'messaging/registration-token-not-registered')) {
+                    if (!resp.success && (
+                        resp.error?.code === "messaging/invalid-registration-token" ||
+                        resp.error?.code === "messaging/registration-token-not-registered"
+                    )) {
                         failedTokens.push(registrationTokens[idx]);
                     }
                 });

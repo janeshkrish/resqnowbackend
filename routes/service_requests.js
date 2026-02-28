@@ -166,6 +166,8 @@ router.get("/", verifyUser, async (req, res) => {
             vehicle_model: row.vehicle_model,
             address: row.address,
             status: row.status,
+            payment_status: row.payment_status,
+            paymentStatus: String(row.payment_status || "").toLowerCase() === "completed" ? "paid" : (row.payment_status || null),
             created_at: row.created_at,
             updated_at: row.updated_at,
             technician_id: row.technician_id,
@@ -765,6 +767,7 @@ router.get("/:id", verifyUser, async (req, res) => {
         const resolvedAmount = await resolveRequestBaseAmount(row, pricingConfig);
         const request = {
             ...row,
+            paymentStatus: String(row.payment_status || "").toLowerCase() === "completed" ? "paid" : (row.payment_status || null),
             technician: row.technician_id ? {
                 id: row.technician_id,
                 name: row.technician_name,

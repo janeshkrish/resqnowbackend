@@ -659,21 +659,41 @@ router.patch('/me/settings', verifyUser, async (req, res) => {
 
 router.post('/reviews', verifyUser, async (req, res) => {
   try {
-    const authUserId = req.user.userId;
-    const { technician_id, rating, comment, request_id } = req.body;
+    const authUserId = req.user.userId || req.user.id;
+    const technician_id = req.body?.technician_id ?? req.body?.technicianId;
+    const request_id = req.body?.request_id ?? req.body?.requestId ?? null;
+    const rating = req.body?.rating;
+    const comment = req.body?.comment;
+
+    if (!authUserId) {
+      return res.status(401).json({ error: "Unauthorized user context." });
+    }
+
+    const normalizedTechnicianId = Number(technician_id);
+    const normalizedRating = Number(rating);
+    const normalizedRequestId =
+      request_id === null || request_id === undefined || String(request_id).trim() === ""
+        ? null
+        : Number(request_id);
 
     if (!technician_id || !rating) {
       return res.status(400).json({ error: "Missing required fields for review." });
     }
-    if (Number(rating) < 1 || Number(rating) > 5) {
+    if (!Number.isFinite(normalizedTechnicianId) || normalizedTechnicianId <= 0) {
+      return res.status(400).json({ error: "Invalid technician id." });
+    }
+    if (!Number.isFinite(normalizedRating) || normalizedRating < 1 || normalizedRating > 5) {
       return res.status(400).json({ error: "Rating must be between 1 and 5." });
+    }
+    if (normalizedRequestId !== null && (!Number.isFinite(normalizedRequestId) || normalizedRequestId <= 0)) {
+      return res.status(400).json({ error: "Invalid request id." });
     }
 
     const pool = await db.getPool();
-    if (request_id) {
+    if (normalizedRequestId !== null) {
       const [requestRows] = await pool.query(
         "SELECT id, user_id, technician_id, status FROM service_requests WHERE id = ? LIMIT 1",
-        [request_id]
+        [normalizedRequestId]
       );
       if (requestRows.length === 0) {
         return res.status(404).json({ error: "Service request not found." });
@@ -682,7 +702,7 @@ router.post('/reviews', verifyUser, async (req, res) => {
       if (String(request.user_id) !== String(authUserId)) {
         return res.status(403).json({ error: "You can only review your own request." });
       }
-      if (String(request.technician_id) !== String(technician_id)) {
+      if (String(request.technician_id) !== String(normalizedTechnicianId)) {
         return res.status(400).json({ error: "Technician mismatch for this request." });
       }
       if (!['completed', 'paid'].includes(String(request.status || '').toLowerCase())) {
@@ -692,7 +712,7 @@ router.post('/reviews', verifyUser, async (req, res) => {
 
     const [existing] = await pool.query(
       "SELECT id FROM reviews WHERE user_id = ? AND technician_id = ? AND service_request_id = ? LIMIT 1",
-      [authUserId, technician_id, request_id || null]
+      [authUserId, normalizedTechnicianId, normalizedRequestId]
     );
     if (existing.length > 0) {
       return res.status(409).json({ error: "Review already submitted for this request." });
@@ -703,28 +723,37 @@ router.post('/reviews', verifyUser, async (req, res) => {
 
     const [insertResult] = await pool.execute(
       "INSERT INTO reviews (user_id, technician_id, rating, comment, service_request_id) VALUES (?, ?, ?, ?, ?)",
-      [authUserId, technician_id, Number(rating), comment || '', request_id || null]
+      [authUserId, normalizedTechnicianId, normalizedRating, comment || '', normalizedRequestId]
     );
 
     // Update technician average rating
-    const [rows] = await pool.query("SELECT AVG(rating) as avg_rating FROM reviews WHERE technician_id = ?", [technician_id]);
+    const [rows] = await pool.query("SELECT AVG(rating) as avg_rating FROM reviews WHERE technician_id = ?", [normalizedTechnicianId]);
     const avg = rows[0]?.avg_rating || 0;
 
-    await pool.execute("UPDATE technicians SET rating = ? WHERE id = ?", [avg.toFixed(1), technician_id]);
+    await pool.execute("UPDATE technicians SET rating = ? WHERE id = ?", [avg.toFixed(1), normalizedTechnicianId]);
 
     // Notify technician dynamically
     const newReview = {
       id: insertResult.insertId,
       user_id: authUserId,
-      technician_id,
-      rating: Number(rating),
+      technician_id: normalizedTechnicianId,
+      rating: normalizedRating,
       comment,
       created_at: new Date(),
       reviewer_name: reviewerName
     };
-    socketService.notifyTechnician(technician_id, 'technician:new_review', newReview);
+    socketService.notifyTechnician(normalizedTechnicianId, 'technician:new_review', newReview);
 
-    res.json({ success: true, message: "Review submitted successfully" });
+    res.json({
+      success: true,
+      message: "Review submitted successfully",
+      data: {
+        reviewId: insertResult.insertId,
+        technicianId: normalizedTechnicianId,
+        requestId: normalizedRequestId,
+        rating: normalizedRating,
+      }
+    });
 
   } catch (err) {
     console.error("Submit review error:", err);
