@@ -160,12 +160,14 @@ router.get("/", verifyUser, async (req, res) => {
     `, [userId, userId]);
 
         const requests = rows.map(row => ({
+            _id: String(row.id),
             id: row.id,
             service_type: row.service_type,
             vehicle_type: row.vehicle_type,
             vehicle_model: row.vehicle_model,
             address: row.address,
             status: row.status,
+            serviceStatus: row.status,
             payment_status: row.payment_status,
             paymentStatus: String(row.payment_status || "").toLowerCase() === "completed" ? "paid" : (row.payment_status || null),
             created_at: row.created_at,
@@ -767,6 +769,8 @@ router.get("/:id", verifyUser, async (req, res) => {
         const resolvedAmount = await resolveRequestBaseAmount(row, pricingConfig);
         const request = {
             ...row,
+            _id: String(row.id),
+            serviceStatus: row.status,
             paymentStatus: String(row.payment_status || "").toLowerCase() === "completed" ? "paid" : (row.payment_status || null),
             technician: row.technician_id ? {
                 id: row.technician_id,
