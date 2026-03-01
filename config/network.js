@@ -1,4 +1,7 @@
 const LOCAL_ORIGINS = [
+  "http://localhost",
+  "https://localhost",
+  "capacitor://localhost",
   "http://localhost:8080",
   "http://localhost:5173",
   "http://127.0.0.1:8080",
@@ -8,6 +11,9 @@ const LOCAL_ORIGINS = [
 const PROD_ORIGINS = [
   "https://resqnow.org",
   "https://www.resqnow.org",
+  "http://localhost",
+  "https://localhost",
+  "capacitor://localhost",
   // Backward-compatible allowance if old domain is still in use.
   "https://reqnow.org",
   "https://www.reqnow.org",
