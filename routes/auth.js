@@ -54,11 +54,15 @@ router.get("/google/url", (req, res) => {
         redirectUri
     );
 
+    // Standardize 'state' param to pass context through Google auth loop
+    const platform = req.query.platform || "web";
+
     const authorizeUrl = oAuth2Client.generateAuthUrl({
         access_type: "offline",
         scope: ["openid", "email", "profile"],
         include_granted_scopes: true,
         prompt: "select_account",
+        state: platform // E.g "capacitor" or "web"
     });
 
     res.json({ url: authorizeUrl, redirectUri });
@@ -71,7 +75,7 @@ router.get("/google/url", (req, res) => {
 router.get("/google/callback", async (req, res) => {
     if (!ensureGoogleAuthConfigured(res)) return;
 
-    const { code } = req.query;
+    const { code, state } = req.query;
     if (!code) return res.status(400).send("No code provided");
 
     try {
@@ -128,12 +132,20 @@ router.get("/google/callback", async (req, res) => {
         );
 
         // Redirect to Frontend with Token
-        // We need to know where the frontend is.
-        // Use referrer or env var.
-        const frontendUrl = getFrontendUrl();
-        const target = new URL("/auth/success", `${frontendUrl}/`);
-        target.searchParams.set("token", token);
-        return res.redirect(target.toString());
+        // Distinguish redirect target if we are bouncing back to Capacitor Deep Link vs Web.
+        const isCapacitor = state === "capacitor";
+
+        let targetUrl;
+        if (isCapacitor) {
+            targetUrl = `resqnow://auth/callback?token=${token}`;
+        } else {
+            const frontendUrl = getFrontendUrl();
+            const target = new URL("/auth/success", `${frontendUrl}/`);
+            target.searchParams.set("token", token);
+            targetUrl = target.toString();
+        }
+
+        return res.redirect(targetUrl);
 
     } catch (err) {
         console.error("[Auth] Google Callback Error:", err);
