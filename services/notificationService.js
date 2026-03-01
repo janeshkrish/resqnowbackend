@@ -55,9 +55,9 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+    Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLon / 2) *
+    Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return r * c;
 }
@@ -230,6 +230,17 @@ class NotificationService {
           body,
         },
         data: payloadData,
+        android: {
+          priority: "high",
+          notification: {
+            channelId: "high_priority_alarms",
+            sound: "emergency_alarm",
+            clickAction: "FCM_PLUGIN_ACTIVITY",
+            defaultSound: false,
+            defaultVibrateTimings: false,
+            vibrateTimingsMillis: [200, 100, 200]
+          }
+        },
         webpush: {
           headers: {
             Urgency: "high",
