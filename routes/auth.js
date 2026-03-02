@@ -76,7 +76,17 @@ router.get("/google/callback", async (req, res) => {
     if (!ensureGoogleAuthConfigured(res)) return;
 
     const { code, state } = req.query;
-    if (!code) return res.status(400).send("No code provided");
+    if (!code) {
+        const isCapacitor = state === "capacitor";
+        if (isCapacitor) {
+            const deepLink = new URL("resqnow://auth/failed");
+            deepLink.searchParams.set("error", "google_auth_failed");
+            return res.redirect(deepLink.toString());
+        }
+        const target = new URL("/login", `${getFrontendUrl()}/`);
+        target.searchParams.set("error", "google_auth_failed");
+        return res.redirect(target.toString());
+    }
 
     try {
         const redirectUri = getRedirectUri();
@@ -149,7 +159,14 @@ router.get("/google/callback", async (req, res) => {
 
     } catch (err) {
         console.error("[Auth] Google Callback Error:", err);
-        const target = new URL("/auth/failed", `${getFrontendUrl()}/`);
+        const isCapacitor = state === "capacitor";
+        if (isCapacitor) {
+            const deepLink = new URL("resqnow://auth/failed");
+            deepLink.searchParams.set("error", "google_auth_failed");
+            return res.redirect(deepLink.toString());
+        }
+
+        const target = new URL("/login", `${getFrontendUrl()}/`);
         target.searchParams.set("error", "google_auth_failed");
         return res.redirect(target.toString());
     }

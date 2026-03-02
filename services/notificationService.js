@@ -215,6 +215,11 @@ class NotificationService {
 
       const payloadData = stringifyDataPayload({
         event,
+        type: "EMERGENCY_JOB",
+        channelId: "high_priority_alarms",
+        sound: "emergency_alarm",
+        title: JOB_ALERT_TITLE,
+        body,
         jobId,
         requestId: jobId,
         customerName,
@@ -225,21 +230,12 @@ class NotificationService {
       });
 
       return {
-        notification: {
-          title: JOB_ALERT_TITLE,
-          body,
-        },
+        // Keep emergency technician alerts as data-first so Android native service
+        // can always build full-screen intent notifications (foreground/background/terminated).
         data: payloadData,
         android: {
           priority: "high",
-          notification: {
-            channelId: "high_priority_alarms",
-            sound: "emergency_alarm",
-            clickAction: "FCM_PLUGIN_ACTIVITY",
-            defaultSound: false,
-            defaultVibrateTimings: false,
-            vibrateTimingsMillis: [200, 100, 200]
-          }
+          ttl: 120000,
         },
         webpush: {
           headers: {
