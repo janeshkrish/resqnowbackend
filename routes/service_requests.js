@@ -435,10 +435,21 @@ router.post("/:id/accept", verifyTechnician, async (req, res) => {
         const result = await jobDispatchService.acceptJob(technicianId, requestId);
 
         if (!result.success) {
+            if (result.code === "not_found") {
+                return res.status(404).json({ error: result.reason || "Job not found." });
+            }
+            if (result.code === "technician_not_found") {
+                return res.status(404).json({ error: result.reason || "Technician not found." });
+            }
             return res.status(409).json({ error: result.reason || "Job already taken." });
         }
 
-        res.json({ success: true, job: result.job });
+        res.json({
+            success: true,
+            idempotent: !!result.idempotent,
+            request: result.job,
+            job: result.job
+        });
 
     } catch (err) {
         console.error("[Accept Job] Error:", err);

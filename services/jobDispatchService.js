@@ -296,138 +296,240 @@ export const jobDispatchService = {
     async acceptJob(technicianId, requestId) {
         const pool = await db.getPool();
         const conn = await pool.getConnection();
+        let acceptedJob = null;
+        let sourceJob = null;
+        let tech = null;
+        let idempotent = false;
+        let shouldNotify = false;
+        let shouldRevokeOffers = false;
+        let assignedAmount = null;
 
         try {
             await conn.beginTransaction();
 
-            // 1. ATOMIC LOCK: Select job only if pending
+            // 1) Atomic lock on request row regardless of current status.
             const [jobRows] = await conn.query(
-                "SELECT * FROM service_requests WHERE id = ? AND status = 'pending' FOR UPDATE",
+                "SELECT * FROM service_requests WHERE id = ? FOR UPDATE",
                 [requestId]
             );
 
             if (jobRows.length === 0) {
                 await conn.rollback();
-                return { success: false, reason: "Job already taken or cancelled" };
+                return { success: false, code: "not_found", reason: "Job not found" };
             }
+            sourceJob = jobRows[0];
+            const currentStatus = String(sourceJob?.status || "").trim().toLowerCase();
+            const existingTechnicianId =
+                sourceJob?.technician_id == null ? null : String(sourceJob.technician_id);
+            const normalizedTechnicianId = String(technicianId);
+            const sameTechnician = existingTechnicianId === normalizedTechnicianId;
+            const terminalStatuses = new Set(["cancelled", "completed", "rejected"]);
+            const sameTechIdempotentStatuses = new Set([
+                "assigned",
+                "accepted",
+                "en-route",
+                "on-the-way",
+                "arrived",
+                "in-progress",
+                "payment_pending",
+                "paid",
+            ]);
 
+            // 2) Lock technician row.
             const [techRows] = await conn.query(
                 "SELECT * FROM technicians WHERE id = ? FOR UPDATE",
                 [technicianId]
             );
             if (techRows.length === 0) {
                 await conn.rollback();
-                return { success: false, reason: "Technician not found" };
+                return { success: false, code: "technician_not_found", reason: "Technician not found" };
             }
-
-            const tech = techRows[0];
+            tech = techRows[0];
             const pricingConfig = await getPlatformPricingConfig();
             const estimatedAmount = await estimateRequestAmountAsync(
                 {
-                    service_type: jobRows[0]?.service_type,
-                    vehicle_type: jobRows[0]?.vehicle_type
+                    service_type: sourceJob?.service_type,
+                    vehicle_type: sourceJob?.vehicle_type
                 },
                 tech,
                 pricingConfig
             );
-            const assignedAmount =
+            assignedAmount =
                 toPositiveMoney(estimatedAmount) ??
-                toPositiveMoney(jobRows[0]?.amount) ??
-                toPositiveMoney(jobRows[0]?.service_charge);
+                toPositiveMoney(sourceJob?.amount) ??
+                toPositiveMoney(sourceJob?.service_charge);
+            const resolvedAmount = assignedAmount ?? sourceJob?.amount ?? sourceJob?.service_charge ?? null;
 
-            // 2. Assign Job
-            await conn.query(
-                "UPDATE service_requests SET technician_id = ?, status = 'assigned', amount = ?, updated_at = NOW() WHERE id = ?",
-                [technicianId, assignedAmount, requestId]
-            );
+            if (terminalStatuses.has(currentStatus)) {
+                await conn.rollback();
+                return {
+                    success: false,
+                    code: "conflict",
+                    reason: `Job is already ${currentStatus}.`
+                };
+            }
 
-            const assignedJob = {
-                ...jobRows[0],
-                technician_id: technicianId,
-                status: "assigned",
-                amount: assignedAmount ?? jobRows[0]?.amount ?? null,
-                updated_at: new Date().toISOString()
-            };
+            // Idempotent branch: already accepted/owned by same technician.
+            if (sameTechnician && sameTechIdempotentStatuses.has(currentStatus)) {
+                idempotent = true;
 
-            const [userRows] = await conn.query(
-                "SELECT full_name FROM users WHERE id = ? LIMIT 1",
-                [jobRows[0]?.user_id]
-            );
-            const customerName = String(
-                jobRows[0]?.contact_name ||
-                userRows?.[0]?.full_name ||
-                "Customer"
-            ).trim();
+                // Legacy compatibility: convert stale "assigned" into "accepted".
+                if (currentStatus === "assigned") {
+                    await conn.query(
+                        "UPDATE service_requests SET status = 'accepted', amount = COALESCE(amount, ?), updated_at = NOW() WHERE id = ?",
+                        [assignedAmount, requestId]
+                    );
+                    await conn.query(
+                        "UPDATE dispatch_offers SET status = 'accepted' WHERE service_request_id = ? AND technician_id = ?",
+                        [requestId, technicianId]
+                    );
+                    await conn.query(
+                        "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id != ? AND status = 'pending'",
+                        [requestId, technicianId]
+                    );
+                    shouldNotify = true;
+                    shouldRevokeOffers = true;
+                    acceptedJob = {
+                        ...sourceJob,
+                        technician_id: technicianId,
+                        status: "accepted",
+                        amount: resolvedAmount,
+                        updated_at: new Date().toISOString(),
+                    };
+                } else {
+                    acceptedJob = {
+                        ...sourceJob,
+                        technician_id: technicianId,
+                        amount: resolvedAmount,
+                    };
+                }
 
-            const userLat = Number(jobRows[0]?.location_lat);
-            const userLng = Number(jobRows[0]?.location_lng);
-            const techLat = Number(tech?.latitude);
-            const techLng = Number(tech?.longitude);
-            const locationDistance = Number.isFinite(userLat) && Number.isFinite(userLng) && Number.isFinite(techLat) && Number.isFinite(techLng)
-                ? `${getDistanceFromLatLonInKm(userLat, userLng, techLat, techLng).toFixed(1)} km`
-                : "Nearby";
+                await conn.query("UPDATE technicians SET is_available = FALSE WHERE id = ?", [technicianId]);
+                await conn.commit();
+            } else {
+                // Conflict: already owned by another technician in non-pending states.
+                if (currentStatus !== "pending" || (existingTechnicianId && !sameTechnician)) {
+                    await conn.rollback();
+                    return {
+                        success: false,
+                        code: "conflict",
+                        reason: "Job already accepted by another technician."
+                    };
+                }
 
-            // 3. Update Offers
-            await conn.query("UPDATE dispatch_offers SET status = 'accepted' WHERE service_request_id = ? AND technician_id = ?", [requestId, technicianId]);
-            await conn.query("UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id != ?", [requestId, technicianId]);
+                // Fresh accept path.
+                await conn.query(
+                    "UPDATE service_requests SET technician_id = ?, status = 'accepted', amount = ?, updated_at = NOW() WHERE id = ? AND status = 'pending'",
+                    [technicianId, resolvedAmount, requestId]
+                );
 
-            // 4. Mark Tech as Busy/Unavailable (Optional per requirements)
-            await conn.query("UPDATE technicians SET is_available = FALSE WHERE id = ?", [technicianId]);
+                await conn.query(
+                    "UPDATE dispatch_offers SET status = 'accepted' WHERE service_request_id = ? AND technician_id = ?",
+                    [requestId, technicianId]
+                );
+                await conn.query(
+                    "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id != ?",
+                    [requestId, technicianId]
+                );
+                await conn.query("UPDATE technicians SET is_available = FALSE WHERE id = ?", [technicianId]);
 
-            await conn.commit();
-
-            // Notify rejected techs
-            // We need to know WHO was rejected to emit to their specific rooms. 
-            // Or we can emit to a "job_watch_{requestId}" room if they joined it?
-            // Easier: Query the rejected offers and emit.
-            const [rejectedOffers] = await pool.query("SELECT technician_id FROM dispatch_offers WHERE service_request_id = ? AND status = 'rejected'", [requestId]);
-            rejectedOffers.forEach(offer => {
-                socketService.io.to(`technician_${offer.technician_id}`).emit("job:revoked", { requestId });
-            });
-
-            // 5. Notify Parties
-            const techInfo = {
-                id: tech.id,
-                name: tech.name,
-                phone: tech.phone,
-                location: { lat: tech.latitude, lng: tech.longitude }
-            };
-
-            // Notify User
-            socketService.io.emit(`job_update_${requestId}`, { status: 'assigned', technician: techInfo });
-
-            // Notify Tech (Confirm)
-            const assignedPayload = {
-                success: true,
-                request: assignedJob
-            };
-            socketService.io.to(`technician_${technicianId}`).emit("job_assigned", assignedPayload);
-
-            socketService.notifyTechnician(technicianId, "job:assigned", {
-                ...assignedPayload,
-                id: String(requestId),
-                jobId: String(requestId),
-                requestId: String(requestId),
-                customerName,
-                serviceType: jobRows[0]?.service_type,
-                locationDistance,
-                priceAmount: assignedAmount ?? 0,
-                amount: assignedAmount ?? 0,
-                location: {
-                    lat: jobRows[0]?.location_lat,
-                    lng: jobRows[0]?.location_lng,
-                    address: jobRows[0]?.address
-                },
-                address: jobRows[0]?.address
-            });
-
-            return { success: true, job: assignedJob, technician: tech };
+                acceptedJob = {
+                    ...sourceJob,
+                    technician_id: technicianId,
+                    status: "accepted",
+                    amount: resolvedAmount,
+                    updated_at: new Date().toISOString(),
+                };
+                shouldNotify = true;
+                shouldRevokeOffers = true;
+                await conn.commit();
+            }
 
         } catch (err) {
-            await conn.rollback();
+            try { await conn.rollback(); } catch { /* ignore rollback errors */ }
             throw err;
         } finally {
             conn.release();
         }
+
+        if (shouldNotify) {
+            try {
+                const [userRows] = await pool.query(
+                    "SELECT full_name FROM users WHERE id = ? LIMIT 1",
+                    [sourceJob?.user_id]
+                );
+                const customerName = String(
+                    sourceJob?.contact_name ||
+                    userRows?.[0]?.full_name ||
+                    "Customer"
+                ).trim();
+
+                const userLat = Number(sourceJob?.location_lat);
+                const userLng = Number(sourceJob?.location_lng);
+                const techLat = Number(tech?.latitude);
+                const techLng = Number(tech?.longitude);
+                const locationDistance =
+                    Number.isFinite(userLat) &&
+                    Number.isFinite(userLng) &&
+                    Number.isFinite(techLat) &&
+                    Number.isFinite(techLng)
+                        ? `${getDistanceFromLatLonInKm(userLat, userLng, techLat, techLng).toFixed(1)} km`
+                        : "Nearby";
+
+                if (shouldRevokeOffers) {
+                    const [rejectedOffers] = await pool.query(
+                        "SELECT technician_id FROM dispatch_offers WHERE service_request_id = ? AND status = 'rejected'",
+                        [requestId]
+                    );
+                    rejectedOffers.forEach((offer) => {
+                        socketService.io.to(`technician_${offer.technician_id}`).emit("job:revoked", { requestId });
+                    });
+                }
+
+                const techInfo = {
+                    id: tech.id,
+                    name: tech.name,
+                    phone: tech.phone,
+                    location: { lat: tech.latitude, lng: tech.longitude }
+                };
+
+                socketService.io.emit(`job_update_${requestId}`, { status: "accepted", technician: techInfo });
+                socketService.notifyUser(sourceJob?.user_id, "job:status_update", {
+                    requestId,
+                    status: "accepted",
+                    technicianId
+                });
+
+                const acceptedPayload = {
+                    success: true,
+                    idempotent,
+                    request: acceptedJob
+                };
+
+                socketService.io.to(`technician_${technicianId}`).emit("job_assigned", acceptedPayload);
+                socketService.notifyTechnician(technicianId, "job:assigned", {
+                    ...acceptedPayload,
+                    id: String(requestId),
+                    jobId: String(requestId),
+                    requestId: String(requestId),
+                    status: "accepted",
+                    customerName,
+                    serviceType: sourceJob?.service_type,
+                    locationDistance,
+                    priceAmount: assignedAmount ?? 0,
+                    amount: assignedAmount ?? 0,
+                    location: {
+                        lat: sourceJob?.location_lat,
+                        lng: sourceJob?.location_lng,
+                        address: sourceJob?.address
+                    },
+                    address: sourceJob?.address
+                });
+            } catch (notifyErr) {
+                console.error("[Dispatch] Accept notification sync failed:", notifyErr);
+            }
+        }
+
+        return { success: true, idempotent, job: acceptedJob, technician: tech };
     }
 };
