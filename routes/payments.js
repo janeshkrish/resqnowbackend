@@ -14,6 +14,7 @@ import {
     listSubscriptionPlans
 } from "../services/platformPricing.js";
 import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/pricingEstimator.js";
+import { releaseTechnicianAvailability } from "../services/technicianStateService.js";
 
 const router = express.Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -504,10 +505,13 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
 
         await conn.execute(
             `UPDATE service_requests
-             SET payment_status = ?, payment_method = ?, status = ?, amount = ?
+             SET payment_status = ?, payment_method = ?, status = ?, amount = ?, updated_at = NOW()
              WHERE id = ?`,
             ["completed", "razorpay", "paid", breakdown.baseAmount, requestId]
         );
+        if (request.technician_id) {
+            await releaseTechnicianAvailability(conn, request.technician_id, requestId);
+        }
 
         let invoiceId = null;
         let invoiceStatus = null;
@@ -844,7 +848,7 @@ router.post("/verify-registration-payment", verifyTechnician, async (req, res) =
             // Payment verified
             const pool = await getPool();
             await pool.execute(
-                "UPDATE technicians SET registration_payment_status = 'completed', registration_payment_id = ?, status = 'pending', is_active = FALSE, is_available = FALSE WHERE id = ?",
+                "UPDATE technicians SET registration_payment_status = 'completed', registration_payment_id = ?, status = 'pending', is_active = FALSE, is_available = FALSE, current_job_id = NULL WHERE id = ?",
                 [razorpay_payment_id, technicianId]
             );
 
@@ -1350,7 +1354,8 @@ router.post('/cash', verifyUser, async (req, res) => {
                      amount = ?,
                      applied_coupon_code = ?,
                      applied_discount_percent = ?,
-                     applied_discount_amount = ?
+                     applied_discount_amount = ?,
+                     updated_at = NOW()
                  WHERE id = ?`,
                 [
                     'completed',
@@ -1363,6 +1368,9 @@ router.post('/cash', verifyUser, async (req, res) => {
                     requestId
                 ]
             );
+            if (technicianId) {
+                await releaseTechnicianAvailability(conn, technicianId, requestId);
+            }
             console.log('REQUEST STATUS UPDATED:', { requestId, status: 'paid', amount: breakdown.baseAmount });
 
             await conn.execute(

@@ -15,6 +15,12 @@ import {
 } from "../services/serviceNormalization.js";
 import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/pricingEstimator.js";
 import { computePaymentAmounts, getPlatformPricingConfig } from "../services/platformPricing.js";
+import {
+    isActiveJobStatus,
+    isTerminalJobStatus,
+    markTechnicianReserved,
+    releaseTechnicianAvailability
+} from "../services/technicianStateService.js";
 
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
 const RAZORPAY_KEY_SECRET = String(process.env.RAZORPAY_KEY_SECRET || "");
@@ -261,7 +267,7 @@ router.post("/", verifyUser, async (req, res) => {
             }
 
             const [techRows] = await pool.query(
-                "SELECT id, status, is_active, is_available, latitude, longitude, service_area_range, service_type, specialties, pricing, service_costs, vehicle_types FROM technicians WHERE id = ? LIMIT 1",
+                "SELECT id, status, is_active, is_available, current_job_id, latitude, longitude, service_area_range, service_type, specialties, pricing, service_costs, vehicle_types FROM technicians WHERE id = ? LIMIT 1",
                 [directTechnicianId]
             );
             const tech = techRows?.[0];
@@ -274,6 +280,9 @@ router.post("/", verifyUser, async (req, res) => {
             }
             if (!tech.is_active || !tech.is_available) {
                 return res.status(400).json({ error: "Selected technician is not currently available." });
+            }
+            if (tech.current_job_id != null) {
+                return res.status(400).json({ error: "Selected technician is currently on another active job." });
             }
             const serviceDomains = [
                 canonicalizeServiceDomain(tech.service_type),
@@ -319,8 +328,8 @@ router.post("/", verifyUser, async (req, res) => {
 
         const [result] = await pool.execute(
             `INSERT INTO service_requests 
-      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, technician_id, status, started_at, amount) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)`,
+      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, technician_id, status, amount) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 userId,
                 canonicalServiceType,
@@ -341,6 +350,11 @@ router.post("/", verifyUser, async (req, res) => {
 
         const newRequestId = result.insertId;
         console.log(`[Create Job] Created Request #${newRequestId}`);
+
+        if (hasDirectTechnician && directTechnicianId) {
+            await markTechnicianReserved(pool, directTechnicianId, newRequestId);
+            console.log(`[Create Job] Reserved technician ${directTechnicianId} for direct request #${newRequestId}.`);
+        }
 
         // 3. Trigger Direct Notify or Smart Dispatch (Async)
         // We do this asynchronously so we can return quickly to the UI
@@ -497,6 +511,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
         let reassignedAmount = null;
 
         if (normalized === 'rejected') {
+            await releaseTechnicianAvailability(pool, technicianId, requestId);
             // ... (keep reassignment logic)
             const { jobMatcher } = await import("../services/jobMatcher.js");
             const nextMatch = await jobMatcher.findBestMatch(request, [technicianId]);
@@ -508,6 +523,26 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                     { service_type: request.service_type, vehicle_type: request.vehicle_type },
                     nextMatch
                 );
+                await markTechnicianReserved(pool, newTechId, requestId);
+                await pool.query(
+                    "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id = ?",
+                    [requestId, technicianId]
+                );
+                const [existingNextOffer] = await pool.query(
+                    "SELECT id FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ? LIMIT 1",
+                    [requestId, newTechId]
+                );
+                if (existingNextOffer.length > 0) {
+                    await pool.query(
+                        "UPDATE dispatch_offers SET status = 'accepted' WHERE id = ?",
+                        [existingNextOffer[0].id]
+                    );
+                } else {
+                    await pool.query(
+                        "INSERT INTO dispatch_offers (service_request_id, technician_id, status) VALUES (?, ?, 'accepted')",
+                        [requestId, newTechId]
+                    );
+                }
                 // Notify new technician
                 socketService.notifyTechnician(newTechId, 'job:assigned', {
                     id: String(requestId),
@@ -528,6 +563,10 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                     amount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0,
                     priceAmount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0
                 });
+                socketService.notifyTechnician(newTechId, "job:list_update", {
+                    requestId: String(requestId),
+                    action: "updated"
+                });
 
                 if (nextMatch.email) {
                     mail.sendMail({
@@ -541,6 +580,10 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             } else {
                 newTechId = null;
                 newStatus = 'pending';
+                await pool.query(
+                    "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id = ?",
+                    [requestId, technicianId]
+                );
             }
         }
 
@@ -557,8 +600,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
         } else if (normalized === 'completed' || newStatus === 'payment_pending' || newStatus === 'paid') {
             // mark completed_at
             timestampUpdate = ", completed_at = NOW()";
-            // Release Technician (Mark Available)
-            await pool.query("UPDATE technicians SET is_available = TRUE WHERE id = ?", [technicianId]);
+            await releaseTechnicianAvailability(pool, technicianId, requestId);
         }
 
         const shouldUpdateAmount = toPositiveMoney(reassignedAmount) != null;
@@ -568,9 +610,15 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             : [newStatus, newTechId, requestId];
 
         await pool.execute(
-            `UPDATE service_requests SET status = ?, technician_id = ? ${amountUpdateClause} ${timestampUpdate} WHERE id = ?`,
+            `UPDATE service_requests SET status = ?, technician_id = ? ${amountUpdateClause} ${timestampUpdate}, updated_at = NOW() WHERE id = ?`,
             updateParams
         );
+
+        if (newTechId && isActiveJobStatus(newStatus)) {
+            await markTechnicianReserved(pool, newTechId, requestId);
+        } else if (!isActiveJobStatus(newStatus) && isTerminalJobStatus(newStatus)) {
+            await releaseTechnicianAvailability(pool, technicianId, requestId);
+        }
 
         // Notify Customer via Socket
         if (request.user_id) {
@@ -636,7 +684,7 @@ router.patch("/:id/status", verifyUser, async (req, res) => {
 
         // Check ownership
         const pool = await getPool();
-        const [check] = await pool.query("SELECT id, technician_id FROM service_requests WHERE id = ? AND user_id = ?", [requestId, userId]);
+        const [check] = await pool.query("SELECT id, status, technician_id FROM service_requests WHERE id = ? AND user_id = ?", [requestId, userId]);
         if (check.length === 0) {
             return res.status(404).json({ error: "Request not found or unauthorized." });
         }
@@ -655,9 +703,13 @@ router.patch("/:id/status", verifyUser, async (req, res) => {
         }
 
         await pool.execute(
-            "UPDATE service_requests SET status = ? WHERE id = ?",
+            "UPDATE service_requests SET status = ?, updated_at = NOW() WHERE id = ?",
             [normalized, requestId]
         );
+
+        if (reqData.technician_id && (normalized === 'cancelled' || isTerminalJobStatus(normalized))) {
+            await releaseTechnicianAvailability(pool, reqData.technician_id, requestId);
+        }
 
         // Notify Technician if assigned
         if (reqData.technician_id) {
@@ -726,7 +778,7 @@ router.patch("/:id/cancel", verifyUser, async (req, res) => {
 
             // Release Technician
             if (current.technician_id) {
-                await conn.query("UPDATE technicians SET is_available = TRUE WHERE id = ?", [current.technician_id]);
+                await releaseTechnicianAvailability(conn, current.technician_id, requestId);
             }
 
             await conn.commit();
@@ -1046,9 +1098,12 @@ router.post("/:id/payment-cash", verifyUser, async (req, res) => {
 
             // 1. Update Request
             await conn.execute(
-                "UPDATE service_requests SET payment_status = 'completed', payment_method = 'cash', status = 'paid', amount = ? WHERE id = ?",
+                "UPDATE service_requests SET payment_status = 'completed', payment_method = 'cash', status = 'paid', amount = ?, updated_at = NOW() WHERE id = ?",
                 [breakdown.baseAmount, requestId]
             );
+            if (technicianId) {
+                await releaseTechnicianAvailability(conn, technicianId, requestId);
+            }
 
             // 2. Insert Payment Record (Cash)
             await conn.execute(

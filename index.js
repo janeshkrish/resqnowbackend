@@ -35,6 +35,7 @@ import { validateEnvironmentOrThrow, logEnvironmentSummary } from "./config/envV
 import { socketService } from "./services/socket.js";
 import { verifyMailerConnection } from "./services/mailer.js";
 import { closePool } from "./db.js";
+import { reconcileTechnicianAvailability } from "./services/technicianStateService.js";
 
 const PORT = Number(process.env.PORT || 3001);
 const HOST = "0.0.0.0";
@@ -92,6 +93,10 @@ async function bootstrapDatabase() {
     updateServiceRequestsTableSchema(),
     updateUsersTableSchema(),
   ]);
+
+  const { getPool } = await import("./db.js");
+  const pool = await getPool();
+  await reconcileTechnicianAvailability(pool);
 }
 
 function createApp() {

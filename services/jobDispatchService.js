@@ -10,6 +10,7 @@ import {
 } from "./serviceNormalization.js";
 import { estimateRequestAmountAsync } from "./pricingEstimator.js";
 import { getPlatformPricingConfig } from "./platformPricing.js";
+import { markTechnicianReserved } from "./technicianStateService.js";
 
 
 /**
@@ -71,6 +72,7 @@ export const jobDispatchService = {
         if (String(tech.status || "").toLowerCase() !== "approved") reasons.push("not_approved");
         if (!tech.is_active) reasons.push("inactive");
         if (!tech.is_available) reasons.push("unavailable");
+        if (tech.current_job_id != null) reasons.push("busy");
 
         const tLat = Number(tech.latitude);
         const tLng = Number(tech.longitude);
@@ -243,7 +245,10 @@ export const jobDispatchService = {
         );
         const offeredSet = new Set((existingOffers || []).map((o) => String(o.technician_id)));
         const freshTechnicians = technicians.filter((t) => !offeredSet.has(String(t.id)));
-        if (freshTechnicians.length === 0) return;
+        if (freshTechnicians.length === 0) {
+            console.log(`[Dispatch] No new technicians to notify for request #${jobRequest.id}.`);
+            return;
+        }
 
         // 1. Create Offers
         const values = freshTechnicians.map(t => [jobRequest.id, t.id, 'pending']);
@@ -251,6 +256,7 @@ export const jobDispatchService = {
             const sql = "INSERT INTO dispatch_offers (service_request_id, technician_id, status) VALUES ?";
             const q = pool.format(sql, [values]);
             await pool.query(q);
+            console.log(`[Dispatch] Created ${values.length} offer(s) for request #${jobRequest.id}.`);
         }
 
         // 2. Send WebSocket Alerts
@@ -280,6 +286,7 @@ export const jobDispatchService = {
                 requestId: jobRequest.id,
                 action: "created"
             });
+            console.log(`[Dispatch] Notified technician ${t.id} for request #${jobRequest.id}.`);
 
             // Push Notification (Simulated)
             db.query("INSERT INTO notifications (type, title, message, created_at) VALUES (?, ?, ?, NOW())", [
@@ -404,7 +411,7 @@ export const jobDispatchService = {
                     };
                 }
 
-                await conn.query("UPDATE technicians SET is_available = FALSE WHERE id = ?", [technicianId]);
+                await markTechnicianReserved(conn, technicianId, requestId);
                 await conn.commit();
             } else {
                 // Conflict: already owned by another technician in non-pending states.
@@ -431,7 +438,7 @@ export const jobDispatchService = {
                     "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id != ?",
                     [requestId, technicianId]
                 );
-                await conn.query("UPDATE technicians SET is_available = FALSE WHERE id = ?", [technicianId]);
+                await markTechnicianReserved(conn, technicianId, requestId);
 
                 acceptedJob = {
                     ...sourceJob,
@@ -530,6 +537,9 @@ export const jobDispatchService = {
             }
         }
 
+        console.log(
+            `[Dispatch] Accept resolved for request #${requestId}: technician=${technicianId}, idempotent=${idempotent}`
+        );
         return { success: true, idempotent, job: acceptedJob, technician: tech };
     }
 };

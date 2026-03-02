@@ -1,6 +1,7 @@
 import { getPool } from "../db.js";
 import { jobDispatchService } from "./jobDispatchService.js";
 import { socketService } from "./socket.js";
+import { releaseTechnicianAvailability } from "./technicianStateService.js";
 
 function adminExtendedParsePositiveInt(value, fieldName) {
   const parsed = Number(value);
@@ -114,6 +115,10 @@ export async function adminExtendedManualCloseRequest({ requestId, status, reaso
        AND status = 'pending'`,
     [parsedRequestId]
   );
+
+  if (existing.technician_id) {
+    await releaseTechnicianAvailability(pool, existing.technician_id, parsedRequestId);
+  }
 
   if (existing.user_id) {
     socketService.notifyUser(existing.user_id, "job:status_update", {

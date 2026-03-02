@@ -6,9 +6,10 @@ export const jobMatcher = {
         try {
             const rows = await db.query("SELECT * FROM technicians");
             const { analysis } = jobDispatchService.analyzeTechnicians(jobRequest, rows, null);
+            const excluded = new Set((excludeTechnicianIds || []).map((id) => String(id)));
 
             const eligible = analysis
-                .filter((a) => a.eligible && !excludeTechnicianIds.includes(a.technicianId))
+                .filter((a) => a.eligible && !excluded.has(String(a.technicianId)))
                 .sort((a, b) => (a.distanceKm || Number.POSITIVE_INFINITY) - (b.distanceKm || Number.POSITIVE_INFINITY));
 
             if (eligible.length === 0) return null;

@@ -533,7 +533,16 @@ router.patch("/me/status", verifyTechnician, async (req, res) => {
     }
 
     const pool = await db.getPool();
-    await pool.execute("UPDATE technicians SET is_active = ?, is_available = ? WHERE id = ?", [active, active, req.technicianId]);
+    await pool.execute(
+      `UPDATE technicians
+       SET is_active = ?,
+           is_available = CASE
+             WHEN ? = TRUE AND current_job_id IS NULL THEN TRUE
+             ELSE FALSE
+           END
+       WHERE id = ?`,
+      [active, active, req.technicianId]
+    );
 
     // We could use socketService to handle this event if we were receiving it from client socket,
     // but here we are doing it via REST, so we can emit it to the system.
@@ -1099,7 +1108,13 @@ router.patch("/status", verifyTechnician, async (req, res) => {
     }
     const pool = await db.getPool();
     await pool.execute(
-      "UPDATE technicians SET is_active = ?, is_available = ? WHERE id = ?",
+      `UPDATE technicians
+       SET is_active = ?,
+           is_available = CASE
+             WHEN ? = TRUE AND current_job_id IS NULL THEN TRUE
+             ELSE FALSE
+           END
+       WHERE id = ?`,
       [active ? 1 : 0, active ? 1 : 0, req.technicianId]
     );
     res.json({ success: true, is_active: active, is_available: active });
@@ -1543,7 +1558,7 @@ router.patch("/:id/approve", verifyAdmin, async (req, res) => {
     const previousStatus = String(existing[0].status || "pending");
 
     await pool.execute(
-      "UPDATE technicians SET status = 'approved', is_active = TRUE, is_available = TRUE WHERE id = ?",
+      "UPDATE technicians SET status = 'approved', is_active = TRUE, is_available = TRUE, current_job_id = NULL WHERE id = ?",
       [id]
     );
     await pool.execute(
@@ -1589,7 +1604,7 @@ router.patch("/:id/reject", verifyAdmin, async (req, res) => {
     }
     const previousStatus = String(existing[0].status || "pending");
     await pool.execute(
-      "UPDATE technicians SET status = 'rejected', is_active = FALSE, is_available = FALSE WHERE id = ?",
+      "UPDATE technicians SET status = 'rejected', is_active = FALSE, is_available = FALSE, current_job_id = NULL WHERE id = ?",
       [id]
     );
     await pool.execute(
