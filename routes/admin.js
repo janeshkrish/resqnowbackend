@@ -8,6 +8,34 @@ import { getAdminCredentials, signAdminToken, verifyAdmin } from "../middleware/
 import { getFrontendUrl } from "../config/network.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../services/serviceNormalization.js";
 import { runDispatchMatrixAudit } from "../services/dispatchMatrixAudit.js";
+import { getDashboard, getAdminAuditLogs } from "../controllers/adminController.js";
+import {
+  getRequests,
+  assignRequest,
+  escalateRequest,
+  markHighPriority,
+  closeRequest,
+} from "../controllers/requestController.js";
+import {
+  getTechnicians,
+  toggleTechnicianVisibility,
+  addTechnicianNote,
+} from "../controllers/technicianController.js";
+import {
+  getFinanceSummary,
+  getFinanceTransactions,
+  exportFinanceCsv,
+  getFlaggedPayments,
+} from "../controllers/financeController.js";
+import { getAnalytics } from "../controllers/analyticsController.js";
+import {
+  createComplaint,
+  getComplaints,
+  assignComplaint,
+  resolveComplaint,
+  addComplaintInternalNote,
+} from "../controllers/complaintController.js";
+import { broadcastNotification } from "../controllers/notificationController.js";
 
 const router = Router();
 const JWT_SECRET = String(process.env.JWT_SECRET || "").trim();
@@ -32,6 +60,35 @@ router.post("/login", (req, res) => {
 router.use((req, res, next) => {
   return verifyAdmin(req, res, next);
 });
+
+// --- Admin Extended SaaS API contract (/api/admin/*) ---
+router.get("/dashboard", getDashboard);
+
+router.get("/requests", getRequests);
+router.post("/assign", assignRequest);
+router.post("/escalate", escalateRequest);
+router.post("/requests/high-priority", markHighPriority);
+router.post("/close", closeRequest);
+
+router.get("/technicians", getTechnicians);
+router.post("/technician/toggle", toggleTechnicianVisibility);
+router.post("/technician/note", addTechnicianNote);
+
+router.get("/finance/summary", getFinanceSummary);
+router.get("/finance/transactions", getFinanceTransactions);
+router.get("/finance/export", exportFinanceCsv);
+router.get("/finance/flagged", getFlaggedPayments);
+router.get("/finance/audit-logs", getAdminAuditLogs);
+
+router.get("/analytics", getAnalytics);
+
+router.post("/complaints", createComplaint);
+router.get("/complaints", getComplaints);
+router.post("/complaints/assign", assignComplaint);
+router.post("/complaints/resolve", resolveComplaint);
+router.post("/complaints/internal-note", addComplaintInternalNote);
+
+router.post("/notifications/broadcast", broadcastNotification);
 
 // --- Notifications ---
 
