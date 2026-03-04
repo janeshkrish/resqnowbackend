@@ -49,20 +49,26 @@ export async function getFinanceSummary(_req, res) {
       [completedTransactionsRows],
     ] = await Promise.all([
       pool.query(
-        `SELECT IFNULL(SUM(amount), 0) AS total
-         FROM payments
-         WHERE LOWER(COALESCE(status, '')) = 'completed'
-           AND DATE(created_at) = CURDATE()`
+        `SELECT IFNULL(SUM(p.amount), 0) AS total
+         FROM payments p
+         LEFT JOIN service_requests sr ON sr.id = p.service_request_id
+         WHERE LOWER(COALESCE(p.status, '')) = 'completed'
+           AND DATE(p.created_at) = CURDATE()
+           AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')`
       ),
       pool.query(
         `SELECT COUNT(*) AS count
-         FROM payments
-         WHERE LOWER(COALESCE(status, '')) IN ('pending', 'processing')`
+         FROM payments p
+         LEFT JOIN service_requests sr ON sr.id = p.service_request_id
+         WHERE LOWER(COALESCE(p.status, '')) IN ('pending', 'processing')
+           AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')`
       ),
       pool.query(
         `SELECT COUNT(*) AS count
-         FROM payments
-         WHERE LOWER(COALESCE(status, '')) = 'completed'`
+         FROM payments p
+         LEFT JOIN service_requests sr ON sr.id = p.service_request_id
+         WHERE LOWER(COALESCE(p.status, '')) = 'completed'
+           AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')`
       ),
     ]);
 
@@ -97,7 +103,13 @@ export async function getFinanceTransactions(req, res) {
     }
 
     if (status && status !== "all") {
-      whereClauses.push("LOWER(COALESCE(p.status, '')) = ?");
+      whereClauses.push(`LOWER(COALESCE(
+        CASE
+          WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+          ELSE p.status
+        END,
+        ''
+      )) = ?`);
       values.push(status);
     }
 
@@ -110,7 +122,10 @@ export async function getFinanceTransactions(req, res) {
          COALESCE(u.full_name, CONCAT('User #', p.user_id)) AS user_name,
          COALESCE(t.name, 'Unassigned') AS technician_name,
          p.amount,
-         p.status,
+         CASE
+           WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           ELSE p.status
+         END AS status,
          p.created_at
        FROM payments p
        LEFT JOIN users u ON u.id = p.user_id
@@ -159,7 +174,10 @@ export async function exportFinanceCsv(req, res) {
          COALESCE(u.full_name, CONCAT('User #', p.user_id)) AS user_name,
          COALESCE(t.name, 'Unassigned') AS technician_name,
          p.amount,
-         p.status,
+         CASE
+           WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           ELSE p.status
+         END AS status,
          p.created_at
        FROM payments p
        LEFT JOIN users u ON u.id = p.user_id
@@ -193,7 +211,10 @@ export async function getFlaggedPayments(req, res) {
          COALESCE(u.full_name, CONCAT('User #', p.user_id)) AS user_name,
          COALESCE(t.name, 'Unassigned') AS technician_name,
          p.amount,
-         p.status,
+         CASE
+           WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           ELSE p.status
+         END AS status,
          p.created_at,
          CASE
            WHEN LOWER(COALESCE(p.status, '')) IN ('pending', 'processing')
@@ -217,6 +238,7 @@ export async function getFlaggedPayments(req, res) {
            AND (COALESCE(p.razorpay_order_id, '') = '' OR COALESCE(p.razorpay_payment_id, '') = ''))
          OR (LOWER(COALESCE(p.status, '')) = 'completed' AND COALESCE(p.amount, 0) <= 0)
        )
+       AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')
        ORDER BY p.created_at DESC
        LIMIT ?`,
       [limit]

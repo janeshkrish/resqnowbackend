@@ -1487,7 +1487,10 @@ router.get('/diagnostics/overview', verifyAdmin, async (req, res) => {
                 p.id AS payment_id,
                 p.service_request_id,
                 p.payment_method,
-                p.status AS payment_row_status,
+                CASE
+                  WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+                  ELSE p.status
+                END AS payment_row_status,
                 p.amount AS payment_total_amount,
                 p.platform_fee,
                 p.technician_amount,
@@ -1515,11 +1518,27 @@ router.get('/diagnostics/overview', verifyAdmin, async (req, res) => {
         const [statsRows] = await pool.query(
             `SELECT
                 COUNT(*) AS total_payments,
-                SUM(CASE WHEN p.status = 'completed' THEN 1 ELSE 0 END) AS completed_payments,
+                SUM(
+                  CASE
+                    WHEN LOWER(COALESCE(CASE WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled' ELSE p.status END, '')) = 'completed'
+                      THEN 1
+                    ELSE 0
+                  END
+                ) AS completed_payments,
                 SUM(CASE WHEN p.payment_method = 'cash' THEN 1 ELSE 0 END) AS cash_payments,
                 SUM(CASE WHEN p.payment_method = 'razorpay' THEN 1 ELSE 0 END) AS online_payments,
-                IFNULL(SUM(CASE WHEN p.status = 'completed' THEN p.amount ELSE 0 END), 0) AS gross_amount
-            FROM payments p`
+                IFNULL(
+                  SUM(
+                    CASE
+                      WHEN LOWER(COALESCE(CASE WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled' ELSE p.status END, '')) = 'completed'
+                        THEN p.amount
+                      ELSE 0
+                    END
+                  ),
+                  0
+                ) AS gross_amount
+            FROM payments p
+            LEFT JOIN service_requests sr ON sr.id = p.service_request_id`
         );
 
         const records = rows.map((row) => {

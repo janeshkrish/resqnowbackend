@@ -40,10 +40,12 @@ export async function getDashboard(req, res) {
            AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`
       ),
       pool.query(
-        `SELECT IFNULL(SUM(amount), 0) AS total
-         FROM payments
-         WHERE LOWER(COALESCE(status, '')) = 'completed'
-           AND DATE(created_at) = CURDATE()`
+        `SELECT IFNULL(SUM(p.amount), 0) AS total
+         FROM payments p
+         LEFT JOIN service_requests sr ON sr.id = p.service_request_id
+         WHERE LOWER(COALESCE(p.status, '')) = 'completed'
+           AND DATE(p.created_at) = CURDATE()
+           AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')`
       ),
       pool.query(
         `SELECT COUNT(*) AS count

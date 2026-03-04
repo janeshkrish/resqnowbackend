@@ -1,5 +1,7 @@
 import { getPool } from "../db.js";
 import { buildPagination, likeFilter, resolveAdminId, toPositiveInt } from "./utils.js";
+import { socketService } from "../services/socket.js";
+import { closeRequestWithFinanceSync } from "../services/requestClosureService.js";
 
 const ACTIVE_REQUEST_STATES = [
   "assigned",
@@ -284,22 +286,13 @@ export async function closeRequest(req, res) {
 
     const finalStatus = requestedStatus === "completed" ? "completed" : "cancelled";
 
-    const pool = await getPool();
-    const requestRow = await getRequestById(pool, requestId);
-    if (!requestRow) {
-      return res.status(404).json({ error: "Request not found." });
-    }
+    const closureResult = await closeRequestWithFinanceSync({
+      requestId,
+      status: finalStatus,
+      reason: reason || "Closed by admin",
+    });
 
-    await pool.execute(
-      `UPDATE service_requests
-       SET status = ?,
-           cancellation_reason = ?,
-           cancelled_at = CASE WHEN ? = 'cancelled' THEN NOW() ELSE cancelled_at END,
-           completed_at = CASE WHEN ? = 'completed' THEN NOW() ELSE completed_at END,
-           updated_at = NOW()
-       WHERE id = ?`,
-      [finalStatus, reason || null, finalStatus, finalStatus, requestId]
-    );
+    const pool = await getPool();
 
     await logAction({
       pool,
@@ -307,20 +300,60 @@ export async function closeRequest(req, res) {
       actionType: "manualCloseRequest",
       targetId: requestId,
       metadata: {
-        status: finalStatus,
+        status: closureResult.status,
         reason: reason || null,
+        previousStatus: closureResult.previousStatus,
+        paymentRowsUpdated: closureResult.paymentRowsUpdated,
+        alreadyTerminal: closureResult.alreadyTerminal,
       },
+    });
+
+    if (closureResult.userId) {
+      socketService.notifyUser(closureResult.userId, "job:status_update", {
+        requestId,
+        status: closureResult.status,
+      });
+    }
+
+    if (closureResult.technicianId) {
+      socketService.notifyTechnician(closureResult.technicianId, "job:status_update", {
+        requestId,
+        status: closureResult.status,
+      });
+    }
+
+    // Keep existing admin pages in sync without manual refresh.
+    socketService.broadcast("admin:request_status_updated", {
+      requestId,
+      status: closureResult.status,
+      previousStatus: closureResult.previousStatus,
+      at: new Date().toISOString(),
+    });
+    socketService.broadcast("admin:payment_update", {
+      requestId,
+      status: closureResult.status,
+      paymentRowsUpdated: closureResult.paymentRowsUpdated,
+      at: new Date().toISOString(),
+    });
+    socketService.broadcast("admin:analytics_update", {
+      requestId,
+      status: closureResult.status,
+      at: new Date().toISOString(),
     });
 
     return res.json({
       success: true,
       requestId,
-      status: finalStatus,
+      status: closureResult.status,
+      previousStatus: closureResult.previousStatus,
+      paymentRowsUpdated: closureResult.paymentRowsUpdated,
+      alreadyTerminal: closureResult.alreadyTerminal,
       message: "Request closed.",
     });
   } catch (error) {
     console.error("[admin.requests.close] failed:", error?.message || error);
-    return res.status(500).json({ error: "Failed to close request." });
+    const statusCode = Number(error?.statusCode) || 500;
+    return res.status(statusCode).json({ error: error?.message || "Failed to close request." });
   }
 }
 

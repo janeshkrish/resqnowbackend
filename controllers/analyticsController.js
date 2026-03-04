@@ -113,8 +113,15 @@ export async function getAnalytics(req, res) {
         `SELECT
            (SELECT COUNT(*) FROM technicians) AS total_technicians,
            (SELECT COUNT(*) FROM users) AS total_users,
+           (SELECT COUNT(DISTINCT user_id) FROM service_requests WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)) AS active_users,
            (SELECT COUNT(*) FROM service_requests) AS total_service_requests,
-           (SELECT IFNULL(SUM(amount), 0) FROM payments WHERE LOWER(COALESCE(status, '')) = 'completed') AS total_revenue`
+           (
+             SELECT IFNULL(SUM(p.amount), 0)
+             FROM payments p
+             LEFT JOIN service_requests sr ON sr.id = p.service_request_id
+             WHERE LOWER(COALESCE(p.status, '')) = 'completed'
+               AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')
+           ) AS total_revenue`
       ),
       pool.query(
         `SELECT
@@ -181,6 +188,7 @@ export async function getAnalytics(req, res) {
       // Keep legacy keys for existing /admin analytics page compatibility.
       totalTechnicians: Number(totals.total_technicians || 0),
       totalUsers: Number(totals.total_users || 0),
+      activeUsers: Number(totals.active_users || 0),
       totalServiceRequests: Number(totals.total_service_requests || 0),
       totalRevenue: Number(totals.total_revenue || 0),
       monthlyData,

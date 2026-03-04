@@ -62,7 +62,13 @@ router.get("/finance/transaction-audit-list", async (req, res) => {
     const whereClauses = [];
     const values = [];
     if (statusFilter) {
-      whereClauses.push("LOWER(COALESCE(p.status, '')) = ?");
+      whereClauses.push(`LOWER(COALESCE(
+        CASE
+          WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+          ELSE p.status
+        END,
+        ''
+      )) = ?`);
       values.push(statusFilter);
     }
     if (methodFilter) {
@@ -78,7 +84,10 @@ router.get("/finance/transaction-audit-list", async (req, res) => {
          p.service_request_id,
          p.user_id,
          p.payment_method,
-         p.status,
+         CASE
+           WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           ELSE p.status
+         END AS status,
          p.amount,
          p.platform_fee,
          p.technician_amount,
@@ -103,6 +112,7 @@ router.get("/finance/transaction-audit-list", async (req, res) => {
     const [countRows] = await pool.query(
       `SELECT COUNT(*) AS total
        FROM payments p
+       LEFT JOIN service_requests sr ON sr.id = p.service_request_id
        ${whereSql}`,
       values
     );
@@ -133,7 +143,10 @@ router.get("/finance/flagged-payments", async (req, res) => {
          p.service_request_id,
          p.user_id,
          p.payment_method,
-         p.status,
+         CASE
+           WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           ELSE p.status
+         END AS status,
          p.amount,
          p.platform_fee,
          p.technician_amount,
@@ -154,6 +167,7 @@ router.get("/finance/flagged-payments", async (req, res) => {
            ELSE 'manual_review'
          END AS flag_reason
        FROM payments p
+       LEFT JOIN service_requests sr ON sr.id = p.service_request_id
        WHERE (
          (LOWER(COALESCE(p.status, '')) IN ('pending', 'processing')
            AND p.created_at < DATE_SUB(NOW(), INTERVAL 30 MINUTE))
@@ -163,6 +177,7 @@ router.get("/finance/flagged-payments", async (req, res) => {
          OR
          (LOWER(COALESCE(p.status, '')) = 'completed' AND COALESCE(p.amount, 0) <= 0)
        )
+       AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')
        ORDER BY p.created_at DESC
        LIMIT ?`,
       [limit]
@@ -184,22 +199,26 @@ router.get("/finance/export-payments-csv", async (req, res) => {
     const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
     const pool = await getPool();
     const [rows] = await pool.query(
-      `SELECT
-         id AS payment_id,
-         service_request_id,
-         user_id,
-         payment_method,
-         status,
-         amount,
-         platform_fee,
-         technician_amount,
-         is_settled,
-         razorpay_order_id,
-         razorpay_payment_id,
-         created_at
-       FROM payments
-       WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
-       ORDER BY created_at DESC`,
+       `SELECT
+         p.id AS payment_id,
+         p.service_request_id,
+         p.user_id,
+         p.payment_method,
+         CASE
+           WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           ELSE p.status
+         END AS status,
+         p.amount,
+         p.platform_fee,
+         p.technician_amount,
+         p.is_settled,
+         p.razorpay_order_id,
+         p.razorpay_payment_id,
+         p.created_at
+       FROM payments p
+       LEFT JOIN service_requests sr ON sr.id = p.service_request_id
+       WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+       ORDER BY p.created_at DESC`,
       [days]
     );
 
