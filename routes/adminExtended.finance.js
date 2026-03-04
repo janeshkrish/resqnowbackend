@@ -65,6 +65,7 @@ router.get("/finance/transaction-audit-list", async (req, res) => {
       whereClauses.push(`LOWER(COALESCE(
         CASE
           WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+          WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
           ELSE p.status
         END,
         ''
@@ -86,6 +87,7 @@ router.get("/finance/transaction-audit-list", async (req, res) => {
          p.payment_method,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
            ELSE p.status
          END AS status,
          p.amount,
@@ -145,6 +147,7 @@ router.get("/finance/flagged-payments", async (req, res) => {
          p.payment_method,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
            ELSE p.status
          END AS status,
          p.amount,
@@ -206,6 +209,7 @@ router.get("/finance/export-payments-csv", async (req, res) => {
          p.payment_method,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
            ELSE p.status
          END AS status,
          p.amount,

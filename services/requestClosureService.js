@@ -24,7 +24,7 @@ function normalizeCloseStatus(value) {
 /**
  * Performs a status close/cancel flow atomically:
  * 1) update request status
- * 2) update payments status for cancelled requests
+ * 2) update payments status for completed/cancelled requests
  * 3) expire dispatch offers + release technician availability
  */
 export async function closeRequestWithFinanceSync({ requestId, status, reason }) {
@@ -59,6 +59,16 @@ export async function closeRequestWithFinanceSync({ requestId, status, reason })
       (closeStatus === "completed" && (previousStatus === "completed" || previousStatus === "paid"));
 
     if (alreadyInFinalState) {
+      const paymentStatus = closeStatus === "completed" ? "completed" : "cancelled";
+      const paymentSettled = closeStatus === "completed";
+      const [paymentUpdateResult] = await conn.execute(
+        `UPDATE payments
+         SET status = ?,
+             is_settled = ?
+         WHERE service_request_id = ?
+           AND LOWER(COALESCE(status, '')) <> ?`,
+        [paymentStatus, paymentSettled, parsedRequestId, paymentStatus]
+      );
       await conn.commit();
       return {
         requestId: parsedRequestId,
@@ -66,7 +76,7 @@ export async function closeRequestWithFinanceSync({ requestId, status, reason })
         previousStatus,
         userId: existing.user_id || null,
         technicianId: existing.technician_id || null,
-        paymentRowsUpdated: 0,
+        paymentRowsUpdated: Number(paymentUpdateResult?.affectedRows || 0),
         alreadyTerminal: true,
       };
     }
@@ -108,18 +118,17 @@ export async function closeRequestWithFinanceSync({ requestId, status, reason })
       [parsedRequestId]
     );
 
-    let paymentRowsUpdated = 0;
-    if (closeStatus === "cancelled") {
-      const [paymentUpdateResult] = await conn.execute(
-        `UPDATE payments
-         SET status = 'cancelled',
-             is_settled = FALSE
-         WHERE service_request_id = ?
-           AND LOWER(COALESCE(status, '')) <> 'cancelled'`,
-        [parsedRequestId]
-      );
-      paymentRowsUpdated = Number(paymentUpdateResult?.affectedRows || 0);
-    }
+    const paymentStatus = closeStatus === "completed" ? "completed" : "cancelled";
+    const paymentSettled = closeStatus === "completed";
+    const [paymentUpdateResult] = await conn.execute(
+      `UPDATE payments
+       SET status = ?,
+           is_settled = ?
+       WHERE service_request_id = ?
+         AND LOWER(COALESCE(status, '')) <> ?`,
+      [paymentStatus, paymentSettled, parsedRequestId, paymentStatus]
+    );
+    const paymentRowsUpdated = Number(paymentUpdateResult?.affectedRows || 0);
 
     if (existing.technician_id) {
       await releaseTechnicianAvailability(conn, existing.technician_id, parsedRequestId);

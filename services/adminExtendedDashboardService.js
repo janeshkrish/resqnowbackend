@@ -19,20 +19,25 @@ export async function adminExtendedGetDashboardMetrics() {
     pool.query(
       `SELECT COUNT(*) AS count
        FROM service_requests
-       WHERE LOWER(COALESCE(status, '')) NOT IN ('completed', 'cancelled', 'paid')`
+       WHERE LOWER(COALESCE(status, '')) IN ('pending', 'assigned', 'processing')`
     ),
     pool.query(
       `SELECT COUNT(*) AS count
        FROM technicians
-       WHERE LOWER(COALESCE(status, '')) = 'approved'
-         AND is_active = TRUE
+       WHERE (
+         LOWER(COALESCE(status, '')) = 'online'
+         OR (
+           LOWER(COALESCE(status, '')) = 'approved'
+           AND is_active = TRUE
+         )
+       )
          AND is_available = TRUE`
     ),
     pool.query(
       `SELECT COUNT(*) AS count
        FROM service_requests
-       WHERE LOWER(COALESCE(status, '')) IN ('completed', 'paid')
-         AND DATE(COALESCE(completed_at, updated_at, created_at)) = CURDATE()`
+       WHERE LOWER(COALESCE(status, '')) = 'completed'
+         AND DATE(COALESCE(updated_at, completed_at, created_at)) = CURDATE()`
     ),
     pool.query(
       `SELECT AVG(TIMESTAMPDIFF(MINUTE, created_at, COALESCE(started_at, updated_at))) AS avg_response_minutes
@@ -53,17 +58,27 @@ export async function adminExtendedGetDashboardMetrics() {
     pool.query(
       `SELECT COUNT(*) AS count
        FROM payments
-       WHERE LOWER(COALESCE(status, '')) IN ('pending', 'processing')`
+       WHERE LOWER(COALESCE(status, '')) = 'processing'`
     ),
   ]);
 
+  const activeRequests = adminExtendedToNumber(activeRequestsRows?.[0]?.count);
+  const availableTechnicians = adminExtendedToNumber(availableTechniciansRows?.[0]?.count);
+  const completedToday = adminExtendedToNumber(completedTodayRows?.[0]?.count);
+  const avgResponseTime = Number(adminExtendedToNumber(avgResponseRows?.[0]?.avg_response_minutes).toFixed(2));
+  const todayRevenue = Number(adminExtendedToNumber(todayRevenueRows?.[0]?.total).toFixed(2));
+  const pendingPayments = adminExtendedToNumber(pendingPaymentsRows?.[0]?.count);
+
   return {
-    activeRequestsCount: adminExtendedToNumber(activeRequestsRows?.[0]?.count),
-    availableTechniciansCount: adminExtendedToNumber(availableTechniciansRows?.[0]?.count),
-    completedToday: adminExtendedToNumber(completedTodayRows?.[0]?.count),
-    avgResponseTime: Number(adminExtendedToNumber(avgResponseRows?.[0]?.avg_response_minutes).toFixed(2)),
-    todayRevenue: Number(adminExtendedToNumber(todayRevenueRows?.[0]?.total).toFixed(2)),
-    pendingPayments: adminExtendedToNumber(pendingPaymentsRows?.[0]?.count),
+    activeRequests,
+    availableTechnicians,
+    completedToday,
+    avgResponseTime,
+    todayRevenue,
+    pendingPayments,
+    // Keep legacy keys for existing /api/admin-extended/dashboard consumers.
+    activeRequestsCount: activeRequests,
+    availableTechniciansCount: availableTechnicians,
   };
 }
 

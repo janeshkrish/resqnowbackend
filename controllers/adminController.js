@@ -16,20 +16,25 @@ export async function getDashboard(req, res) {
       pool.query(
         `SELECT COUNT(*) AS count
          FROM service_requests
-         WHERE LOWER(COALESCE(status, '')) NOT IN ('completed', 'cancelled', 'paid')`
+         WHERE LOWER(COALESCE(status, '')) IN ('pending', 'assigned', 'processing')`
       ),
       pool.query(
         `SELECT COUNT(*) AS count
          FROM technicians
-         WHERE LOWER(COALESCE(status, '')) = 'approved'
-           AND COALESCE(is_active, 0) = 1
+         WHERE (
+           LOWER(COALESCE(status, '')) = 'online'
+           OR (
+             LOWER(COALESCE(status, '')) = 'approved'
+             AND COALESCE(is_active, 0) = 1
+           )
+         )
            AND COALESCE(is_available, 0) = 1`
       ),
       pool.query(
         `SELECT COUNT(*) AS count
          FROM service_requests
-         WHERE LOWER(COALESCE(status, '')) IN ('completed', 'paid')
-           AND DATE(COALESCE(completed_at, updated_at, created_at)) = CURDATE()`
+         WHERE LOWER(COALESCE(status, '')) = 'completed'
+           AND DATE(COALESCE(updated_at, completed_at, created_at)) = CURDATE()`
       ),
       pool.query(
         `SELECT AVG(TIMESTAMPDIFF(MINUTE, created_at, COALESCE(started_at, updated_at))) AS avg_response_minutes
@@ -50,17 +55,27 @@ export async function getDashboard(req, res) {
       pool.query(
         `SELECT COUNT(*) AS count
          FROM payments
-         WHERE LOWER(COALESCE(status, '')) IN ('pending', 'processing')`
+         WHERE LOWER(COALESCE(status, '')) = 'processing'`
       ),
     ]);
 
+    const activeRequests = toNumber(activeRequestsRows?.[0]?.count);
+    const availableTechnicians = toNumber(availableTechniciansRows?.[0]?.count);
+    const completedToday = toNumber(completedTodayRows?.[0]?.count);
+    const avgResponseTime = Number(toNumber(avgResponseRows?.[0]?.avg_response_minutes).toFixed(2));
+    const todayRevenue = Number(toNumber(todayRevenueRows?.[0]?.total).toFixed(2));
+    const pendingPayments = toNumber(pendingPaymentsRows?.[0]?.count);
+
     return res.json({
-      activeRequests: toNumber(activeRequestsRows?.[0]?.count),
-      availableTechnicians: toNumber(availableTechniciansRows?.[0]?.count),
-      completedToday: toNumber(completedTodayRows?.[0]?.count),
-      avgResponseTime: Number(toNumber(avgResponseRows?.[0]?.avg_response_minutes).toFixed(2)),
-      todayRevenue: Number(toNumber(todayRevenueRows?.[0]?.total).toFixed(2)),
-      pendingPayments: toNumber(pendingPaymentsRows?.[0]?.count),
+      activeRequests,
+      availableTechnicians,
+      completedToday,
+      avgResponseTime,
+      todayRevenue,
+      pendingPayments,
+      // Compatibility aliases for older extended dashboard consumers.
+      activeRequestsCount: activeRequests,
+      availableTechniciansCount: availableTechnicians,
     });
   } catch (error) {
     console.error("[admin.dashboard] failed:", error?.message || error);

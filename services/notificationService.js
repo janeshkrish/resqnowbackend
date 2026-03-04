@@ -294,6 +294,53 @@ class NotificationService {
       };
     }
 
+    if (
+      userType === "technician" &&
+      (event === "admin:system_announcement" ||
+        event === "admin:technician_broadcast" ||
+        event === "admin:emergency_message")
+    ) {
+      const title = normalizeText(data?.title || "Admin Announcement");
+      const body = normalizeText(data?.message || "You have a new admin notification.");
+      const isEmergency =
+        event === "admin:emergency_message" ||
+        String(data?.priority || "").trim().toUpperCase() === "HIGH";
+      const dashboardPath = "/technician/dashboard";
+      const dashboardLink = frontendBaseUrl ? `${frontendBaseUrl}${dashboardPath}` : undefined;
+
+      return {
+        notification: { title, body },
+        data: stringifyDataPayload({
+          event,
+          type: "ADMIN_BROADCAST",
+          priority: isEmergency ? "HIGH" : "NORMAL",
+          sound: isEmergency ? "true" : "false",
+          deepLinkPath: dashboardPath,
+        }),
+        android: {
+          priority: isEmergency ? "high" : "normal",
+          ttl: isEmergency ? 300000 : 1800000,
+        },
+        webpush: {
+          headers: {
+            Urgency: isEmergency ? "high" : "normal",
+            TTL: isEmergency ? "300" : "1800",
+          },
+          notification: {
+            title,
+            body,
+            icon: "/icons/icon-192x192.png",
+            badge: "/icons/icon-192x192.png",
+            tag: `admin-${isEmergency ? "emergency" : "alert"}-${Date.now()}`,
+            requireInteraction: isEmergency,
+            renotify: isEmergency,
+            ...(isEmergency ? { vibrate: [200, 100, 200] } : {}),
+          },
+          ...(dashboardLink ? { fcmOptions: { link: dashboardLink } } : {}),
+        },
+      };
+    }
+
     if (userType === "user" && event === "job:status_update") {
       const status = normalizeText(data?.status).toLowerCase();
       let title = "";

@@ -16,6 +16,7 @@ import {
 } from "../services/serviceNormalization.js";
 import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/pricingEstimator.js";
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
+import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js";
 
 const router = Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -364,8 +365,8 @@ router.post("/register", async (req, res) => {
 
     try {
       await pool.execute(
-        "INSERT INTO notifications (type, title, message) VALUES ('technician_application', ?, ?)",
-        [title, message]
+        "INSERT INTO notifications (type, title, message) VALUES (?, ?, ?)",
+        [ADMIN_NOTIFICATION_TYPES.NEW_TECHNICIAN_APPLICATION, title, message]
       );
 
       // Use SocketService to broadcast to admins (if they are listening on a channel)
@@ -1566,6 +1567,15 @@ router.patch("/:id/approve", verifyAdmin, async (req, res) => {
       (technician_id, action, previous_status, new_status, reason, admin_email)
       VALUES (?, 'approved', ?, 'approved', ?, ?)`,
       [id, previousStatus, reason || "Approved by admin", req.adminEmail || "unknown-admin"]
+    );
+    await pool.execute(
+      `INSERT INTO notifications (type, title, message, is_read)
+       VALUES (?, ?, ?, 0)`,
+      [
+        ADMIN_NOTIFICATION_TYPES.TECHNICIAN_APPROVED,
+        "Technician Approved",
+        `${existing[0]?.name || "Technician"} has been approved.`,
+      ]
     );
     const techRows = await db.query("SELECT name, email FROM technicians WHERE id = ?", [id]);
     const tech = techRows[0];

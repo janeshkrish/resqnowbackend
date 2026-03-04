@@ -35,7 +35,16 @@ import {
   resolveComplaint,
   addComplaintInternalNote,
 } from "../controllers/complaintController.js";
-import { broadcastNotification } from "../controllers/notificationController.js";
+import {
+  adminExtendedEmergencyMessage,
+  adminExtendedSystemAnnouncement,
+  adminExtendedTechnicianBroadcast,
+} from "../services/adminExtendedNotifier.js";
+import {
+  ADMIN_NOTIFICATION_TYPES,
+  ADMIN_NOTIFICATION_TYPE_FILTER_VALUES,
+  normalizeAdminNotificationType,
+} from "../services/adminNotificationTypes.js";
 
 const router = Router();
 const JWT_SECRET = String(process.env.JWT_SECRET || "").trim();
@@ -69,12 +78,14 @@ router.post("/assign", assignRequest);
 router.post("/escalate", escalateRequest);
 router.post("/requests/high-priority", markHighPriority);
 router.post("/close", closeRequest);
+router.post("/requests/close", closeRequest);
 
 router.get("/technicians", getTechnicians);
 router.post("/technician/toggle", toggleTechnicianVisibility);
 router.post("/technician/note", addTechnicianNote);
 
 router.get("/finance/summary", getFinanceSummary);
+router.get("/finance", getFinanceTransactions);
 router.get("/finance/transactions", getFinanceTransactions);
 router.get("/finance/export", exportFinanceCsv);
 router.get("/finance/flagged", getFlaggedPayments);
@@ -88,7 +99,138 @@ router.post("/complaints/assign", assignComplaint);
 router.post("/complaints/resolve", resolveComplaint);
 router.post("/complaints/internal-note", addComplaintInternalNote);
 
-router.post("/notifications/broadcast", broadcastNotification);
+const ADMIN_NOTIFICATION_TYPE_PLACEHOLDERS = ADMIN_NOTIFICATION_TYPE_FILTER_VALUES
+  .map(() => "?")
+  .join(", ");
+
+function resolveAdminId(req) {
+  return String(req.adminEmail || req.admin?.email || "admin");
+}
+
+function normalizeTechnicianIds(value) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .map((id) => Number(String(id || "").replace(/#/g, "").trim()))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+}
+
+async function persistAdminSystemAlert(title, message) {
+  const pool = await db.getPool();
+  const [insertResult] = await pool.execute(
+    `INSERT INTO notifications (type, title, message, is_read)
+     VALUES (?, ?, ?, 0)`,
+    [ADMIN_NOTIFICATION_TYPES.SYSTEM_ALERT, title, message]
+  );
+  return Number(insertResult.insertId);
+}
+
+async function sendAdminSystemAnnouncement(req, res) {
+  const title = String(req.body?.title || "").trim();
+  const message = String(req.body?.message || "").trim();
+  if (!title || !message) {
+    return res.status(400).json({ error: "title and message are required." });
+  }
+
+  const payload = await adminExtendedSystemAnnouncement({
+    adminId: resolveAdminId(req),
+    title,
+    message,
+    metadata: req.body?.metadata || null,
+  });
+  const notificationId = await persistAdminSystemAlert(title, message);
+  return res.status(201).json({ success: true, notificationId, payload });
+}
+
+async function sendAdminTechnicianBroadcast(req, res) {
+  const title = String(req.body?.title || "").trim();
+  const message = String(req.body?.message || "").trim();
+  const technicianIds = normalizeTechnicianIds(req.body?.technicianIds);
+
+  if (!title || !message) {
+    return res.status(400).json({ error: "title and message are required." });
+  }
+  if (technicianIds.length === 0) {
+    return res.status(400).json({ error: "At least one technicianId is required." });
+  }
+
+  const payload = await adminExtendedTechnicianBroadcast({
+    adminId: resolveAdminId(req),
+    title,
+    message,
+    metadata: req.body?.metadata || null,
+    technicianIds,
+  });
+  const notificationId = await persistAdminSystemAlert(title, message);
+  return res.status(201).json({ success: true, notificationId, payload });
+}
+
+async function sendAdminEmergencyMessage(req, res) {
+  const title = String(req.body?.title || "").trim();
+  const message = String(req.body?.message || "").trim();
+  if (!title || !message) {
+    return res.status(400).json({ error: "title and message are required." });
+  }
+
+  const payload = await adminExtendedEmergencyMessage({
+    adminId: resolveAdminId(req),
+    title,
+    message,
+    metadata: {
+      ...(req.body?.metadata || {}),
+      priority: "HIGH",
+      sound: true,
+    },
+  });
+  const notificationId = await persistAdminSystemAlert(title, message);
+  return res.status(201).json({ success: true, notificationId, payload });
+}
+
+router.post("/notifications/broadcast", async (req, res) => {
+  try {
+    const type = String(req.body?.type || "system").trim().toLowerCase();
+    if (type === "technician") {
+      return await sendAdminTechnicianBroadcast(req, res);
+    }
+    if (type === "emergency") {
+      return await sendAdminEmergencyMessage(req, res);
+    }
+    return await sendAdminSystemAnnouncement(req, res);
+  } catch (error) {
+    console.error("[Admin notifications broadcast]", error);
+    return res.status(500).json({ error: "Failed to broadcast notification." });
+  }
+});
+
+router.post("/notifications/system", async (req, res) => {
+  try {
+    return await sendAdminSystemAnnouncement(req, res);
+  } catch (error) {
+    console.error("[Admin notifications system]", error);
+    return res.status(500).json({ error: "Failed to send system announcement." });
+  }
+});
+
+router.post("/notifications/technician", async (req, res) => {
+  try {
+    return await sendAdminTechnicianBroadcast(req, res);
+  } catch (error) {
+    console.error("[Admin notifications technician]", error);
+    return res.status(500).json({ error: "Failed to send technician broadcast." });
+  }
+});
+
+router.post("/notifications/emergency", async (req, res) => {
+  try {
+    return await sendAdminEmergencyMessage(req, res);
+  } catch (error) {
+    console.error("[Admin notifications emergency]", error);
+    return res.status(500).json({ error: "Failed to send emergency message." });
+  }
+});
 
 // --- Notifications ---
 
@@ -107,18 +249,21 @@ router.get("/notifications/stream", (req, res) => {
 });
 
 // 2. Get notification count (unread)
-router.get("/notifications/count", async (req, res) => {
+router.get("/notifications/count", async (_req, res) => {
   try {
     const pool = await db.getPool();
-    // Count unread notifications
-    const [rows] = await pool.query("SELECT COUNT(*) as count FROM notifications WHERE is_read = 0");
-    const unreadCount = rows[0]?.count || 0;
+    const [rows] = await pool.query(
+      `SELECT COUNT(*) as count
+       FROM notifications
+       WHERE is_read = 0
+         AND LOWER(COALESCE(type, '')) IN (${ADMIN_NOTIFICATION_TYPE_PLACEHOLDERS})`,
+      ADMIN_NOTIFICATION_TYPE_FILTER_VALUES
+    );
+    const unreadCount = Number(rows?.[0]?.count || 0);
 
-    // Also count pending technicians (legacy requirements)
     const [pendingRows] = await pool.query("SELECT COUNT(*) as count FROM technicians WHERE status = 'pending'");
-    const pendingApplications = pendingRows[0]?.count || 0;
+    const pendingApplications = Number(pendingRows?.[0]?.count || 0);
 
-    // Return both for flexibility, but frontend mainly uses unreadCount for bell now
     return res.json({ count: unreadCount, pendingApplications });
   } catch (err) {
     console.error("[Admin notifications count]", err);
@@ -129,16 +274,25 @@ router.get("/notifications/count", async (req, res) => {
 // 3. Get list of notifications (pagination)
 router.get("/notifications", async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 10;
-    const offset = parseInt(req.query.offset) || 0;
+    const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit || "10"), 10) || 10, 1), 100);
+    const offset = Math.max(Number.parseInt(String(req.query.offset || "0"), 10) || 0, 0);
 
     const pool = await db.getPool();
     const [rows] = await pool.query(
-      "SELECT * FROM notifications ORDER BY created_at DESC LIMIT ? OFFSET ?",
-      [limit, offset]
+      `SELECT *
+       FROM notifications
+       WHERE LOWER(COALESCE(type, '')) IN (${ADMIN_NOTIFICATION_TYPE_PLACEHOLDERS})
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...ADMIN_NOTIFICATION_TYPE_FILTER_VALUES, limit, offset]
     );
 
-    return res.json(rows);
+    const mappedRows = (rows || []).map((row) => ({
+      ...row,
+      type: normalizeAdminNotificationType(row.type) || row.type,
+    }));
+
+    return res.json(mappedRows);
   } catch (err) {
     console.error("[Admin notifications list]", err);
     return res.status(500).json({ error: "Failed to fetch notifications." });
@@ -148,9 +302,22 @@ router.get("/notifications", async (req, res) => {
 // 4. Mark as read
 router.post("/notifications/:id/read", async (req, res) => {
   try {
-    const id = req.params.id;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid notification id." });
+    }
+
     const pool = await db.getPool();
-    await pool.execute("UPDATE notifications SET is_read = 1 WHERE id = ?", [id]);
+    const [updateResult] = await pool.execute(
+      `UPDATE notifications
+       SET is_read = 1
+       WHERE id = ?
+         AND LOWER(COALESCE(type, '')) IN (${ADMIN_NOTIFICATION_TYPE_PLACEHOLDERS})`,
+      [id, ...ADMIN_NOTIFICATION_TYPE_FILTER_VALUES]
+    );
+    if (Number(updateResult?.affectedRows || 0) === 0) {
+      return res.status(404).json({ error: "Notification not found." });
+    }
     return res.json({ success: true });
   } catch (err) {
     console.error("[Admin notification read]", err);
@@ -158,97 +325,27 @@ router.post("/notifications/:id/read", async (req, res) => {
   }
 });
 
-// --- Analytics ---
-router.get("/analytics", async (req, res) => {
+router.delete("/notifications/:id", async (req, res) => {
   try {
-    const pool = await db.getPool();
-
-    // 1. Totals
-    const [techRows] = await pool.query("SELECT COUNT(*) AS totalTechnicians FROM technicians");
-    const totalTechnicians = techRows[0]?.totalTechnicians || 0;
-
-    const [userRows] = await pool.query("SELECT COUNT(*) AS totalUsers FROM users");
-    const totalUsers = userRows[0]?.totalUsers || 0;
-
-    const [reqRows] = await pool.query("SELECT COUNT(*) AS totalServiceRequests FROM service_requests");
-    const totalServiceRequests = reqRows[0]?.totalServiceRequests || 0;
-
-    const [revRows] = await pool.query("SELECT IFNULL(SUM(amount), 0) AS totalRevenue FROM service_requests WHERE status = 'completed'");
-    const totalRevenue = parseFloat(revRows[0]?.totalRevenue || 0);
-
-    console.log("[Analytics Debug] Fetched:", { totalTechnicians, totalUsers, totalServiceRequests, totalRevenue });
-
-    // 2. Service Distribution
-    const [distributionRows] = await pool.query("SELECT service_type as name, COUNT(*) as value FROM service_requests GROUP BY service_type");
-    const serviceColors = {
-      "Towing": "#ef4444",
-      "Tire Fix": "#3b82f6",
-      "Battery": "#22c55e",
-      "Fuel": "#f59e0b",
-      "Other": "#8b5cf6"
-    };
-    const serviceDistribution = distributionRows.map(row => ({
-      name: row.name,
-      value: row.value,
-      color: serviceColors[row.name] || "#888888"
-    }));
-
-    // 3. Monthly Data (Last 6 months)
-    const [techMonthly] = await pool.query(`
-      SELECT DATE_FORMAT(created_at, '%b') as month, COUNT(*) as count 
-      FROM technicians 
-      WHERE created_at >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
-      GROUP BY DATE_FORMAT(created_at, '%Y-%m'), DATE_FORMAT(created_at, '%b')
-      ORDER BY DATE_FORMAT(created_at, '%Y-%m')
-    `);
-
-    const [reqMonthly] = await pool.query(`
-      SELECT DATE_FORMAT(created_at, '%b') as month, COUNT(*) as count 
-      FROM service_requests 
-      WHERE created_at >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
-      GROUP BY DATE_FORMAT(created_at, '%Y-%m'), DATE_FORMAT(created_at, '%b')
-      ORDER BY DATE_FORMAT(created_at, '%Y-%m')
-    `);
-
-    // Merge monthly data
-    // Create a map of last 6 months to ensure continuity if needed, or just merge existing
-    const monthMap = new Map();
-    // Initialize with data we have
-    techMonthly.forEach(r => {
-      if (!monthMap.has(r.month)) monthMap.set(r.month, { name: r.month, technicians: 0, requests: 0 });
-      monthMap.get(r.month).technicians = r.count;
-    });
-    reqMonthly.forEach(r => {
-      if (!monthMap.has(r.month)) monthMap.set(r.month, { name: r.month, technicians: 0, requests: 0 });
-      monthMap.get(r.month).requests = r.count;
-    });
-
-    // Sort logic if needed, but the query ORDER BY should handle it mostly if we trust the order. 
-    // Ideally we generate the specific months in order. For now, let's just use what returned.
-    const monthlyData = Array.from(monthMap.values());
-
-    // Fallback if empty
-    if (monthlyData.length === 0) {
-      const mos = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
-      const currentMonth = new Date().getMonth();
-      for (let i = 5; i >= 0; i--) {
-        const m = mos[(currentMonth - i + 12) % 12];
-        monthlyData.push({ name: m, technicians: 0, requests: 0 });
-      }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid notification id." });
     }
 
-    return res.json({
-      totalTechnicians,
-      totalUsers,
-      totalServiceRequests,
-      totalRevenue,
-      monthlyData,
-      serviceDistribution
-    });
-
+    const pool = await db.getPool();
+    const [deleteResult] = await pool.execute(
+      `DELETE FROM notifications
+       WHERE id = ?
+         AND LOWER(COALESCE(type, '')) IN (${ADMIN_NOTIFICATION_TYPE_PLACEHOLDERS})`,
+      [id, ...ADMIN_NOTIFICATION_TYPE_FILTER_VALUES]
+    );
+    if (Number(deleteResult?.affectedRows || 0) === 0) {
+      return res.status(404).json({ error: "Notification not found." });
+    }
+    return res.json({ success: true, id });
   } catch (err) {
-    console.error("[Admin analytics]", err);
-    return res.status(500).json({ error: "Failed to fetch analytics." });
+    console.error("[Admin notification delete]", err);
+    return res.status(500).json({ error: "Failed to delete notification." });
   }
 });
 

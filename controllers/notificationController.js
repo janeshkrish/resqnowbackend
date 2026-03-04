@@ -5,6 +5,7 @@ import {
   adminExtendedTechnicianBroadcast,
 } from "../services/adminExtendedNotifier.js";
 import { resolveAdminId } from "./utils.js";
+import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js";
 
 function normalizeTechnicianIds(value) {
   if (!Array.isArray(value)) return [];
@@ -35,11 +36,10 @@ export async function broadcastNotification(req, res) {
     const adminId = resolveAdminId(req);
 
     let payload;
-    let notificationType = "system_announcement";
+    let notificationType = ADMIN_NOTIFICATION_TYPES.SYSTEM_ALERT;
 
     if (type === "technician") {
-      notificationType = "technician_broadcast";
-      payload = adminExtendedTechnicianBroadcast({
+      payload = await adminExtendedTechnicianBroadcast({
         adminId,
         title,
         message,
@@ -47,15 +47,14 @@ export async function broadcastNotification(req, res) {
         metadata: req.body?.metadata || null,
       });
     } else if (type === "emergency") {
-      notificationType = "emergency_message";
-      payload = adminExtendedEmergencyMessage({
+      payload = await adminExtendedEmergencyMessage({
         adminId,
         title,
         message,
         metadata: req.body?.metadata || null,
       });
     } else {
-      payload = adminExtendedSystemAnnouncement({
+      payload = await adminExtendedSystemAnnouncement({
         adminId,
         title,
         message,

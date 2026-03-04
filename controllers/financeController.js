@@ -53,23 +53,41 @@ export async function getFinanceSummary(_req, res) {
         `SELECT IFNULL(SUM(p.amount), 0) AS total
          FROM payments p
          LEFT JOIN service_requests sr ON sr.id = p.service_request_id
-         WHERE LOWER(COALESCE(p.status, '')) = 'completed'
-           AND DATE(p.created_at) = CURDATE()
-           AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')`
+         WHERE LOWER(COALESCE(
+           CASE
+             WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+             WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
+             ELSE p.status
+           END,
+           ''
+         )) = 'completed'
+           AND DATE(p.created_at) = CURDATE()`
       ),
       pool.query(
         `SELECT COUNT(*) AS count
          FROM payments p
          LEFT JOIN service_requests sr ON sr.id = p.service_request_id
-         WHERE LOWER(COALESCE(p.status, '')) IN ('pending', 'processing')
-           AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')`
+         WHERE LOWER(COALESCE(
+           CASE
+             WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+             WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
+             ELSE p.status
+           END,
+           ''
+         )) IN ('pending', 'processing')`
       ),
       pool.query(
         `SELECT COUNT(*) AS count
          FROM payments p
          LEFT JOIN service_requests sr ON sr.id = p.service_request_id
-         WHERE LOWER(COALESCE(p.status, '')) = 'completed'
-           AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')`
+         WHERE LOWER(COALESCE(
+           CASE
+             WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+             WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
+             ELSE p.status
+           END,
+           ''
+         )) = 'completed'`
       ),
     ]);
 
@@ -107,6 +125,7 @@ export async function getFinanceTransactions(req, res) {
       whereClauses.push(`LOWER(COALESCE(
         CASE
           WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+          WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
           ELSE p.status
         END,
         ''
@@ -126,6 +145,7 @@ export async function getFinanceTransactions(req, res) {
          p.amount,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
            ELSE p.status
          END AS status,
          p.created_at
@@ -179,6 +199,7 @@ export async function exportFinanceCsv(req, res) {
          p.amount,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
            ELSE p.status
          END AS status,
          p.created_at
@@ -217,6 +238,7 @@ export async function getFlaggedPayments(req, res) {
          p.amount,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+           WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
            ELSE p.status
          END AS status,
          p.created_at,

@@ -31,7 +31,7 @@ router.post("/notifications/system-announcement", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.notifications.systemAnnouncement";
   try {
     const adminId = adminExtendedResolveAdminId(req);
-    const payload = adminExtendedSystemAnnouncement({
+    const payload = await adminExtendedSystemAnnouncement({
       adminId,
       title: req.body?.title || "System Announcement",
       message: req.body?.message || "",
@@ -61,7 +61,7 @@ router.post("/notifications/technician-broadcast", async (req, res) => {
       ? req.body.technicianIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
       : null;
 
-    const payload = adminExtendedTechnicianBroadcast({
+    const payload = await adminExtendedTechnicianBroadcast({
       adminId,
       title: req.body?.title || "Technician Broadcast",
       message: req.body?.message || "",
@@ -88,7 +88,7 @@ router.post("/notifications/emergency-message", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.notifications.emergencyMessage";
   try {
     const adminId = adminExtendedResolveAdminId(req);
-    const payload = adminExtendedEmergencyMessage({
+    const payload = await adminExtendedEmergencyMessage({
       adminId,
       title: req.body?.title || "Emergency",
       message: req.body?.message || "",

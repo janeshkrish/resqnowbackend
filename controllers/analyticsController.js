@@ -69,9 +69,9 @@ export async function getAnalytics(req, res) {
 
     const pool = await getPool();
     const [
-      [requestsPerDayRows],
+      [requestsOverTimeRows],
       [peakHoursRows],
-      [issueCategoryRows],
+      [serviceDistributionRows],
       [utilizationRows],
       [totalsRows],
       [monthlyRows],
@@ -151,12 +151,17 @@ export async function getAnalytics(req, res) {
       ),
     ]);
 
-    const requestsPerDay = buildDailySeries(requestsPerDayRows, daysBack);
+    const requestsOverTime = (requestsOverTimeRows || []).map((row) => ({
+      date: toDayKey(row.day),
+      count: Number(row.request_count || 0),
+    })).filter((row) => row.date);
+
+    const requestsPerDay = buildDailySeries(requestsOverTimeRows, daysBack);
     const peakHours = peakHoursRows.map((row) => ({
       hourOfDay: Number(row.hour_of_day || 0),
       requestCount: Number(row.request_count || 0),
     }));
-    const issueCategoryBreakdown = issueCategoryRows.map((row) => ({
+    const issueCategoryBreakdown = serviceDistributionRows.map((row) => ({
       issueCategory: row.issue_category || "unknown",
       requestCount: Number(row.request_count || 0),
     }));
@@ -180,19 +185,28 @@ export async function getAnalytics(req, res) {
       color: DISTRIBUTION_COLORS[index % DISTRIBUTION_COLORS.length],
     }));
 
+    const totalTechnicians = Number(totals.total_technicians || 0);
+    const totalUsers = Number(totals.total_users || 0);
+    const activeUsers = Number(totals.active_users || 0);
+    const totalRequests = Number(totals.total_service_requests || 0);
+    const revenue = Number(totals.total_revenue || 0);
+
     return res.json({
+      totalTechnicians,
+      totalRequests,
+      activeUsers,
+      revenue,
+      requestsOverTime,
+      serviceDistribution,
       requestsPerDay,
       peakHours,
       issueCategoryBreakdown,
       technicianUtilization,
       // Keep legacy keys for existing /admin analytics page compatibility.
-      totalTechnicians: Number(totals.total_technicians || 0),
-      totalUsers: Number(totals.total_users || 0),
-      activeUsers: Number(totals.active_users || 0),
-      totalServiceRequests: Number(totals.total_service_requests || 0),
-      totalRevenue: Number(totals.total_revenue || 0),
+      totalUsers,
+      totalServiceRequests: totalRequests,
+      totalRevenue: revenue,
       monthlyData,
-      serviceDistribution,
     });
   } catch (error) {
     console.error("[admin.analytics] failed:", error?.message || error);
