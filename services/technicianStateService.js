@@ -1,9 +1,11 @@
 const ACTIVE_JOB_STATUSES = new Set([
   "assigned",
   "accepted",
+  "processing",
   "on-the-way",
   "en-route",
   "arrived",
+  "in_progress",
   "in-progress",
   "payment_pending",
 ]);
@@ -93,9 +95,11 @@ export async function reconcileTechnicianAvailability(connOrPool) {
          AND LOWER(COALESCE(sr.status, '')) IN (
            'assigned',
            'accepted',
+           'processing',
            'on-the-way',
            'en-route',
            'arrived',
+           'in_progress',
            'in-progress',
            'payment_pending'
          )

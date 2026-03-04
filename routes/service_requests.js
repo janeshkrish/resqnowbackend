@@ -115,7 +115,7 @@ const ensureRazorpayConfigured = (res) => {
 
 // Allowed statuses and a small normalization helper to accept variants used in the UI
 const VALID_STATUSES = new Set([
-    'pending', 'assigned', 'accepted', 'on-the-way', 'en-route', 'arrived', 'in-progress', 'payment_pending', 'completed', 'cancelled', 'rejected'
+    'pending', 'assigned', 'accepted', 'processing', 'on-the-way', 'en-route', 'arrived', 'in-progress', 'payment_pending', 'completed', 'cancelled', 'rejected'
 ]);
 
 function normalizeStatus(status) {
@@ -126,7 +126,9 @@ function normalizeStatus(status) {
         'on the way': 'on-the-way',
         'on-the-way': 'on-the-way',
         'in_progress': 'in-progress',
+        'in progress': 'in-progress',
         'in-progress': 'in-progress',
+        'processing': 'processing',
         'en_route': 'en-route',
         'en-route': 'en-route',
         'payment_pending': 'payment_pending'

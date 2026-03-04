@@ -31,6 +31,7 @@ function buildCsv(rows) {
 function mapTransaction(row) {
   return {
     transactionId: row.transaction_id,
+    requestId: row.request_id ?? null,
     user: row.user_name,
     technician: row.technician_name,
     amount: Number(row.amount || 0),
@@ -119,6 +120,7 @@ export async function getFinanceTransactions(req, res) {
     const [rows] = await pool.query(
       `SELECT
          p.id AS transaction_id,
+         p.service_request_id AS request_id,
          COALESCE(u.full_name, CONCAT('User #', p.user_id)) AS user_name,
          COALESCE(t.name, 'Unassigned') AS technician_name,
          p.amount,
@@ -171,6 +173,7 @@ export async function exportFinanceCsv(req, res) {
     const [rows] = await pool.query(
       `SELECT
          p.id AS transaction_id,
+         p.service_request_id AS request_id,
          COALESCE(u.full_name, CONCAT('User #', p.user_id)) AS user_name,
          COALESCE(t.name, 'Unassigned') AS technician_name,
          p.amount,
@@ -208,6 +211,7 @@ export async function getFlaggedPayments(req, res) {
     const [rows] = await pool.query(
       `SELECT
          p.id AS transaction_id,
+         p.service_request_id AS request_id,
          COALESCE(u.full_name, CONCAT('User #', p.user_id)) AS user_name,
          COALESCE(t.name, 'Unassigned') AS technician_name,
          p.amount,

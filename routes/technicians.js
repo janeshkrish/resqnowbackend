@@ -1183,13 +1183,13 @@ router.get("/me/active-job-legacy", verifyTechnician, async (req, res) => {
     const technicianId = req.technicianId;
     const pool = await db.getPool();
 
-    // Find job where status is assigned, accepted, en-route, or in-progress
+    // Find job where status is assigned, accepted, processing, en-route, or in-progress
     // Exclude completed or cancelled matches
     // Also include 'payment_pending' if you want them to see it before it's fully closed? Yes.
     const [rows] = await pool.query(
       `SELECT * FROM service_requests 
        WHERE technician_id = ?
-      AND status IN('assigned', 'accepted', 'en-route', 'in-progress', 'payment_pending')
+      AND status IN('assigned', 'accepted', 'processing', 'en-route', 'in_progress', 'in-progress', 'payment_pending')
        ORDER BY created_at DESC LIMIT 1`,
       [technicianId]
     );

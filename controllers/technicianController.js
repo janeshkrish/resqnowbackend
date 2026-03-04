@@ -5,9 +5,11 @@ import { buildPagination, likeFilter, parseJson, resolveAdminId, toPositiveInt }
 const ACTIVE_JOB_STATUSES = [
   "assigned",
   "accepted",
+  "processing",
   "en-route",
   "on-the-way",
   "arrived",
+  "in_progress",
   "in-progress",
   "payment_pending",
 ];

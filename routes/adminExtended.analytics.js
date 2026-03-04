@@ -88,7 +88,7 @@ router.get("/analytics/pilot", async (req, res) => {
            t.is_available,
            COUNT(sr.id) AS total_assigned,
            SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 1 ELSE 0 END) AS completed_requests,
-           SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN ('assigned', 'accepted', 'en-route', 'on-the-way', 'arrived', 'in-progress', 'payment_pending') THEN 1 ELSE 0 END) AS active_requests
+           SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN ('assigned', 'accepted', 'processing', 'en-route', 'on-the-way', 'arrived', 'in_progress', 'in-progress', 'payment_pending') THEN 1 ELSE 0 END) AS active_requests
          FROM technicians t
          LEFT JOIN service_requests sr ON sr.technician_id = t.id
          GROUP BY t.id, t.name, t.is_available

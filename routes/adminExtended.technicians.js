@@ -59,7 +59,7 @@ router.get("/technicians/performance-summary", async (req, res) => {
          t.is_available,
          COUNT(sr.id) AS total_requests,
          SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 1 ELSE 0 END) AS completed_requests,
-         SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN ('assigned', 'accepted', 'en-route', 'on-the-way', 'arrived', 'in-progress', 'payment_pending') THEN 1 ELSE 0 END) AS active_requests,
+         SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN ('assigned', 'accepted', 'processing', 'en-route', 'on-the-way', 'arrived', 'in_progress', 'in-progress', 'payment_pending') THEN 1 ELSE 0 END) AS active_requests,
          ROUND(AVG(CASE
            WHEN sr.started_at IS NOT NULL AND sr.started_at >= sr.created_at
            THEN TIMESTAMPDIFF(MINUTE, sr.created_at, sr.started_at)

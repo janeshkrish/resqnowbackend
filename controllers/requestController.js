@@ -6,12 +6,30 @@ import { closeRequestWithFinanceSync } from "../services/requestClosureService.j
 const ACTIVE_REQUEST_STATES = [
   "assigned",
   "accepted",
+  "processing",
   "en-route",
   "on-the-way",
   "arrived",
+  "in_progress",
   "in-progress",
   "payment_pending",
 ];
+
+function normalizeRequestStatusFilter(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "";
+
+  const map = {
+    "on_the_way": "on-the-way",
+    "on the way": "on-the-way",
+    "en_route": "en-route",
+    "in_progress": "in-progress",
+    "in progress": "in-progress",
+    "payment-pending": "payment_pending",
+  };
+
+  return map[normalized] || normalized;
+}
 
 function mapRequestRow(row) {
   return {
@@ -49,7 +67,7 @@ export async function getRequests(req, res) {
   try {
     const { page, limit, offset } = buildPagination(req.query);
     const search = String(req.query?.search || "").trim();
-    const status = String(req.query?.status || "").trim().toLowerCase();
+    const status = normalizeRequestStatusFilter(req.query?.status);
     const priority = String(req.query?.priority || "").trim().toLowerCase();
 
     const whereClauses = [];
