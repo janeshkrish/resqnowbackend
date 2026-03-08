@@ -409,18 +409,36 @@ router.post("/login", async (req, res) => {
     const rows = await db.query("SELECT * FROM technicians WHERE email = ? LIMIT 1", [normalizedEmail]);
     const row = rows[0];
     if (!row) {
-      return res.status(401).json({ error: "Email not registered as a technician. Please use the technician registration page." });
+      return res.status(401).json({ error: "Email not registered as a technician." });
     }
     const valid = await bcrypt.compare(password, row.password_hash || "");
     if (!valid) {
-      return res.status(401).json({ error: "Invalid email or password." });
+      return res.status(401).json({ error: "Incorrect password." });
     }
-    const status = (row.status || "pending").toLowerCase();
+    const status = String(row.status || "").trim().toLowerCase() || "pending";
+    const approvalFlagRaw = row.isApproved ?? row.is_approved;
+    const approvalFlag = typeof approvalFlagRaw === "string"
+      ? approvalFlagRaw.trim().toLowerCase()
+      : approvalFlagRaw;
+    const isApprovedByFlag =
+      approvalFlag === true ||
+      approvalFlag === 1 ||
+      approvalFlag === "1" ||
+      approvalFlag === "true" ||
+      approvalFlag === "approved";
+    const isApproved = status === "approved" || isApprovedByFlag;
+
     if (status === "rejected") {
-      return res.status(403).json({ error: "Your application was not approved. Please contact support for more information." });
+      return res.status(403).json({
+        status: "rejected",
+        error: "Your application was not approved. Please contact support for more information.",
+      });
     }
-    if (status !== "approved") {
-      return res.status(403).json({ error: "Your application is under review. You will receive an email after admin approval." });
+    if (!isApproved) {
+      return res.status(403).json({
+        status: "pending_approval",
+        error: "Your technician account is pending admin approval. Please wait until your account is approved.",
+      });
     }
     const technician = rowToTechnician(row);
     const token = signTechnicianToken(row.id, row.email);
