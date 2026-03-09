@@ -281,6 +281,7 @@ export const jobDispatchService = {
             };
 
             // Emit to technician room and push notification
+            socketService.io.to(`technician_${t.id}`).emit("JOB_ALERT", offerPayload);
             socketService.notifyTechnician(t.id, "job_offer", offerPayload);
             socketService.io.to(`technician_${t.id}`).emit("job:list_update", {
                 requestId: jobRequest.id,
@@ -425,17 +426,26 @@ export const jobDispatchService = {
                 }
 
                 // Fresh accept path.
-                await conn.query(
+                const [acceptUpdateResult] = await conn.query(
                     "UPDATE service_requests SET technician_id = ?, status = 'accepted', amount = ?, accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ? AND status = 'pending'",
                     [technicianId, resolvedAmount, requestId]
                 );
+                const updatedRows = Number(acceptUpdateResult?.affectedRows || 0);
+                if (updatedRows !== 1) {
+                    await conn.rollback();
+                    return {
+                        success: false,
+                        code: "conflict",
+                        reason: "Job already accepted by another technician."
+                    };
+                }
 
                 await conn.query(
                     "UPDATE dispatch_offers SET status = 'accepted' WHERE service_request_id = ? AND technician_id = ?",
                     [requestId, technicianId]
                 );
                 await conn.query(
-                    "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id != ?",
+                    "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id != ? AND status = 'pending'",
                     [requestId, technicianId]
                 );
                 await markTechnicianReserved(conn, technicianId, requestId);
@@ -489,18 +499,28 @@ export const jobDispatchService = {
                         [requestId]
                     );
                     rejectedOffers.forEach((offer) => {
+                        const normalizedOfferTechnicianId = String(offer?.technician_id || "").trim();
+                        if (!normalizedOfferTechnicianId) return;
+
                         const revokedPayload = {
                             requestId: String(requestId),
                             jobId: String(requestId),
                             message: "This job has already been taken by another technician."
                         };
+                        const jobTakenPayload = {
+                            jobId: String(requestId),
+                            technicianId: Number(technicianId),
+                        };
                         // notifyTechnician emits over socket and push, so background devices
                         // can dismiss full-screen alerts immediately.
-                        socketService.notifyTechnician(offer.technician_id, "job:revoked", revokedPayload);
-                        socketService.io.to(`technician_${offer.technician_id}`).emit("job:list_update", {
-                            requestId: String(requestId),
-                            action: "revoked"
-                        });
+                        socketService.notifyTechnician(normalizedOfferTechnicianId, "job:revoked", revokedPayload);
+                        if (socketService.io) {
+                            socketService.io.to(`technician_${normalizedOfferTechnicianId}`).emit("JOB_TAKEN", jobTakenPayload);
+                            socketService.io.to(`technician_${normalizedOfferTechnicianId}`).emit("job:list_update", {
+                                requestId: String(requestId),
+                                action: "revoked"
+                            });
+                        }
                     });
                 }
 

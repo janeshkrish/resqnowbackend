@@ -204,6 +204,9 @@ CREATE TABLE IF NOT EXISTS dispatch_offers (
 export async function ensureDispatchOffersTable() {
   const p = await getPool();
   await p.execute(DISPATCH_OFFERS_TABLE_SQL);
+  await addIndexIfNotExists(p, "dispatch_offers", "idx_dispatch_offers_request_status", "service_request_id, status");
+  await addIndexIfNotExists(p, "dispatch_offers", "idx_dispatch_offers_request_tech", "service_request_id, technician_id");
+  await addIndexIfNotExists(p, "dispatch_offers", "idx_dispatch_offers_tech_status", "technician_id, status");
 }
 
 const TECHNICIAN_LOCATION_HISTORY_TABLE_SQL = `

@@ -80,6 +80,10 @@ export function validateEnvironmentOrThrow() {
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
   }
+  const redisUrl = String(process.env.REDIS_URL || "").trim();
+  if (isProductionLike() && !redisUrl) {
+    throw new Error("Missing required REDIS_URL for queue-based dispatch in production.");
+  }
 
   const frontendUrl = normalizeUrl(getFrontendUrl());
   const backendPublicUrl = normalizeUrl(getBackendPublicUrl());
@@ -128,5 +132,6 @@ export function logEnvironmentSummary() {
   summary.BACKEND_PUBLIC_URL = normalizeUrl(getBackendPublicUrl()) || "missing";
   summary.FRONTEND_EFFECTIVE_URL = normalizeUrl(getFrontendUrl()) || "missing";
   summary.GOOGLE_CALLBACK_EFFECTIVE_URL = normalizeUrl(getGoogleCallbackUrl()) || "missing";
+  summary.REDIS_URL = String(process.env.REDIS_URL || "").trim() ? "set" : "missing";
   console.log("[ENV] Required variable summary:", summary);
 }

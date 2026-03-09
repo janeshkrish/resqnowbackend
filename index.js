@@ -42,6 +42,7 @@ import {
   startOperationsCommandCenterMonitor,
   stopOperationsCommandCenterMonitor,
 } from "./services/operationsCommandCenterService.js";
+import { startDispatchQueueWorker, stopDispatchQueueWorker } from "./services/dispatchQueueService.js";
 
 const PORT = Number(process.env.PORT || 3001);
 const HOST = "0.0.0.0";
@@ -235,6 +236,7 @@ async function shutdown(signal) {
       console.error("[SHUTDOWN] Error while closing HTTP server:", err?.message || err);
     }
     stopOperationsCommandCenterMonitor();
+    await stopDispatchQueueWorker();
     await closePool();
     clearTimeout(forceExitTimer);
     process.exit(err ? 1 : 0);
@@ -265,6 +267,7 @@ async function startServer() {
   dbState.ready = true;
   dbState.lastError = null;
   dbState.lastCheckedAt = new Date().toISOString();
+  await startDispatchQueueWorker();
   startOperationsCommandCenterMonitor();
 
   await new Promise((resolve) => {

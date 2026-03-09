@@ -15,6 +15,7 @@ import {
 } from "../services/serviceNormalization.js";
 import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/pricingEstimator.js";
 import { computePaymentAmounts, getPlatformPricingConfig } from "../services/platformPricing.js";
+import { enqueueDispatchJob } from "../services/dispatchQueueService.js";
 import {
     isActiveJobStatus,
     isTerminalJobStatus,
@@ -377,12 +378,11 @@ router.post("/", verifyUser, async (req, res) => {
             console.log(`[Create Job] Reserved technician ${directTechnicianId} for direct request #${newRequestId}.`);
         }
 
-        // 3. Trigger Direct Notify or Smart Dispatch (Async)
-        // We do this asynchronously so we can return quickly to the UI
+        // 3. Trigger Direct Notify or queue-driven dispatch (async)
         (async () => {
             try {
                 if (hasDirectTechnician && directTechnicianId) {
-                    socketService.notifyTechnician(directTechnicianId, "job:assigned", {
+                    const directAssignedPayload = {
                         id: String(newRequestId),
                         jobId: String(newRequestId),
                         requestId: String(newRequestId),
@@ -398,7 +398,11 @@ router.post("/", verifyUser, async (req, res) => {
                         address,
                         amount: initialAmount || 0,
                         priceAmount: initialAmount || 0
-                    });
+                    };
+                    if (socketService.io) {
+                        socketService.io.to(`technician_${directTechnicianId}`).emit("JOB_ALERT", directAssignedPayload);
+                    }
+                    socketService.notifyTechnician(directTechnicianId, "job:assigned", directAssignedPayload);
                     socketService.notifyTechnician(directTechnicianId, "job:list_update", {
                         requestId: String(newRequestId),
                         action: "created"
@@ -406,8 +410,26 @@ router.post("/", verifyUser, async (req, res) => {
                     return;
                 }
 
+                const queued = await enqueueDispatchJob({
+                    jobId: newRequestId,
+                    userId,
+                    retryCount: 0,
+                    attemptedTechnicianIds: [],
+                    source: "service_request_create",
+                });
+
+                if (queued?.queued) {
+                    console.log(`[Create Job] Enqueued request #${newRequestId} to Redis dispatch queue.`);
+                    return;
+                }
+
+                // Safety fallback if Redis queue is unavailable.
+                console.warn(
+                    `[Create Job] Queue unavailable for request #${newRequestId} (${queued?.reason || "unknown"}). Falling back to direct dispatch.`
+                );
+
                 const { jobDispatchService } = await import("../services/jobDispatchService.js");
-                const jobRequest = {
+                const fallbackJobRequest = {
                     id: newRequestId,
                     location_lat,
                     location_lng,
@@ -418,11 +440,11 @@ router.post("/", verifyUser, async (req, res) => {
                     contact_name: req.body.contact_name || null
                 };
 
-                const candidates = await jobDispatchService.findTopTechnicians(jobRequest);
+                const candidates = await jobDispatchService.findTopTechnicians(fallbackJobRequest);
                 console.log(`[Create Job] Found ${candidates.length} candidates for #${newRequestId}`);
 
                 if (candidates.length > 0) {
-                    await jobDispatchService.dispatchJob(jobRequest, candidates);
+                    await jobDispatchService.dispatchJob(fallbackJobRequest, candidates);
                 } else {
                     // No technicians found immediately
                     // Provide fallback or keep pending for admin manual assignment
@@ -442,7 +464,7 @@ router.post("/", verifyUser, async (req, res) => {
             technician_id: directTechnicianId,
             message: hasDirectTechnician
                 ? "Request created and assigned. Technician has been notified."
-                : "Request created. Searching for nearby technicians...",
+                : "Request created. Dispatch queued for nearby technicians...",
             created_at: new Date()
         });
 
@@ -698,7 +720,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                     );
                 }
                 // Notify new technician
-                socketService.notifyTechnician(newTechId, 'job:assigned', {
+                const reassignedPayload = {
                     id: String(requestId),
                     jobId: String(requestId),
                     requestId: String(requestId),
@@ -716,7 +738,11 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                     distance: Number(nextMatch.distance) || 0,
                     amount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0,
                     priceAmount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0
-                });
+                };
+                if (socketService.io) {
+                    socketService.io.to(`technician_${newTechId}`).emit("JOB_ALERT", reassignedPayload);
+                }
+                socketService.notifyTechnician(newTechId, 'job:assigned', reassignedPayload);
                 socketService.notifyTechnician(newTechId, "job:list_update", {
                     requestId: String(requestId),
                     action: "updated"
