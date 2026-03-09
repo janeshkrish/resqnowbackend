@@ -19,6 +19,13 @@ const ANDROID_APK_RELATIVE_DIRECTORIES = [
     ["android", "app", "build", "outputs", "apk", "release"],
 ];
 
+const ANDROID_APK_RELATIVE_FILE_DIRECTORIES = [
+    ["resqnowfrontend", "android", "app", "release"],
+    ["android", "app", "release"],
+    ["resqnowfrontend", "android", "app", "build", "outputs", "apk", "release"],
+    ["android", "app", "build", "outputs", "apk", "release"],
+];
+
 function normalizeAbsolutePath(value) {
     const raw = String(value || "").trim();
     if (!raw) return "";
@@ -68,10 +75,23 @@ function collectAndroidApkLookupCandidates() {
         ),
     ].filter(Boolean).map((entry) => path.normalize(entry));
 
+    const fileNameCandidates = [...new Set([envFileName, DEFAULT_ANDROID_APK_FILE_NAME])];
+    const absoluteFileCandidates = [
+        envFile,
+        ...rootCandidates.flatMap((rootPath) =>
+            ANDROID_APK_RELATIVE_FILE_DIRECTORIES.flatMap((segments) =>
+                fileNameCandidates.map((fileName) => path.resolve(rootPath, ...segments, fileName))
+            )
+        ),
+    ]
+        .filter(Boolean)
+        .map((entry) => path.normalize(entry));
+
     return {
         envDirectory,
         envFile,
-        fileNameCandidates: [...new Set([envFileName, DEFAULT_ANDROID_APK_FILE_NAME])],
+        fileNameCandidates,
+        absoluteFileCandidates: [...new Set(absoluteFileCandidates)],
         directoryCandidates: [...new Set(directoryCandidates)],
     };
 }
@@ -93,6 +113,25 @@ function resolveAndroidApkPath() {
                 releaseDir: path.dirname(lookup.envFile),
                 source: "env_file",
                 stat: envFileStat,
+                checks,
+            };
+        }
+    }
+
+    for (const absoluteFilePath of lookup.absoluteFileCandidates || []) {
+        if (!absoluteFilePath) continue;
+        const absoluteFileStat = getFileStatSafe(absoluteFilePath);
+        checks.push({
+            type: "absolute_file",
+            path: absoluteFilePath,
+            exists: Boolean(absoluteFileStat),
+        });
+        if (absoluteFileStat) {
+            return {
+                apkPath: absoluteFilePath,
+                releaseDir: path.dirname(absoluteFilePath),
+                source: "absolute_file",
+                stat: absoluteFileStat,
                 checks,
             };
         }
@@ -343,6 +382,12 @@ router.get("/android-app/status", async (_req, res) => {
         const fileName = apkPath ? path.basename(apkPath) : null;
         const fileSize = Number(resolution?.stat?.size || 0) || null;
         const modifiedAt = toIsoOrNull(resolution?.stat?.mtime || null);
+        console.info("[Android APK Status] Path resolution summary.", {
+            resolvedPath: apkPath || null,
+            exists: Boolean(apkPath),
+            source: resolution?.source || null,
+            cwd: process.cwd(),
+        });
 
         if (apkPath) {
             console.info("[Android APK Status] APK found.", {
@@ -380,12 +425,21 @@ async function handleAndroidApkDownload(res, { headOnly = false } = {}) {
     try {
         const resolution = resolveAndroidApkPath();
         const apkPath = resolution?.apkPath;
+        console.info("[Android APK Download] Path resolution summary.", {
+            resolvedPath: apkPath || null,
+            exists: Boolean(apkPath),
+            source: resolution?.source || null,
+            cwd: process.cwd(),
+        });
         if (!apkPath) {
             console.warn("[Android APK Download] APK not found.", {
                 cwd: process.cwd(),
                 backendRoot: BACKEND_ROOT,
                 checks: resolution?.checks || [],
             });
+            if (headOnly) {
+                return res.status(404).end();
+            }
             return res.status(404).json({
                 error: getAndroidApkMissingMessage(),
             });

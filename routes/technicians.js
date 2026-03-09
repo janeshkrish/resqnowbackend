@@ -1,4 +1,4 @@
-
+﻿
 import { Router } from "express";
 import { socketService } from "../services/socket.js";
 import bcrypt from "bcryptjs";
@@ -71,6 +71,45 @@ const parseObject = (value) => {
   return isPlainObject(value) ? value : {};
 };
 
+const KNOWN_DOCUMENT_KEYS = ["garage_front", "profile_photo", "tools_photo", "facilities_photo"];
+
+function normalizeUploadResourcePath(rawValue) {
+  const raw = String(rawValue || "").trim();
+  if (!raw) return "";
+
+  if (raw.startsWith("/api/upload/files/")) {
+    return raw;
+  }
+
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+      const pathname = String(parsed.pathname || "").trim();
+      if (pathname.startsWith("/api/upload/files/")) {
+        return pathname;
+      }
+      return raw;
+    } catch {
+      return raw;
+    }
+  }
+
+  if (/^api\/upload\/files\//i.test(raw)) {
+    return `/${raw.replace(/^\/+/, "")}`;
+  }
+
+  return raw;
+}
+
+function sanitizeTechnicianDocuments(rawDocuments) {
+  const parsed = parseObject(rawDocuments);
+  const cleaned = {};
+  for (const key of KNOWN_DOCUMENT_KEYS) {
+    cleaned[key] = normalizeUploadResourcePath(parsed[key]);
+  }
+  return cleaned;
+}
+
 const normalizeTechnicianSettings = (existingValue, patchValue = null) => {
   const existing = parseObject(existingValue);
   const patch = parseObject(patchValue);
@@ -126,6 +165,7 @@ function rowToTechnician(row) {
   try { if (row.vehicle_types) vehicle_types = typeof row.vehicle_types === "string" ? JSON.parse(row.vehicle_types) : row.vehicle_types; } catch { }
   try { if (row.documents) documents = typeof row.documents === "string" ? JSON.parse(row.documents) : row.documents; } catch { }
   try { if (row.settings) settings = typeof row.settings === "string" ? JSON.parse(row.settings) : row.settings; } catch { }
+  const normalizedDocuments = sanitizeTechnicianDocuments(documents);
 
   return {
     id: String(row.id),
@@ -158,8 +198,8 @@ function rowToTechnician(row) {
     vehicle_types,
     verification_status,
     settings: normalizeTechnicianSettings(settings),
-    resume_url: row.resume_url ? row.resume_url.replace(/^https?:\/\/[^\/]+/, "") : "", // Force relative path
-    documents: documents,
+    resume_url: normalizeUploadResourcePath(row.resume_url || ""),
+    documents: normalizedDocuments,
     rating: parseFloat(row.rating || 5.0),
     jobs_completed: parseInt(row.jobs_completed || 0),
     total_earnings: parseFloat(row.total_earnings || 0.00),
@@ -300,11 +340,13 @@ router.post("/register", async (req, res) => {
     const normalizedVehicleTypes = normalizeVehicleTypes(vehicle_types);
     const normalizedServiceCosts = normalizeServiceCosts(service_costs);
     const service_type = normalizedSpecialties[0] || "other";
-    const location = (locality || address || "").trim() || "—";
+    const location = (locality || address || "").trim() || "â€”";
+    const normalizedDocuments = sanitizeTechnicianDocuments(documents);
+    const normalizedResumeUrl = normalizeUploadResourcePath(resume_url);
 
     const specialtiesJson = JSON.stringify(normalizedSpecialties);
     const pricingJson = JSON.stringify(pricing && typeof pricing === "object" ? pricing : {});
-    const documentsJson = JSON.stringify(documents && typeof documents === "object" ? documents : {});
+    const documentsJson = JSON.stringify(normalizedDocuments);
     const workingHoursJson = JSON.stringify(working_hours || {});
     const serviceCostsJson = JSON.stringify(normalizedServiceCosts || {});
     const paymentDetailsJson = JSON.stringify(payment_details || {});
@@ -363,7 +405,7 @@ router.post("/register", async (req, res) => {
         paymentDetailsJson,
         appReadinessJson,
         vehicleTypesJson,
-        (resume_url || "").trim(),
+        normalizedResumeUrl,
         documentsJson,
         req.body.latitude || null,
         req.body.longitude || null
@@ -388,7 +430,7 @@ router.post("/register", async (req, res) => {
     try {
       await mail.sendMail({
         to: normalizedEmail,
-        subject: "Application Received – ResQNow",
+        subject: "Application Received â€“ ResQNow",
         html: `Hello ${trimmedName},<br><br>We have received your technician application. You will get a confirmation email once an admin reviews it.<br><br>Regards,<br>ResQNow Team`,
       });
     } catch (mailErr) {
@@ -1447,7 +1489,8 @@ router.post("/create", verifyAdmin, async (req, res) => {
       address, region, district, state, locality, google_maps_link,
       aadhaar_number, pan_number, business_type, gst_number, trade_license_number,
       working_hours, service_costs, payment_details, app_readiness, vehicle_types,
-      serviceAreaRange, experience, specialties, pricing, status
+      serviceAreaRange, experience, specialties, pricing, status,
+      resume_url, documents
     } = req.body;
 
     const normalizedEmail = (email || "").trim().toLowerCase();
@@ -1466,11 +1509,14 @@ router.post("/create", verifyAdmin, async (req, res) => {
     const normalizedServiceCosts = normalizeServiceCosts(service_costs);
     const service_type = normalizedSpecialties[0] || "other";
     const location = (locality || address || "").trim() || "—";
+    const normalizedDocuments = sanitizeTechnicianDocuments(documents);
+    const normalizedResumeUrl = normalizeUploadResourcePath(resume_url);
     const requestedStatus = String(status || "").toLowerCase();
     const appStatus = requestedStatus === "approved" ? "approved" : "pending";
 
     const specialtiesJson = JSON.stringify(normalizedSpecialties);
     const pricingJson = JSON.stringify(pricing && typeof pricing === "object" ? pricing : {});
+    const documentsJson = JSON.stringify(normalizedDocuments);
     const workingHoursJson = JSON.stringify(working_hours || {});
     const serviceCostsJson = JSON.stringify(normalizedServiceCosts || {});
     const paymentDetailsJson = JSON.stringify(payment_details || {});
@@ -1486,8 +1532,9 @@ router.post("/create", verifyAdmin, async (req, res) => {
         address, region, district, state, locality, google_maps_link,
         aadhaar_number, pan_number, business_type, gst_number, trade_license_number,
         service_area_range, experience,
-        specialties, pricing, working_hours, service_costs, payment_details, app_readiness, vehicle_types
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        specialties, pricing, working_hours, service_costs, payment_details, app_readiness, vehicle_types,
+        resume_url, documents
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         trimmedName,
         normalizedEmail,
@@ -1519,6 +1566,8 @@ router.post("/create", verifyAdmin, async (req, res) => {
         paymentDetailsJson,
         appReadinessJson,
         vehicleTypesJson,
+        normalizedResumeUrl,
+        documentsJson,
       ]
     );
     const id = result[0].insertId;
@@ -1720,7 +1769,7 @@ router.patch("/:id/approve", verifyAdmin, async (req, res) => {
       try {
         await mail.sendMail({
           to: tech.email,
-          subject: "Application Approved – ResQNow",
+          subject: "Application Approved â€“ ResQNow",
           html: `Hello ${tech.name || "there"}, <br><br>Your technician application has been approved.<br>You can now log in to the ResQNow Technician Portal.<br><br>Regards,<br>ResQNow Team`,
         });
       } catch (mailErr) {
@@ -1790,3 +1839,4 @@ router.get("/:id/approval-audit", verifyAdmin, async (req, res) => {
 });
 
 export default router;
+
