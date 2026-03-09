@@ -29,6 +29,10 @@ const DEFAULT_USER_SETTINGS = Object.freeze({
     marketing_email: true,
     push_alerts: false
   },
+  navigation: {
+    mobile_bottom_nav_enabled: true,
+    auto_hide_bottom_nav: true
+  },
   privacy: {
     email_visibility: "verified_only"
   }
@@ -64,6 +68,11 @@ const normalizeUserSettings = (existingValue, patchValue = null) => {
       ...(isPlainObject(existing.notifications) ? existing.notifications : {}),
       ...(isPlainObject(patch.notifications) ? patch.notifications : {})
     },
+    navigation: {
+      ...DEFAULT_USER_SETTINGS.navigation,
+      ...(isPlainObject(existing.navigation) ? existing.navigation : {}),
+      ...(isPlainObject(patch.navigation) ? patch.navigation : {})
+    },
     privacy: {
       ...DEFAULT_USER_SETTINGS.privacy,
       ...(isPlainObject(existing.privacy) ? existing.privacy : {}),
@@ -78,6 +87,8 @@ const normalizeUserSettings = (existingValue, patchValue = null) => {
   merged.notifications.service_updates_email = !!merged.notifications.service_updates_email;
   merged.notifications.marketing_email = !!merged.notifications.marketing_email;
   merged.notifications.push_alerts = !!merged.notifications.push_alerts;
+  merged.navigation.mobile_bottom_nav_enabled = merged.navigation.mobile_bottom_nav_enabled !== false;
+  merged.navigation.auto_hide_bottom_nav = merged.navigation.auto_hide_bottom_nav !== false;
 
   return merged;
 };

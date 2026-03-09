@@ -504,6 +504,29 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
         const { status } = req.body;
 
         const pool = await getPool();
+        const normalized = normalizeStatus(status);
+        if (!normalized) {
+            return res.status(400).json({ error: "Invalid status value." });
+        }
+
+        // Route accepted updates through atomic accept logic so competing technicians
+        // cannot both claim the same request.
+        if (normalized === "accepted") {
+            const { jobDispatchService } = await import("../services/jobDispatchService.js");
+            const acceptResult = await jobDispatchService.acceptJob(technicianId, requestId);
+            if (!acceptResult.success) {
+                if (acceptResult.code === "not_found" || acceptResult.code === "technician_not_found") {
+                    return res.status(404).json({ error: acceptResult.reason || "Request not found." });
+                }
+                return res.status(409).json({ error: acceptResult.reason || "Job already accepted by another technician." });
+            }
+            return res.json({
+                success: true,
+                status: "accepted",
+                request: acceptResult.job,
+                idempotent: !!acceptResult.idempotent,
+            });
+        }
 
         // Check assignment
         console.log(`[Tech Status Update] RequestID: ${requestId}, TechID: ${technicianId}, Status: ${status}`);
@@ -521,11 +544,6 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
 
         const [techs] = await pool.query("SELECT name FROM technicians WHERE id = ?", [technicianId]);
         const techName = techs[0]?.name || "Your Technician";
-
-        const normalized = normalizeStatus(status);
-        if (!normalized) {
-            return res.status(400).json({ error: "Invalid status value." });
-        }
 
         let newStatus = normalized;
         let newTechId = technicianId;

@@ -23,5 +23,8 @@
     "pdfkit": "^0.13.0",
     "razorpay": "^2.9.6",
     "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5"
   }
 }

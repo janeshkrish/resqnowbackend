@@ -49,6 +49,10 @@ const DEFAULT_TECHNICIAN_SETTINGS = Object.freeze({
   notifications: {
     email_notifications: true,
     push_notifications: true
+  },
+  navigation: {
+    mobile_bottom_nav_enabled: true,
+    auto_hide_bottom_nav: true
   }
 });
 
@@ -81,6 +85,11 @@ const normalizeTechnicianSettings = (existingValue, patchValue = null) => {
       ...DEFAULT_TECHNICIAN_SETTINGS.notifications,
       ...(isPlainObject(existing.notifications) ? existing.notifications : {}),
       ...(isPlainObject(patch.notifications) ? patch.notifications : {})
+    },
+    navigation: {
+      ...DEFAULT_TECHNICIAN_SETTINGS.navigation,
+      ...(isPlainObject(existing.navigation) ? existing.navigation : {}),
+      ...(isPlainObject(patch.navigation) ? patch.navigation : {})
     }
   };
 
@@ -89,6 +98,8 @@ const normalizeTechnicianSettings = (existingValue, patchValue = null) => {
   }
   settings.notifications.email_notifications = !!settings.notifications.email_notifications;
   settings.notifications.push_notifications = !!settings.notifications.push_notifications;
+  settings.navigation.mobile_bottom_nav_enabled = settings.navigation.mobile_bottom_nav_enabled !== false;
+  settings.navigation.auto_hide_bottom_nav = settings.navigation.auto_hide_bottom_nav !== false;
   return settings;
 };
 

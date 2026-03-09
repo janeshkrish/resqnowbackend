@@ -1,8 +1,54 @@
 import { Router } from "express";
+import fs from "fs";
+import path from "path";
 import * as db from "../db.js";
 import { sendMail } from "../services/mailer.js";
 
 const router = Router();
+
+const APK_RELEASE_DIRECTORIES = [
+    path.resolve(process.cwd(), "../resqnowfrontend/android/app/release"),
+    path.resolve(process.cwd(), "resqnowfrontend/android/app/release"),
+    path.resolve(process.cwd(), "android/app/release"),
+];
+
+const resolveAndroidReleaseDirectory = () => {
+    for (const dir of APK_RELEASE_DIRECTORIES) {
+        if (fs.existsSync(dir)) {
+            return dir;
+        }
+    }
+    return null;
+};
+
+const resolveAndroidApkPath = () => {
+    const releaseDir = resolveAndroidReleaseDirectory();
+    if (!releaseDir) return null;
+
+    const metadataPath = path.join(releaseDir, "output-metadata.json");
+    if (fs.existsSync(metadataPath)) {
+        try {
+            const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+            const outputFile = String(metadata?.elements?.[0]?.outputFile || "").trim();
+            if (outputFile) {
+                const resolvedOutput = path.join(releaseDir, outputFile);
+                if (fs.existsSync(resolvedOutput)) {
+                    return resolvedOutput;
+                }
+            }
+        } catch {
+            // Ignore malformed metadata and try fallback scan.
+        }
+    }
+
+    const apkCandidates = fs
+        .readdirSync(releaseDir)
+        .filter((entry) => entry.toLowerCase().endsWith(".apk"))
+        .map((entry) => path.join(releaseDir, entry))
+        .sort();
+
+    return apkCandidates[0] || null;
+};
 
 /**
  * GET /api/public/stats
@@ -108,6 +154,35 @@ router.get("/reverse-geocode", async (req, res) => {
     } catch (error) {
         console.error("[Reverse Geocode] Error:", error);
         return res.status(500).json({ error: "Failed to reverse geocode." });
+    }
+});
+
+/**
+ * GET /api/public/android-app/download
+ * Download latest Android APK from release output folder.
+ */
+router.get("/android-app/download", async (_req, res) => {
+    try {
+        const apkPath = resolveAndroidApkPath();
+        if (!apkPath) {
+            return res.status(404).json({
+                error: "Android app package is not available yet. Please upload app-release.apk to resqnowfrontend/android/app/release.",
+            });
+        }
+
+        const fileName = path.basename(apkPath);
+        res.setHeader("Content-Type", "application/vnd.android.package-archive");
+        res.setHeader("Content-Disposition", `attachment; filename=\"${fileName}\"`);
+
+        return res.download(apkPath, fileName, (error) => {
+            if (!error) return;
+            if (!res.headersSent) {
+                res.status(500).json({ error: "Failed to download Android app package." });
+            }
+        });
+    } catch (error) {
+        console.error("[Android APK Download] Error:", error);
+        return res.status(500).json({ error: "Failed to prepare Android app download." });
     }
 });
 
