@@ -21,13 +21,22 @@ const ACTIVE_MONITORING_STATUSES = new Set([
   "payment_pending",
 ]);
 
-const PRE_START_STATUSES = new Set(["assigned", "accepted"]);
+const PRE_START_STATUSES = new Set(["accepted"]);
 const MOVEMENT_STATUSES = new Set([
   "accepted",
   "processing",
   "in_progress",
   "in-progress",
   "service_started",
+  "en-route",
+  "on-the-way",
+  "arrived",
+]);
+const PROGRESS_TRACKING_STATUSES = new Set([
+  "processing",
+  "service_started",
+  "in_progress",
+  "in-progress",
   "en-route",
   "on-the-way",
   "arrived",
@@ -42,8 +51,12 @@ const HISTORY_LOOKBACK_MINUTES = 90;
 const MAX_HISTORY_POINTS_PER_REQUEST = 12;
 const MANDATORY_SAFETY_BUFFER_MINUTES = 30;
 const SCHEDULE_GRACE_MINUTES = 15;
+const GPS_INACTIVITY_MINUTES = 8;
+const SLA_WARNING_MINUTES = 20;
+const PROGRESS_STALE_MINUTES = 20;
 
 const etaCache = new Map();
+let activeMonitorCyclePromise = null;
 const monitorState = {
   timer: null,
   running: false,
@@ -252,7 +265,7 @@ async function fetchActiveJobs(pool) {
      FROM service_requests sr
      LEFT JOIN technicians t ON t.id = sr.technician_id
      WHERE sr.technician_id IS NOT NULL
-       AND LOWER(COALESCE(sr.status, '')) IN (${placeholders})`,
+       AND sr.status IN (${placeholders})`,
     statuses
   );
   return rows || [];
@@ -296,9 +309,9 @@ async function fetchRecentLocationHistory(pool, requestIds) {
        captured_at
      FROM technician_location_history
      WHERE service_request_id IN (${placeholders})
-       AND captured_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+       AND captured_at >= DATE_SUB(NOW(), INTERVAL ${HISTORY_LOOKBACK_MINUTES} MINUTE)
      ORDER BY service_request_id ASC, captured_at DESC`,
-    [...requestIds, HISTORY_LOOKBACK_MINUTES]
+    requestIds
   );
 
   const map = new Map();
@@ -323,7 +336,7 @@ async function resolveTerminalJobAlerts(pool) {
          a.resolved_at = NOW(),
          a.updated_at = NOW()
      WHERE a.is_active = 1
-       AND LOWER(COALESCE(sr.status, '')) IN ('completed', 'cancelled', 'paid', 'rejected')`
+       AND sr.status IN ('completed', 'cancelled', 'paid', 'rejected')`
   );
 }
 
@@ -341,10 +354,14 @@ async function evaluateJobExceptions(job, historyRows, context) {
   const customer = toCoordinatePair(job.customer_lat, job.customer_lng);
   const technician = toCoordinatePair(job.technician_lat, job.technician_lng);
 
-  const acceptedAt = toDate(job.accepted_time || job.updated_at);
+  const acceptedAt = toDate(job.accepted_time);
   const startedAt = toDate(job.start_time || job.started_at);
   const scheduledAt = toDate(job.scheduled_time);
   const slaDeadline = toDate(job.sla_deadline);
+  const createdAt = toDate(job.created_at);
+  const lastJobUpdateAt = toDate(job.updated_at);
+  const lastLocationUpdateAt = toDate(job.last_location_update);
+  const acceptedAtForDelay = acceptedAt || (status === "accepted" ? createdAt : null);
 
   let latestEtaMinutes = null;
   let latestEtaArrival = null;
@@ -356,8 +373,8 @@ async function evaluateJobExceptions(job, historyRows, context) {
     }
   }
 
-  if (PRE_START_STATUSES.has(status) && acceptedAt && !startedAt) {
-    const acceptedMinutes = minutesBetween(acceptedAt, now);
+  if (PRE_START_STATUSES.has(status) && acceptedAtForDelay && !startedAt) {
+    const acceptedMinutes = minutesBetween(acceptedAtForDelay, now);
     if (acceptedMinutes != null && acceptedMinutes >= 3) {
       alerts.push({
         reasonCode: "start_delay",
@@ -367,15 +384,17 @@ async function evaluateJobExceptions(job, historyRows, context) {
         etaArrival: latestEtaArrival,
         slaDeadline,
         metadata: {
-          acceptedAt: formatDateTime(acceptedAt),
+          acceptedAt: formatDateTime(acceptedAtForDelay),
           acceptedMinutes: round(acceptedMinutes, 1),
         },
       });
     }
   }
 
+  let hasArrivalDelay = false;
   if (slaDeadline && latestEtaArrival && latestEtaArrival.getTime() > slaDeadline.getTime()) {
     const deltaMinutes = (latestEtaArrival.getTime() - slaDeadline.getTime()) / 60000;
+    hasArrivalDelay = true;
     alerts.push({
       reasonCode: "arrival_delay",
       reasonText: "Predicted ETA exceeds the SLA deadline.",
@@ -387,6 +406,49 @@ async function evaluateJobExceptions(job, historyRows, context) {
         minutesBeyondSla: round(deltaMinutes, 1),
       },
     });
+  }
+
+  if (slaDeadline && !hasArrivalDelay) {
+    const remainingMinutes = minutesBetween(now, slaDeadline);
+    if (remainingMinutes != null && remainingMinutes > 0 && remainingMinutes <= SLA_WARNING_MINUTES) {
+      const etaUnknown = latestEtaMinutes == null;
+      const etaExhaustsWindow = latestEtaMinutes != null && latestEtaMinutes >= Math.max(remainingMinutes - 2, 0);
+      if (etaUnknown || etaExhaustsWindow) {
+        alerts.push({
+          reasonCode: "sla_risk",
+          reasonText: "SLA deadline is approaching and current ETA leaves little margin.",
+          riskLevel: remainingMinutes <= 8 ? "red" : "yellow",
+          etaMinutes: latestEtaMinutes,
+          etaArrival: latestEtaArrival,
+          slaDeadline,
+          metadata: {
+            minutesRemaining: round(remainingMinutes, 1),
+            etaMinutes: latestEtaMinutes != null ? round(latestEtaMinutes, 1) : null,
+          },
+        });
+      }
+    }
+  }
+
+  if (MOVEMENT_STATUSES.has(status)) {
+    const minutesSinceLocation = lastLocationUpdateAt ? minutesBetween(lastLocationUpdateAt, now) : null;
+    const minutesSinceAccepted = acceptedAtForDelay ? minutesBetween(acceptedAtForDelay, now) : null;
+    const effectiveInactivityMinutes = minutesSinceLocation ?? minutesSinceAccepted;
+
+    if (effectiveInactivityMinutes != null && effectiveInactivityMinutes >= GPS_INACTIVITY_MINUTES) {
+      alerts.push({
+        reasonCode: "gps_inactive",
+        reasonText: "Technician GPS has not updated recently for this active job.",
+        riskLevel: effectiveInactivityMinutes >= 15 ? "red" : "yellow",
+        etaMinutes: latestEtaMinutes,
+        etaArrival: latestEtaArrival,
+        slaDeadline,
+        metadata: {
+          lastLocationUpdateAt: formatDateTime(lastLocationUpdateAt),
+          inactivityMinutes: round(effectiveInactivityMinutes, 1),
+        },
+      });
+    }
   }
 
   if (MOVEMENT_STATUSES.has(status) && customer && historyRows.length >= 2) {
@@ -444,6 +506,28 @@ async function evaluateJobExceptions(job, historyRows, context) {
         metadata: {
           previousDistanceKm: round(previousDistToCustomer, 2),
           latestDistanceKm: round(latestDistToCustomer, 2),
+        },
+      });
+    }
+  }
+
+  if (PROGRESS_TRACKING_STATUSES.has(status)) {
+    const progressBaseTime = startedAt || acceptedAtForDelay || createdAt;
+    const activeMinutes = progressBaseTime ? minutesBetween(progressBaseTime, now) : null;
+    const staleMinutes = lastJobUpdateAt ? minutesBetween(lastJobUpdateAt, now) : null;
+    if (activeMinutes != null && activeMinutes >= 60 && (staleMinutes == null || staleMinutes >= PROGRESS_STALE_MINUTES)) {
+      alerts.push({
+        reasonCode: "progress_delay",
+        reasonText: "Job appears stalled with limited progress updates.",
+        riskLevel: activeMinutes >= 90 ? "red" : "yellow",
+        etaMinutes: latestEtaMinutes,
+        etaArrival: latestEtaArrival,
+        slaDeadline,
+        metadata: {
+          status,
+          activeMinutes: round(activeMinutes, 1),
+          staleMinutes: staleMinutes != null ? round(staleMinutes, 1) : null,
+          lastJobUpdateAt: formatDateTime(lastJobUpdateAt),
         },
       });
     }
@@ -619,7 +703,7 @@ async function resolveAlertsById(pool, resolveQueue) {
   return Number(updateResult?.affectedRows || 0);
 }
 
-export async function runOperationsCommandCenterCycle({ trigger = "scheduler" } = {}) {
+async function executeOperationsCommandCenterCycle({ trigger = "scheduler" } = {}) {
   const pool = await getPool();
   const context = buildMonitoringContext();
   await resolveTerminalJobAlerts(pool);
@@ -679,21 +763,38 @@ export async function runOperationsCommandCenterCycle({ trigger = "scheduler" } 
   };
 }
 
+export async function runOperationsCommandCenterCycle({ trigger = "scheduler" } = {}) {
+  if (activeMonitorCyclePromise) {
+    return activeMonitorCyclePromise;
+  }
+
+  monitorState.running = true;
+  activeMonitorCyclePromise = (async () => {
+    try {
+      const result = await executeOperationsCommandCenterCycle({ trigger });
+      monitorState.lastError = null;
+      return result;
+    } catch (error) {
+      monitorState.lastError = error?.message || "Command center monitor failed.";
+      throw error;
+    } finally {
+      monitorState.running = false;
+      activeMonitorCyclePromise = null;
+    }
+  })();
+
+  return activeMonitorCyclePromise;
+}
+
 export function startOperationsCommandCenterMonitor() {
   if (monitorState.timer) return;
 
   const intervalMs = getMonitorIntervalMs();
   const tick = async () => {
-    if (monitorState.running) return;
-    monitorState.running = true;
     try {
       await runOperationsCommandCenterCycle({ trigger: "scheduler" });
-      monitorState.lastError = null;
     } catch (error) {
-      monitorState.lastError = error?.message || "Command center monitor failed.";
       console.error("[OperationsCommandCenter] monitor tick failed:", error?.message || error);
-    } finally {
-      monitorState.running = false;
     }
   };
 

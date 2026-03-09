@@ -307,6 +307,23 @@ async function addColumnIfNotExists(pool, table, columnDef) {
   }
 }
 
+async function addIndexIfNotExists(pool, table, indexName, columnsSql) {
+  try {
+    await pool.query(`CREATE INDEX ${indexName} ON ${table} (${columnsSql})`);
+  } catch (err) {
+    const message = String(err?.message || "");
+    const isDuplicateIndex =
+      err.code === "ER_DUP_KEYNAME" ||
+      err.code === "ER_DUP_INDEX" ||
+      err.errno === 1061 ||
+      message.includes("Duplicate key name") ||
+      message.includes("already exists");
+    if (!isDuplicateIndex) {
+      console.log(`Note: Could not add index ${indexName} on ${table}. Error: ${message}`);
+    }
+  }
+}
+
 export async function updateTechniciansTableSchema() {
   const p = await getPool();
   await addColumnIfNotExists(p, 'technicians', 'is_active BOOLEAN DEFAULT FALSE');
@@ -611,6 +628,12 @@ export async function updateServiceRequestsTableSchema() {
   } catch (err) {
     console.log("Note: could not modify service_requests.cancellation_reason column:", err.message);
   }
+
+  // Monitoring and admin filters rely heavily on these columns.
+  await addIndexIfNotExists(p, "service_requests", "idx_service_requests_status", "status");
+  await addIndexIfNotExists(p, "service_requests", "idx_service_requests_technician_status", "technician_id, status");
+  await addIndexIfNotExists(p, "service_requests", "idx_service_requests_created_at", "created_at");
+  await addIndexIfNotExists(p, "service_requests", "idx_service_requests_updated_at", "updated_at");
 }
 
 export async function updateUsersTableSchema() {
