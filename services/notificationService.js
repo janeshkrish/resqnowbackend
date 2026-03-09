@@ -199,6 +199,7 @@ class NotificationService {
     ) {
       const serviceType = normalizeText(data?.serviceType || data?.service_type || "Roadside Assistance");
       const customerName = normalizeText(data?.customerName || data?.contact_name || "Customer");
+      const status = normalizeText(data?.status || data?.job_status || "");
       const locationDistance = await this.resolveDistanceText(userId, userType, data, pool);
       const priceAmount = normalizeMoney(data?.priceAmount ?? data?.amount);
       const serviceEmoji = resolveServiceEmoji(serviceType);
@@ -224,6 +225,7 @@ class NotificationService {
         requestId: jobId,
         customerName,
         serviceType,
+        status,
         locationDistance,
         priceAmount,
         deepLinkPath: basePath,

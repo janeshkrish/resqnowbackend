@@ -9,41 +9,8 @@ const router = Router();
 
 const ROUTES_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_ROOT = path.resolve(ROUTES_DIR, "..");
-const WORKSPACE_ROOT = path.resolve(BACKEND_ROOT, "..");
-const DEFAULT_ANDROID_APK_FILE_NAME = "app-release.apk";
-
-const ANDROID_APK_RELATIVE_DIRECTORIES = [
-    ["resqnowfrontend", "android", "app", "release"],
-    ["android", "app", "release"],
-    ["resqnowfrontend", "android", "app", "build", "outputs", "apk", "release"],
-    ["android", "app", "build", "outputs", "apk", "release"],
-];
-
-const ANDROID_APK_RELATIVE_FILE_DIRECTORIES = [
-    ["resqnowfrontend", "android", "app", "release"],
-    ["android", "app", "release"],
-    ["resqnowfrontend", "android", "app", "build", "outputs", "apk", "release"],
-    ["android", "app", "build", "outputs", "apk", "release"],
-];
-
-function normalizeAbsolutePath(value) {
-    const raw = String(value || "").trim();
-    if (!raw) return "";
-    return path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(process.cwd(), raw);
-}
-
-function getParentChain(startPath, maxDepth = 4) {
-    const chain = [];
-    let current = normalizeAbsolutePath(startPath);
-    for (let depth = 0; depth < maxDepth; depth += 1) {
-        if (!current) break;
-        chain.push(current);
-        const parent = path.dirname(current);
-        if (!parent || parent === current) break;
-        current = parent;
-    }
-    return chain;
-}
+const DEFAULT_ANDROID_APK_FILE_NAME = "resqnow.apk";
+const DEFAULT_ANDROID_APK_RELATIVE_PATH = path.join("public", "downloads", DEFAULT_ANDROID_APK_FILE_NAME);
 
 function getFileStatSafe(filePath) {
     try {
@@ -55,178 +22,75 @@ function getFileStatSafe(filePath) {
     }
 }
 
-function collectAndroidApkLookupCandidates() {
-    const envDirectory = normalizeAbsolutePath(process.env.ANDROID_APK_RELEASE_DIR || process.env.APK_RELEASE_DIR);
-    const envFile = normalizeAbsolutePath(process.env.ANDROID_APK_PATH || process.env.APK_PATH);
-    const envFileName = String(process.env.ANDROID_APK_FILE_NAME || DEFAULT_ANDROID_APK_FILE_NAME).trim() || DEFAULT_ANDROID_APK_FILE_NAME;
+function normalizeAbsolutePath(value, relativeBase = BACKEND_ROOT) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (path.isAbsolute(raw)) {
+        return path.resolve(raw);
+    }
+    return path.resolve(relativeBase, raw);
+}
 
-    const rootCandidates = [
-        BACKEND_ROOT,
-        WORKSPACE_ROOT,
-        process.cwd(),
-        ...getParentChain(BACKEND_ROOT, 6),
-        ...getParentChain(process.cwd(), 6),
-    ];
+function buildAndroidApkCandidates() {
+    const envFilePath = normalizeAbsolutePath(process.env.ANDROID_APK_PATH || process.env.APK_PATH, BACKEND_ROOT);
+    const envDirectory = normalizeAbsolutePath(process.env.ANDROID_APK_RELEASE_DIR || process.env.APK_RELEASE_DIR, BACKEND_ROOT);
+    const envFileName = String(
+        process.env.ANDROID_APK_FILE_NAME || process.env.APK_FILE_NAME || DEFAULT_ANDROID_APK_FILE_NAME
+    ).trim() || DEFAULT_ANDROID_APK_FILE_NAME;
 
-    const directoryCandidates = [
-        envDirectory,
-        ...rootCandidates.flatMap((rootPath) =>
-            ANDROID_APK_RELATIVE_DIRECTORIES.map((segments) => path.resolve(rootPath, ...segments))
-        ),
-    ].filter(Boolean).map((entry) => path.normalize(entry));
+    const candidates = [];
 
-    const fileNameCandidates = [...new Set([envFileName, DEFAULT_ANDROID_APK_FILE_NAME])];
-    const absoluteFileCandidates = [
-        envFile,
-        ...rootCandidates.flatMap((rootPath) =>
-            ANDROID_APK_RELATIVE_FILE_DIRECTORIES.flatMap((segments) =>
-                fileNameCandidates.map((fileName) => path.resolve(rootPath, ...segments, fileName))
-            )
-        ),
-    ]
-        .filter(Boolean)
-        .map((entry) => path.normalize(entry));
+    if (envFilePath) {
+        candidates.push({ source: "env_file", path: envFilePath });
+    }
 
-    return {
-        envDirectory,
-        envFile,
-        fileNameCandidates,
-        absoluteFileCandidates: [...new Set(absoluteFileCandidates)],
-        directoryCandidates: [...new Set(directoryCandidates)],
-    };
+    if (envDirectory) {
+        candidates.push({
+            source: "env_directory",
+            path: path.resolve(envDirectory, envFileName),
+        });
+    }
+
+    // Production-safe default for Render deployments.
+    candidates.push({
+        source: "backend_public_downloads",
+        path: path.resolve(BACKEND_ROOT, DEFAULT_ANDROID_APK_RELATIVE_PATH),
+    });
+
+    // Local legacy fallback to reduce friction during transition.
+    candidates.push({
+        source: "backend_public_downloads_legacy_name",
+        path: path.resolve(BACKEND_ROOT, "public", "downloads", "app-release.apk"),
+    });
+
+    const seen = new Set();
+    return candidates.filter((entry) => {
+        const normalized = path.normalize(entry.path);
+        if (seen.has(normalized)) return false;
+        seen.add(normalized);
+        entry.path = normalized;
+        return true;
+    });
 }
 
 function resolveAndroidApkPath() {
-    const lookup = collectAndroidApkLookupCandidates();
+    const lookupCandidates = buildAndroidApkCandidates();
     const checks = [];
 
-    if (lookup.envFile) {
-        const envFileStat = getFileStatSafe(lookup.envFile);
+    for (const candidate of lookupCandidates) {
+        const fileStat = getFileStatSafe(candidate.path);
         checks.push({
-            type: "env_file",
-            path: lookup.envFile,
-            exists: Boolean(envFileStat),
+            source: candidate.source,
+            path: candidate.path,
+            exists: Boolean(fileStat),
         });
-        if (envFileStat) {
+
+        if (fileStat) {
             return {
-                apkPath: lookup.envFile,
-                releaseDir: path.dirname(lookup.envFile),
-                source: "env_file",
-                stat: envFileStat,
-                checks,
-            };
-        }
-    }
-
-    for (const absoluteFilePath of lookup.absoluteFileCandidates || []) {
-        if (!absoluteFilePath) continue;
-        const absoluteFileStat = getFileStatSafe(absoluteFilePath);
-        checks.push({
-            type: "absolute_file",
-            path: absoluteFilePath,
-            exists: Boolean(absoluteFileStat),
-        });
-        if (absoluteFileStat) {
-            return {
-                apkPath: absoluteFilePath,
-                releaseDir: path.dirname(absoluteFilePath),
-                source: "absolute_file",
-                stat: absoluteFileStat,
-                checks,
-            };
-        }
-    }
-
-    for (const directoryPath of lookup.directoryCandidates) {
-        let directoryStat = null;
-        try {
-            if (fs.existsSync(directoryPath)) {
-                const stat = fs.statSync(directoryPath);
-                if (stat.isDirectory()) {
-                    directoryStat = stat;
-                }
-            }
-        } catch {
-            directoryStat = null;
-        }
-        checks.push({ type: "directory", path: directoryPath, exists: Boolean(directoryStat) });
-        if (!directoryStat) continue;
-
-        for (const fileName of lookup.fileNameCandidates) {
-            const explicitPath = path.resolve(directoryPath, fileName);
-            const explicitStat = getFileStatSafe(explicitPath);
-            checks.push({
-                type: "explicit_file",
-                path: explicitPath,
-                exists: Boolean(explicitStat),
-            });
-            if (explicitStat) {
-                return {
-                    apkPath: explicitPath,
-                    releaseDir: directoryPath,
-                    source: "explicit_filename",
-                    stat: explicitStat,
-                    checks,
-                };
-            }
-        }
-
-        const metadataPath = path.join(directoryPath, "output-metadata.json");
-        const metadataStat = getFileStatSafe(metadataPath);
-        const metadataExists = Boolean(metadataStat);
-        checks.push({ type: "metadata", path: metadataPath, exists: metadataExists });
-
-        if (metadataExists) {
-            try {
-                const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
-                const outputFile = String(metadata?.elements?.[0]?.outputFile || "").trim();
-                if (outputFile) {
-                    const resolvedOutput = path.resolve(directoryPath, outputFile);
-                    const outputStat = getFileStatSafe(resolvedOutput);
-                    checks.push({
-                        type: "metadata_output",
-                        path: resolvedOutput,
-                        exists: Boolean(outputStat),
-                    });
-                    if (outputStat) {
-                        return {
-                            apkPath: resolvedOutput,
-                            releaseDir: directoryPath,
-                            source: "metadata_output",
-                            stat: outputStat,
-                            checks,
-                        };
-                    }
-                }
-            } catch (error) {
-                checks.push({
-                    type: "metadata_parse_error",
-                    path: metadataPath,
-                    exists: true,
-                    error: String(error?.message || error),
-                });
-            }
-        }
-
-        const apkCandidates = fs
-            .readdirSync(directoryPath)
-            .filter((entry) => entry.toLowerCase().endsWith(".apk"))
-            .map((entry) => path.join(directoryPath, entry))
-            .map((entry) => ({ path: entry, stat: getFileStatSafe(entry) }))
-            .filter((entry) => Boolean(entry.stat))
-            .sort((a, b) => {
-                const aTime = Number(a.stat?.mtimeMs || 0);
-                const bTime = Number(b.stat?.mtimeMs || 0);
-                return bTime - aTime;
-            });
-
-        if (apkCandidates.length > 0) {
-            const firstCandidate = apkCandidates[0];
-            return {
-                apkPath: firstCandidate.path,
-                releaseDir: directoryPath,
-                source: "directory_scan",
-                stat: firstCandidate.stat,
+                apkPath: candidate.path,
+                releaseDir: path.dirname(candidate.path),
+                source: candidate.source,
+                stat: fileStat,
                 checks,
             };
         }
@@ -252,7 +116,7 @@ function toIsoOrNull(value) {
 }
 
 function getAndroidApkMissingMessage() {
-    return "Android app package is not available yet. Please upload app-release.apk to resqnowfrontend/android/app/release.";
+    return "Android app package is not available yet. Upload resqnow.apk to resqnowbackend/public/downloads/.";
 }
 
 function setAndroidApkHeaders(res, fileName, fileSize = null) {
@@ -379,7 +243,7 @@ router.get("/android-app/status", async (_req, res) => {
     try {
         const resolution = resolveAndroidApkPath();
         const apkPath = resolution?.apkPath;
-        const fileName = apkPath ? path.basename(apkPath) : null;
+        const fileName = apkPath ? DEFAULT_ANDROID_APK_FILE_NAME : null;
         const fileSize = Number(resolution?.stat?.size || 0) || null;
         const modifiedAt = toIsoOrNull(resolution?.stat?.mtime || null);
         console.info("[Android APK Status] Path resolution summary.", {
@@ -445,7 +309,7 @@ async function handleAndroidApkDownload(res, { headOnly = false } = {}) {
             });
         }
 
-        const fileName = path.basename(apkPath);
+        const fileName = DEFAULT_ANDROID_APK_FILE_NAME;
         setAndroidApkHeaders(res, fileName, resolution?.stat?.size);
 
         if (headOnly) {
