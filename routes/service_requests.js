@@ -492,6 +492,121 @@ router.post("/:id/accept", verifyTechnician, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/service-requests/:id/technician-offer
+ * Resolve the latest offer snapshot for a technician deep link alert.
+ */
+router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
+    try {
+        const technicianId = req.technicianId;
+        const requestId = req.params.id;
+        const pool = await getPool();
+
+        const [rows] = await pool.query(
+            `SELECT
+                sr.id,
+                sr.service_type,
+                sr.vehicle_type,
+                sr.address,
+                sr.contact_name,
+                sr.location_lat,
+                sr.location_lng,
+                sr.status,
+                sr.technician_id,
+                COALESCE(sr.amount, sr.service_charge, 0) AS amount,
+                d.status AS offer_status,
+                t.latitude AS technician_lat,
+                t.longitude AS technician_lng
+            FROM service_requests sr
+            LEFT JOIN dispatch_offers d
+                ON d.service_request_id = sr.id
+                AND d.technician_id = ?
+            LEFT JOIN technicians t
+                ON t.id = ?
+            WHERE sr.id = ?
+            LIMIT 1`,
+            [technicianId, technicianId, requestId]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: "Service request not found.", available: false });
+        }
+
+        const row = rows[0];
+        const normalizedStatus = normalizeStatus(row?.status) || String(row?.status || "").trim().toLowerCase();
+        const offerStatus = String(row?.offer_status || "").trim().toLowerCase();
+        const assignedTechnicianId = row?.technician_id == null ? null : String(row.technician_id);
+        const isAssignedToCurrentTechnician = assignedTechnicianId === String(technicianId);
+        const hasPendingOffer = offerStatus === "pending";
+        const terminalStatuses = new Set(["cancelled", "completed", "rejected"]);
+
+        if (terminalStatuses.has(normalizedStatus)) {
+            return res.status(409).json({
+                available: false,
+                reason: "closed",
+                message: `Job is already ${normalizedStatus}.`,
+            });
+        }
+
+        if (assignedTechnicianId && !isAssignedToCurrentTechnician) {
+            return res.status(409).json({
+                available: false,
+                reason: "taken",
+                message: "This job has already been taken by another technician.",
+            });
+        }
+
+        if (!isAssignedToCurrentTechnician && !hasPendingOffer) {
+            return res.status(409).json({
+                available: false,
+                reason: "unavailable",
+                message: "This job offer is no longer available.",
+            });
+        }
+
+        const customerLat = Number(row.location_lat);
+        const customerLng = Number(row.location_lng);
+        const technicianLat = Number(row.technician_lat);
+        const technicianLng = Number(row.technician_lng);
+        const distanceKm =
+            Number.isFinite(customerLat) &&
+                Number.isFinite(customerLng) &&
+                Number.isFinite(technicianLat) &&
+                Number.isFinite(technicianLng)
+                ? Number(getDistanceFromLatLonInKm(technicianLat, technicianLng, customerLat, customerLng).toFixed(1))
+                : null;
+
+        return res.json({
+            available: true,
+            request: {
+                id: String(row.id),
+                requestId: String(row.id),
+                serviceType: row.service_type,
+                service_type: row.service_type,
+                vehicleType: row.vehicle_type,
+                vehicle_type: row.vehicle_type,
+                customerName: row.contact_name || "Customer",
+                address: row.address || "",
+                amount: Number(row.amount || 0),
+                status: normalizedStatus,
+                offer_status: offerStatus || null,
+                location: {
+                    lat: Number.isFinite(customerLat) ? customerLat : null,
+                    lng: Number.isFinite(customerLng) ? customerLng : null,
+                    address: row.address || "",
+                },
+                location_lat: Number.isFinite(customerLat) ? customerLat : null,
+                location_lng: Number.isFinite(customerLng) ? customerLng : null,
+                distance: distanceKm,
+                locationDistance: distanceKm != null ? `${distanceKm.toFixed(1)} km` : "Nearby",
+            },
+        });
+    } catch (err) {
+        console.error("[Technician Offer] Error fetching offer snapshot:", err);
+        return res.status(500).json({ error: "Failed to resolve technician offer.", available: false });
+    }
+});
+
 
 /**
  * PATCH /api/service-requests/:id/technician-status

@@ -235,6 +235,7 @@ class NotificationService {
         data: payloadData,
         android: {
           priority: "high",
+          collapseKey: jobId ? `job_${jobId}` : "job_offer",
           ttl: 120000,
         },
         webpush: {
@@ -253,6 +254,47 @@ class NotificationService {
             vibrate: [200, 100, 200],
           },
           ...(deepLinkUrl ? { fcmOptions: { link: deepLinkUrl } } : {}),
+        },
+      };
+    }
+
+    if (userType === "technician" && event === "job:revoked") {
+      const requestId = normalizeText(data?.requestId || data?.jobId || data?.id);
+      const body = requestId
+        ? `Job #${requestId} has already been taken by another technician.`
+        : "This job has already been taken by another technician.";
+      const dashboardPath = "/technician/dashboard";
+      const dashboardLink = frontendBaseUrl ? `${frontendBaseUrl}${dashboardPath}` : undefined;
+
+      return {
+        // Data-first payload ensures Android can close full-screen alerts immediately.
+        data: stringifyDataPayload({
+          event,
+          type: "JOB_REVOKED",
+          title: "Job Offer Closed",
+          body,
+          requestId,
+          jobId: requestId,
+          deepLinkPath: dashboardPath,
+        }),
+        android: {
+          priority: "high",
+          collapseKey: requestId ? `job_${requestId}` : "job_offer_closed",
+          ttl: 120000,
+        },
+        webpush: {
+          headers: {
+            Urgency: "high",
+            TTL: "120",
+          },
+          notification: {
+            title: "Job Offer Closed",
+            body,
+            icon: "/icons/icon-192x192.png",
+            badge: "/icons/icon-192x192.png",
+            tag: requestId ? `job-closed-${requestId}` : `job-closed-${Date.now()}`,
+          },
+          ...(dashboardLink ? { fcmOptions: { link: dashboardLink } } : {}),
         },
       };
     }

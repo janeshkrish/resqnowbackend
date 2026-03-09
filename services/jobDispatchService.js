@@ -489,7 +489,18 @@ export const jobDispatchService = {
                         [requestId]
                     );
                     rejectedOffers.forEach((offer) => {
-                        socketService.io.to(`technician_${offer.technician_id}`).emit("job:revoked", { requestId });
+                        const revokedPayload = {
+                            requestId: String(requestId),
+                            jobId: String(requestId),
+                            message: "This job has already been taken by another technician."
+                        };
+                        // notifyTechnician emits over socket and push, so background devices
+                        // can dismiss full-screen alerts immediately.
+                        socketService.notifyTechnician(offer.technician_id, "job:revoked", revokedPayload);
+                        socketService.io.to(`technician_${offer.technician_id}`).emit("job:list_update", {
+                            requestId: String(requestId),
+                            action: "revoked"
+                        });
                     });
                 }
 
