@@ -409,11 +409,11 @@ router.post("/login", async (req, res) => {
     const rows = await db.query("SELECT * FROM technicians WHERE email = ? LIMIT 1", [normalizedEmail]);
     const row = rows[0];
     if (!row) {
-      return res.status(401).json({ error: "Email not registered as a technician." });
+      return res.status(404).json({ error: "User not found." });
     }
     const valid = await bcrypt.compare(password, row.password_hash || "");
     if (!valid) {
-      return res.status(401).json({ error: "Incorrect password." });
+      return res.status(401).json({ error: "Incorrect password. Please try again." });
     }
     const status = String(row.status || "").trim().toLowerCase() || "pending";
     const approvalFlagRaw = row.isApproved ?? row.is_approved;
@@ -437,7 +437,7 @@ router.post("/login", async (req, res) => {
     if (!isApproved) {
       return res.status(403).json({
         status: "pending_approval",
-        error: "Your technician account is pending admin approval. Please wait until your account is approved.",
+        error: "Your account is pending admin approval.",
       });
     }
     const technician = rowToTechnician(row);
@@ -583,22 +583,75 @@ router.patch("/me/status", verifyTechnician, async (req, res) => {
 router.patch("/me/location", verifyTechnician, async (req, res) => {
   try {
     const { latitude, longitude } = req.body;
+    const parsedLat = Number(latitude);
+    const parsedLng = Number(longitude);
 
-    if (latitude === undefined || longitude === undefined) {
+    if (!Number.isFinite(parsedLat) || !Number.isFinite(parsedLng)) {
       return res.status(400).json({ error: "Latitude and longitude are required." });
     }
 
     const pool = await db.getPool();
-    await pool.execute(
-      "UPDATE technicians SET latitude = ?, longitude = ? WHERE id = ?",
-      [latitude, longitude, req.technicianId]
-    );
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.execute(
+        `UPDATE technicians
+         SET latitude = ?,
+             longitude = ?,
+             current_lat = ?,
+             current_lng = ?,
+             last_location_update = NOW()
+         WHERE id = ?`,
+        [parsedLat, parsedLng, parsedLat, parsedLng, req.technicianId]
+      );
+
+      const [rows] = await conn.query(
+        "SELECT current_job_id FROM technicians WHERE id = ? LIMIT 1",
+        [req.technicianId]
+      );
+      let currentJobId = rows?.[0]?.current_job_id ? Number(rows[0].current_job_id) : null;
+      if (!Number.isInteger(currentJobId)) {
+        const [activeRows] = await conn.query(
+          `SELECT id
+           FROM service_requests
+           WHERE technician_id = ?
+             AND LOWER(COALESCE(status, '')) IN (
+               'assigned',
+               'accepted',
+               'processing',
+               'service_started',
+               'en-route',
+               'on-the-way',
+               'arrived',
+               'in_progress',
+               'in-progress',
+               'payment_pending'
+             )
+           ORDER BY updated_at DESC
+           LIMIT 1`,
+          [req.technicianId]
+        );
+        currentJobId = activeRows?.[0]?.id ? Number(activeRows[0].id) : null;
+      }
+
+      await conn.execute(
+        `INSERT INTO technician_location_history (technician_id, service_request_id, latitude, longitude)
+         VALUES (?, ?, ?, ?)`,
+        [req.technicianId, Number.isInteger(currentJobId) ? currentJobId : null, parsedLat, parsedLng]
+      );
+      await conn.commit();
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
+    }
 
     // Broadcast location update
     socketService.broadcast("technician:location_update", {
       technicianId: req.technicianId,
-      lat: latitude,
-      lng: longitude
+      lat: parsedLat,
+      lng: parsedLng
     });
 
 
@@ -1147,11 +1200,66 @@ router.patch("/status", verifyTechnician, async (req, res) => {
 router.patch("/location", verifyTechnician, async (req, res) => {
   try {
     const { latitude, longitude } = req.body;
+    const parsedLat = Number(latitude);
+    const parsedLng = Number(longitude);
+    if (!Number.isFinite(parsedLat) || !Number.isFinite(parsedLng)) {
+      return res.status(400).json({ error: "latitude and longitude must be valid numbers." });
+    }
     const pool = await db.getPool();
-    await pool.execute(
-      "UPDATE technicians SET latitude = ?, longitude = ? WHERE id = ?",
-      [latitude, longitude, req.technicianId]
-    );
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.execute(
+        `UPDATE technicians
+         SET latitude = ?,
+             longitude = ?,
+             current_lat = ?,
+             current_lng = ?,
+             last_location_update = NOW()
+         WHERE id = ?`,
+        [parsedLat, parsedLng, parsedLat, parsedLng, req.technicianId]
+      );
+
+      const [rows] = await conn.query(
+        "SELECT current_job_id FROM technicians WHERE id = ? LIMIT 1",
+        [req.technicianId]
+      );
+      let currentJobId = rows?.[0]?.current_job_id ? Number(rows[0].current_job_id) : null;
+      if (!Number.isInteger(currentJobId)) {
+        const [activeRows] = await conn.query(
+          `SELECT id
+           FROM service_requests
+           WHERE technician_id = ?
+             AND LOWER(COALESCE(status, '')) IN (
+               'assigned',
+               'accepted',
+               'processing',
+               'service_started',
+               'en-route',
+               'on-the-way',
+               'arrived',
+               'in_progress',
+               'in-progress',
+               'payment_pending'
+             )
+           ORDER BY updated_at DESC
+           LIMIT 1`,
+          [req.technicianId]
+        );
+        currentJobId = activeRows?.[0]?.id ? Number(activeRows[0].id) : null;
+      }
+      await conn.execute(
+        `INSERT INTO technician_location_history (technician_id, service_request_id, latitude, longitude)
+         VALUES (?, ?, ?, ?)`,
+        [req.technicianId, Number.isInteger(currentJobId) ? currentJobId : null, parsedLat, parsedLng]
+      );
+      await conn.commit();
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
+    }
     // Optionally trigger socket event here if not already handled by client socket
     res.json({ success: true });
   } catch (err) {

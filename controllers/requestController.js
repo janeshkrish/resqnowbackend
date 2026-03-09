@@ -7,6 +7,7 @@ const ACTIVE_REQUEST_STATES = [
   "assigned",
   "accepted",
   "processing",
+  "service_started",
   "en-route",
   "on-the-way",
   "arrived",
@@ -15,20 +16,64 @@ const ACTIVE_REQUEST_STATES = [
   "payment_pending",
 ];
 
-function normalizeRequestStatusFilter(value) {
+const REQUEST_STATUS_FILTER_SET = {
+  pending: ["pending"],
+  assigned: ["assigned"],
+  accepted: ["accepted"],
+  processing: ["processing"],
+  in_progress: ["in_progress", "in-progress"],
+  service_started: ["service_started", "en-route", "on-the-way", "arrived"],
+  payment_pending: ["payment_pending"],
+  completed: ["completed", "paid"],
+  cancelled: ["cancelled"],
+};
+
+function normalizeRequestStatusKey(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (!normalized) return "";
 
   const map = {
+    "all": "all",
     "on_the_way": "on-the-way",
     "on the way": "on-the-way",
     "en_route": "en-route",
+    "service started": "service_started",
     "in_progress": "in-progress",
     "in progress": "in-progress",
     "payment-pending": "payment_pending",
   };
 
-  return map[normalized] || normalized;
+  const mapped = map[normalized] || normalized;
+  if (mapped === "on-the-way" || mapped === "en-route" || mapped === "arrived") {
+    return "service_started";
+  }
+  if (mapped === "in-progress") {
+    return "in_progress";
+  }
+  return mapped;
+}
+
+function resolveStatusFilterValues(value) {
+  const key = normalizeRequestStatusKey(value);
+  if (!key || key === "all") return { key: key || "all", values: [] };
+  return {
+    key,
+    values: REQUEST_STATUS_FILTER_SET[key] || [key],
+  };
+}
+
+function canonicalizeRequestStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["service_started", "en-route", "on-the-way", "arrived"].includes(normalized)) {
+    return "service_started";
+  }
+  if (normalized === "in-progress") {
+    return "in_progress";
+  }
+  if (normalized === "paid") {
+    return "completed";
+  }
+  return normalized || "pending";
 }
 
 function mapRequestRow(row) {
@@ -38,7 +83,7 @@ function mapRequestRow(row) {
     issueType: row.issue_type,
     location: row.location,
     assignedTechnician: row.technician_name,
-    status: row.status,
+    status: canonicalizeRequestStatus(row.status),
     priority: row.priority,
     createdTime: row.created_at,
   };
@@ -67,7 +112,7 @@ export async function getRequests(req, res) {
   try {
     const { page, limit, offset } = buildPagination(req.query);
     const search = String(req.query?.search || "").trim();
-    const status = normalizeRequestStatusFilter(req.query?.status);
+    const statusFilter = resolveStatusFilterValues(req.query?.status);
     const priority = String(req.query?.priority || "").trim().toLowerCase();
 
     const whereClauses = [];
@@ -85,9 +130,10 @@ export async function getRequests(req, res) {
       values.push(like, like, like, like, like);
     }
 
-    if (status && status !== "all") {
-      whereClauses.push("LOWER(COALESCE(sr.status, '')) = ?");
-      values.push(status);
+    if (statusFilter.values.length > 0) {
+      const placeholders = statusFilter.values.map(() => "?").join(", ");
+      whereClauses.push(`LOWER(COALESCE(sr.status, '')) IN (${placeholders})`);
+      values.push(...statusFilter.values);
     }
 
     if (priority === "high") {
@@ -151,7 +197,7 @@ export async function getRequests(req, res) {
       },
       filters: {
         search,
-        status: status || "all",
+        status: statusFilter.key || "all",
         priority: priority || "all",
       },
     });
@@ -294,7 +340,11 @@ export async function markHighPriority(req, res) {
 
 export async function closeRequest(req, res) {
   try {
-    const requestId = toPositiveInt(req.body?.requestId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const requestId = toPositiveInt(
+      req.body?.requestId ?? req.body?.id ?? req.body?.request_id,
+      0,
+      { min: 0, max: Number.MAX_SAFE_INTEGER }
+    );
     const reason = String(req.body?.reason || req.body?.note || "").trim();
     const requestedStatus = String(req.body?.status || "cancelled").trim().toLowerCase();
 
@@ -302,7 +352,14 @@ export async function closeRequest(req, res) {
       return res.status(400).json({ error: "requestId is required." });
     }
 
-    const finalStatus = requestedStatus === "completed" ? "completed" : "cancelled";
+    if (!["completed", "cancelled"].includes(requestedStatus)) {
+      return res.status(400).json({ error: "status must be either 'completed' or 'cancelled'." });
+    }
+    if (reason.length > 1000) {
+      return res.status(400).json({ error: "reason must be 1000 characters or fewer." });
+    }
+
+    const finalStatus = requestedStatus;
 
     const closureResult = await closeRequestWithFinanceSync({
       requestId,

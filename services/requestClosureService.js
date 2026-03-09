@@ -16,9 +16,38 @@ function toPositiveRequestId(value) {
 }
 
 function normalizeCloseStatus(value) {
-  return String(value || "cancelled").trim().toLowerCase() === "completed"
-    ? "completed"
-    : "cancelled";
+  const normalized = String(value || "cancelled").trim().toLowerCase();
+  if (normalized === "completed") return "completed";
+  if (normalized === "cancelled") return "cancelled";
+  throw createHttpError("status must be either 'completed' or 'cancelled'.", 400);
+}
+
+function normalizeCloseReason(value) {
+  const trimmed = String(value || "Closed by admin").trim() || "Closed by admin";
+  if (trimmed.length > 1000) {
+    throw createHttpError("reason must be 1000 characters or fewer.", 400);
+  }
+  return trimmed;
+}
+
+function isDataTruncationError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    error?.code === "WARN_DATA_TRUNCATED" ||
+    error?.code === "ER_WARN_DATA_TRUNCATED" ||
+    error?.errno === 1265 ||
+    message.includes("data truncated")
+  );
+}
+
+function mapStorageError(error) {
+  if (isDataTruncationError(error)) {
+    return createHttpError(
+      "Invalid lifecycle value for status/payment_state/reason. Please verify allowed status values and reason length.",
+      400
+    );
+  }
+  return error;
 }
 
 /**
@@ -30,7 +59,7 @@ function normalizeCloseStatus(value) {
 export async function closeRequestWithFinanceSync({ requestId, status, reason }) {
   const parsedRequestId = toPositiveRequestId(requestId);
   const closeStatus = normalizeCloseStatus(status);
-  const closeReason = String(reason || "Closed by admin").trim() || "Closed by admin";
+  const closeReason = normalizeCloseReason(reason);
 
   const pool = await getPool();
   const conn = await pool.getConnection();
@@ -61,6 +90,14 @@ export async function closeRequestWithFinanceSync({ requestId, status, reason })
     if (alreadyInFinalState) {
       const paymentStatus = closeStatus === "completed" ? "completed" : "cancelled";
       const paymentSettled = closeStatus === "completed";
+      await conn.execute(
+        `UPDATE service_requests
+         SET payment_status = ?,
+             closing_reason = ?,
+             updated_at = NOW()
+         WHERE id = ?`,
+        [paymentStatus, closeReason, parsedRequestId]
+      );
       const [paymentUpdateResult] = await conn.execute(
         `UPDATE payments
          SET status = ?,
@@ -72,7 +109,7 @@ export async function closeRequestWithFinanceSync({ requestId, status, reason })
       await conn.commit();
       return {
         requestId: parsedRequestId,
-        status: previousStatus,
+        status: closeStatus,
         previousStatus,
         userId: existing.user_id || null,
         technicianId: existing.technician_id || null,
@@ -92,9 +129,11 @@ export async function closeRequestWithFinanceSync({ requestId, status, reason })
              completed_at = COALESCE(completed_at, NOW()),
              cancelled_at = NULL,
              cancellation_reason = NULL,
+             closing_reason = ?,
+             payment_status = 'completed',
              updated_at = NOW()
          WHERE id = ?`,
-        [parsedRequestId]
+        [closeReason, parsedRequestId]
       );
     } else {
       await conn.execute(
@@ -103,10 +142,11 @@ export async function closeRequestWithFinanceSync({ requestId, status, reason })
              technician_id = NULL,
              cancelled_at = NOW(),
              cancellation_reason = ?,
+             closing_reason = ?,
              payment_status = 'cancelled',
              updated_at = NOW()
          WHERE id = ?`,
-        [closeReason, parsedRequestId]
+        [closeReason, closeReason, parsedRequestId]
       );
     }
 
@@ -148,7 +188,7 @@ export async function closeRequestWithFinanceSync({ requestId, status, reason })
     };
   } catch (error) {
     await conn.rollback();
-    throw error;
+    throw mapStorageError(error);
   } finally {
     conn.release();
   }

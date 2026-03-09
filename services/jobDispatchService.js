@@ -383,7 +383,7 @@ export const jobDispatchService = {
                 // Legacy compatibility: convert stale "assigned" into "accepted".
                 if (currentStatus === "assigned") {
                     await conn.query(
-                        "UPDATE service_requests SET status = 'accepted', amount = COALESCE(amount, ?), updated_at = NOW() WHERE id = ?",
+                        "UPDATE service_requests SET status = 'accepted', amount = COALESCE(amount, ?), accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ?",
                         [assignedAmount, requestId]
                     );
                     await conn.query(
@@ -426,7 +426,7 @@ export const jobDispatchService = {
 
                 // Fresh accept path.
                 await conn.query(
-                    "UPDATE service_requests SET technician_id = ?, status = 'accepted', amount = ?, updated_at = NOW() WHERE id = ? AND status = 'pending'",
+                    "UPDATE service_requests SET technician_id = ?, status = 'accepted', amount = ?, accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ? AND status = 'pending'",
                     [technicianId, resolvedAmount, requestId]
                 );
 

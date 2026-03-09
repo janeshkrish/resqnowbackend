@@ -115,13 +115,30 @@ const ensureRazorpayConfigured = (res) => {
 
 // Allowed statuses and a small normalization helper to accept variants used in the UI
 const VALID_STATUSES = new Set([
-    'pending', 'assigned', 'accepted', 'processing', 'on-the-way', 'en-route', 'arrived', 'in-progress', 'payment_pending', 'completed', 'cancelled', 'rejected'
+    'pending',
+    'assigned',
+    'accepted',
+    'processing',
+    'service_started',
+    'on-the-way',
+    'en-route',
+    'arrived',
+    'in_progress',
+    'in-progress',
+    'payment_pending',
+    'completed',
+    'cancelled',
+    'rejected',
+    'paid'
 ]);
 
 function normalizeStatus(status) {
     if (!status && status !== 0) return null;
-    const s = String(status).trim();
+    const s = String(status).trim().toLowerCase();
     const map = {
+        'service started': 'service_started',
+        'service_started': 'service_started',
+        'service-started': 'service_started',
         'on_the_way': 'on-the-way',
         'on the way': 'on-the-way',
         'on-the-way': 'on-the-way',
@@ -330,8 +347,8 @@ router.post("/", verifyUser, async (req, res) => {
 
         const [result] = await pool.execute(
             `INSERT INTO service_requests 
-      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, technician_id, status, amount) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, technician_id, status, amount) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 userId,
                 canonicalServiceType,
@@ -342,6 +359,8 @@ router.post("/", verifyUser, async (req, res) => {
                 req.body.contact_email || null,
                 contact_phone || null,
                 description || null,
+                location_lat || null,
+                location_lng || null,
                 location_lat || null,
                 location_lng || null,
                 directTechnicianId,
@@ -589,16 +608,23 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             }
         }
 
-        // If tech marks job as completed, we transition to payment_pending so user pays next
-        // EXCEPTION: If it's already PAID, then we allow setting it to 'completed'
-        if (normalized === 'completed' && request.status !== 'paid') {
+        // If tech marks job as completed, move to payment_pending until user payment is finished.
+        if (normalized === 'completed' && String(request.status || '').toLowerCase() !== 'paid') {
             newStatus = 'payment_pending';
         }
 
         // Timestamp logic
         let timestampUpdate = "";
-        if (newStatus === 'en-route' || newStatus === 'in-progress' || newStatus === 'on-the-way') {
-            timestampUpdate = ", started_at = COALESCE(started_at, NOW())";
+        if (newStatus === 'accepted') {
+            timestampUpdate = ", accepted_time = COALESCE(accepted_time, NOW())";
+        } else if (
+            newStatus === 'service_started' ||
+            newStatus === 'en-route' ||
+            newStatus === 'in-progress' ||
+            newStatus === 'in_progress' ||
+            newStatus === 'on-the-way'
+        ) {
+            timestampUpdate = ", started_at = COALESCE(started_at, NOW()), start_time = COALESCE(start_time, NOW())";
         } else if (normalized === 'completed' || newStatus === 'payment_pending' || newStatus === 'paid') {
             // mark completed_at
             timestampUpdate = ", completed_at = NOW()";
@@ -628,7 +654,12 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                 requestId,
                 status: newStatus,
                 technicianId: newTechId,
-                started_at: (newStatus === 'en-route' || newStatus === 'in-progress') ? new Date().toISOString() : undefined,
+                started_at: (
+                    newStatus === 'service_started' ||
+                    newStatus === 'en-route' ||
+                    newStatus === 'in-progress' ||
+                    newStatus === 'in_progress'
+                ) ? new Date().toISOString() : undefined,
                 completed_at: (normalized === 'completed' || newStatus === 'payment_pending') ? new Date().toISOString() : undefined
             });
         }
@@ -699,7 +730,7 @@ router.patch("/:id/status", verifyUser, async (req, res) => {
 
         if (normalized === 'cancelled') {
             // Rule: Cannot cancel if technician has arrived or job is done
-            if (['arrived', 'in-progress', 'payment_pending', 'completed', 'paid'].includes(reqData.status)) {
+            if (['arrived', 'service_started', 'in-progress', 'in_progress', 'payment_pending', 'completed', 'paid'].includes(String(reqData.status || '').toLowerCase())) {
                 return res.status(400).json({ error: `Cannot cancel request when status is '${reqData.status}'.` });
             }
         }

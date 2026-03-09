@@ -206,6 +206,57 @@ export async function ensureDispatchOffersTable() {
   await p.execute(DISPATCH_OFFERS_TABLE_SQL);
 }
 
+const TECHNICIAN_LOCATION_HISTORY_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS technician_location_history (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  technician_id INT NOT NULL,
+  service_request_id INT NULL,
+  latitude DECIMAL(10, 8) NOT NULL,
+  longitude DECIMAL(11, 8) NOT NULL,
+  captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_tech_location_history_tech_time (technician_id, captured_at),
+  INDEX idx_tech_location_history_request_time (service_request_id, captured_at)
+)
+`.trim();
+
+export async function ensureTechnicianLocationHistoryTable() {
+  const p = await getPool();
+  await p.execute(TECHNICIAN_LOCATION_HISTORY_TABLE_SQL);
+}
+
+const JOB_MONITORING_ALERTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS job_monitoring_alerts (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  service_request_id INT NOT NULL,
+  technician_id INT NULL,
+  reason_code VARCHAR(64) NOT NULL,
+  reason_text VARCHAR(255) NOT NULL,
+  risk_level VARCHAR(16) NOT NULL DEFAULT 'yellow',
+  eta_minutes DECIMAL(10, 2) NULL,
+  eta_arrival DATETIME NULL,
+  sla_deadline DATETIME NULL,
+  technician_lat DECIMAL(10, 8) NULL,
+  technician_lng DECIMAL(11, 8) NULL,
+  customer_lat DECIMAL(10, 8) NULL,
+  customer_lng DECIMAL(11, 8) NULL,
+  metadata JSON,
+  is_active BOOLEAN DEFAULT TRUE,
+  first_detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  last_detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  resolved_at DATETIME NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_job_monitoring_alerts_active (is_active, risk_level, last_detected_at),
+  INDEX idx_job_monitoring_alerts_request (service_request_id, is_active),
+  INDEX idx_job_monitoring_alerts_reason (reason_code, is_active)
+)
+`.trim();
+
+export async function ensureJobMonitoringAlertsTable() {
+  const p = await getPool();
+  await p.execute(JOB_MONITORING_ALERTS_TABLE_SQL);
+}
+
 const NOTIFICATIONS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS notifications (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -262,6 +313,11 @@ export async function updateTechniciansTableSchema() {
   await addColumnIfNotExists(p, 'technicians', 'is_available BOOLEAN DEFAULT FALSE');
   await addColumnIfNotExists(p, 'technicians', 'latitude DECIMAL(10, 8)');
   await addColumnIfNotExists(p, 'technicians', 'longitude DECIMAL(11, 8)');
+  await addColumnIfNotExists(p, 'technicians', 'current_lat DECIMAL(10, 8)');
+  await addColumnIfNotExists(p, 'technicians', 'current_lng DECIMAL(11, 8)');
+  await addColumnIfNotExists(p, 'technicians', 'last_location_update DATETIME NULL');
+  await addColumnIfNotExists(p, 'technicians', 'acceptance_rate DECIMAL(5,2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'technicians', 'skill_set JSON');
   await addColumnIfNotExists(p, 'technicians', 'current_job_id INT');
   // New columns for comprehensive technician data model
   await addColumnIfNotExists(p, 'technicians', 'resume_url VARCHAR(1024)');
@@ -375,6 +431,15 @@ export async function ensurePaymentsTable() {
   await addColumnIfNotExists(p, 'payments', 'platform_fee DECIMAL(10, 2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'payments', 'technician_amount DECIMAL(10, 2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'payments', 'is_settled BOOLEAN DEFAULT TRUE');
+}
+
+export async function updatePaymentsTableSchema() {
+  const p = await getPool();
+  try {
+    await p.query("ALTER TABLE payments MODIFY COLUMN status VARCHAR(50) DEFAULT 'pending'");
+  } catch (err) {
+    console.log("Note: could not modify payments.status column:", err.message);
+  }
 }
 
 const TECHNICIAN_DUES_TABLE_SQL = `
@@ -518,6 +583,13 @@ export async function updateServiceRequestsTableSchema() {
   await addColumnIfNotExists(p, 'service_requests', 'completed_at TIMESTAMP NULL');
   await addColumnIfNotExists(p, 'service_requests', 'cancelled_at TIMESTAMP NULL');
   await addColumnIfNotExists(p, 'service_requests', 'cancellation_reason VARCHAR(512)');
+  await addColumnIfNotExists(p, 'service_requests', 'closing_reason VARCHAR(512)');
+  await addColumnIfNotExists(p, 'service_requests', 'accepted_time DATETIME NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'start_time DATETIME NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'scheduled_time DATETIME NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'sla_deadline DATETIME NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'customer_location_lat DECIMAL(10, 8)');
+  await addColumnIfNotExists(p, 'service_requests', 'customer_location_lng DECIMAL(11, 8)');
 
   // Ensure status column can hold longer status strings like 'payment_pending'
   try {
@@ -526,6 +598,18 @@ export async function updateServiceRequestsTableSchema() {
   } catch (err) {
     // Ignore if modify fails on some DB versions, but log for visibility
     console.log("Note: could not modify service_requests.status column:", err.message);
+  }
+
+  try {
+    await p.query("ALTER TABLE service_requests MODIFY COLUMN payment_status VARCHAR(50) DEFAULT 'pending'");
+  } catch (err) {
+    console.log("Note: could not modify service_requests.payment_status column:", err.message);
+  }
+
+  try {
+    await p.query("ALTER TABLE service_requests MODIFY COLUMN cancellation_reason VARCHAR(1024)");
+  } catch (err) {
+    console.log("Note: could not modify service_requests.cancellation_reason column:", err.message);
   }
 }
 

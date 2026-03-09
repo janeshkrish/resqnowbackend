@@ -22,6 +22,7 @@ import adminExtendedAnalyticsRouter from "./routes/adminExtended.analytics.js";
 import adminExtendedNotificationsRouter from "./routes/adminExtended.notifications.js";
 import adminExtendedComplaintsRouter from "./routes/adminExtended.complaints.js";
 import notificationsRouter from "./routes/notifications.js";
+import adminCommandCenterRouter from "./routes/adminCommandCenter.js";
 
 import {
   getApiBaseUrl,
@@ -36,6 +37,10 @@ import { socketService } from "./services/socket.js";
 import { verifyMailerConnection } from "./services/mailer.js";
 import { closePool } from "./db.js";
 import { reconcileTechnicianAvailability } from "./services/technicianStateService.js";
+import {
+  startOperationsCommandCenterMonitor,
+  stopOperationsCommandCenterMonitor,
+} from "./services/operationsCommandCenterService.js";
 
 const PORT = Number(process.env.PORT || 3001);
 const HOST = "0.0.0.0";
@@ -64,8 +69,11 @@ async function bootstrapDatabase() {
     ensureTechnicianDuesTable,
     ensureDispatchOffersTable,
     ensurePlatformPricingConfigTable,
+    ensureTechnicianLocationHistoryTable,
+    ensureJobMonitoringAlertsTable,
     updateTechniciansTableSchema,
     updateServiceRequestsTableSchema,
+    updatePaymentsTableSchema,
     updateUsersTableSchema,
   } = await import("./db.js");
 
@@ -86,11 +94,14 @@ async function bootstrapDatabase() {
     ensureTechnicianDuesTable(),
     ensureDispatchOffersTable(),
     ensurePlatformPricingConfigTable(),
+    ensureTechnicianLocationHistoryTable(),
+    ensureJobMonitoringAlertsTable(),
   ]);
 
   await Promise.all([
     updateTechniciansTableSchema(),
     updateServiceRequestsTableSchema(),
+    updatePaymentsTableSchema(),
     updateUsersTableSchema(),
   ]);
 
@@ -112,6 +123,12 @@ function createApp() {
 
   app.use(express.json({ limit: "2mb" }));
   app.use(express.urlencoded({ extended: true }));
+  app.use((err, _req, res, next) => {
+    if (err && err.type === "entity.parse.failed") {
+      return res.status(400).json({ error: "Invalid JSON payload." });
+    }
+    return next(err);
+  });
 
   app.use((req, res, next) => {
     const start = process.hrtime.bigint();
@@ -158,6 +175,7 @@ function createApp() {
   app.use("/api/admin-extended", adminExtendedNotificationsRouter);
   app.use("/api/admin-extended", adminExtendedComplaintsRouter);
   app.use("/api/notifications", notificationsRouter);
+  app.use("/api/admin/command-center", adminCommandCenterRouter);
 
   app.get("/health", (_req, res) => {
     return res.status(200).send("OK");
@@ -214,6 +232,7 @@ async function shutdown(signal) {
     if (err) {
       console.error("[SHUTDOWN] Error while closing HTTP server:", err?.message || err);
     }
+    stopOperationsCommandCenterMonitor();
     await closePool();
     clearTimeout(forceExitTimer);
     process.exit(err ? 1 : 0);
@@ -244,6 +263,7 @@ async function startServer() {
   dbState.ready = true;
   dbState.lastError = null;
   dbState.lastCheckedAt = new Date().toISOString();
+  startOperationsCommandCenterMonitor();
 
   await new Promise((resolve) => {
     httpServer.listen(PORT, HOST, resolve);
