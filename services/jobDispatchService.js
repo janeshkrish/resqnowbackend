@@ -431,6 +431,9 @@ export const jobDispatchService = {
                     [technicianId, resolvedAmount, requestId]
                 );
                 const updatedRows = Number(acceptUpdateResult?.affectedRows || 0);
+                console.log(
+                    `[Dispatch Accept] requestId=${requestId} technicianId=${technicianId} affectedRows=${updatedRows}`
+                );
                 if (updatedRows !== 1) {
                     await conn.rollback();
                     return {

@@ -380,6 +380,38 @@ router.post("/", verifyUser, async (req, res) => {
 
         // 3. Trigger Direct Notify or queue-driven dispatch (async)
         (async () => {
+            const runDirectFallbackDispatch = async (fallbackReason) => {
+                console.warn(
+                    `[Dispatch Trace] requestId=${newRequestId} fallback=direct reason=${fallbackReason}`
+                );
+                const { jobDispatchService } = await import("../services/jobDispatchService.js");
+                const fallbackJobRequest = {
+                    id: newRequestId,
+                    location_lat,
+                    location_lng,
+                    service_type: canonicalServiceType,
+                    vehicle_type: inferredVehicle,
+                    address,
+                    amount: initialAmount,
+                    contact_name: req.body.contact_name || null
+                };
+
+                const candidates = await jobDispatchService.findTopTechnicians(fallbackJobRequest);
+                console.log(
+                    `[Dispatch Trace] requestId=${newRequestId} technicians_found=${candidates.length}`
+                );
+
+                if (candidates.length > 0) {
+                    await jobDispatchService.dispatchJob(fallbackJobRequest, candidates);
+                    console.log(
+                        `[Dispatch Trace] requestId=${newRequestId} alerts_sent=${candidates.length} source=fallback`
+                    );
+                    return;
+                }
+
+                console.warn(`[Dispatch Trace] requestId=${newRequestId} no_matching_technicians`);
+            };
+
             try {
                 if (hasDirectTechnician && directTechnicianId) {
                     const directAssignedPayload = {
@@ -410,6 +442,7 @@ router.post("/", verifyUser, async (req, res) => {
                     return;
                 }
 
+                console.log(`[Dispatch Trace] requestId=${newRequestId} action=enqueue_attempt`);
                 const queued = await enqueueDispatchJob({
                     jobId: newRequestId,
                     userId,
@@ -419,39 +452,23 @@ router.post("/", verifyUser, async (req, res) => {
                 });
 
                 if (queued?.queued) {
-                    console.log(`[Create Job] Enqueued request #${newRequestId} to Redis dispatch queue.`);
+                    console.log(
+                        `[Dispatch Trace] requestId=${newRequestId} action=enqueued queueJobId=${queued.id || "n/a"}`
+                    );
                     return;
                 }
 
-                // Safety fallback if Redis queue is unavailable.
-                console.warn(
-                    `[Create Job] Queue unavailable for request #${newRequestId} (${queued?.reason || "unknown"}). Falling back to direct dispatch.`
-                );
-
-                const { jobDispatchService } = await import("../services/jobDispatchService.js");
-                const fallbackJobRequest = {
-                    id: newRequestId,
-                    location_lat,
-                    location_lng,
-                    service_type: canonicalServiceType,
-                    vehicle_type: inferredVehicle,
-                    address,
-                    amount: initialAmount,
-                    contact_name: req.body.contact_name || null
-                };
-
-                const candidates = await jobDispatchService.findTopTechnicians(fallbackJobRequest);
-                console.log(`[Create Job] Found ${candidates.length} candidates for #${newRequestId}`);
-
-                if (candidates.length > 0) {
-                    await jobDispatchService.dispatchJob(fallbackJobRequest, candidates);
-                } else {
-                    // No technicians found immediately
-                    // Provide fallback or keep pending for admin manual assignment
-                    console.log(`[Create Job] No auto-match candidates for #${newRequestId}`);
-                }
+                await runDirectFallbackDispatch(queued?.reason || "queue_unavailable");
             } catch (dispatchErr) {
-                console.error("[Dispatch Error]", dispatchErr);
+                console.error(`[Dispatch Error] requestId=${newRequestId}`, dispatchErr);
+                try {
+                    await runDirectFallbackDispatch("dispatch_exception");
+                } catch (fallbackErr) {
+                    console.error(
+                        `[Dispatch Error] requestId=${newRequestId} fallback_failed`,
+                        fallbackErr
+                    );
+                }
             }
         })();
 

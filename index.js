@@ -47,6 +47,11 @@ import { startDispatchQueueWorker, stopDispatchQueueWorker } from "./services/di
 const PORT = Number(process.env.PORT || 3001);
 const HOST = "0.0.0.0";
 
+function shouldRunEmbeddedDispatchWorker() {
+  const raw = String(process.env.DISPATCH_WORKER_EMBEDDED || "true").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(raw);
+}
+
 const dbState = {
   ready: false,
   lastCheckedAt: null,
@@ -267,7 +272,11 @@ async function startServer() {
   dbState.ready = true;
   dbState.lastError = null;
   dbState.lastCheckedAt = new Date().toISOString();
-  await startDispatchQueueWorker();
+  if (shouldRunEmbeddedDispatchWorker()) {
+    await startDispatchQueueWorker();
+  } else {
+    console.log("[Dispatch Queue] Embedded worker disabled (DISPATCH_WORKER_EMBEDDED=false).");
+  }
   startOperationsCommandCenterMonitor();
 
   await new Promise((resolve) => {

@@ -6,7 +6,8 @@
     "build": "node scripts/build-check.mjs",
     "smtp:test": "node scripts/smtp-smoke-test.mjs",
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "node --watch index.js",
+    "worker:dispatch": "node workers/dispatchWorker.js"
   },
   "dependencies": {
     "axios": "^1.13.4",

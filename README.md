@@ -57,6 +57,7 @@ npm install
 - `GOOGLE_CLIENT_SECRET`
 - `GOOGLE_CALLBACK_URL` *(must equal `https://<backend-public-url>/auth/google/callback`)*
 - `FRONTEND_URL`
+- `REDIS_URL` *(required for queue-based dispatch)*
 
 > Example email block for `.env`:
 > ```
@@ -102,6 +103,19 @@ npm run build
 ```bash
 npm start
 ```
+
+### Dispatch Worker (BullMQ)
+
+Run a dedicated queue worker process:
+
+```bash
+npm run worker:dispatch
+```
+
+For Render with a separate worker service:
+- Web service command: `npm start`
+- Worker service command: `npm run worker:dispatch`
+- Set `DISPATCH_WORKER_EMBEDDED=false` on the web service to avoid running duplicate embedded workers.
 
 ## API Endpoint Overview
 

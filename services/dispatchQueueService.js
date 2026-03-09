@@ -32,12 +32,26 @@ export function isDispatchQueueEnabled() {
 
 function createRedisConnection(label) {
   const url = redisUrl();
-  return new IORedis(url, {
+  const connection = new IORedis(url, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
     lazyConnect: true,
     connectionName: `resqnow_${label}`,
   });
+
+  connection.on("connect", () => {
+    console.log(`[Dispatch Queue] Redis connected (${label}).`);
+  });
+  connection.on("ready", () => {
+    console.log(`[Dispatch Queue] Redis ready (${label}).`);
+  });
+  connection.on("error", (error) => {
+    console.error(`[Dispatch Queue] Redis error (${label}):`, error?.message || error);
+  });
+  connection.on("close", () => {
+    console.warn(`[Dispatch Queue] Redis connection closed (${label}).`);
+  });
+  return connection;
 }
 
 async function getProducerConnection() {
@@ -65,6 +79,7 @@ async function getDispatchQueue() {
   if (!isDispatchQueueEnabled()) return null;
   if (queue) return queue;
 
+  console.log(`[Dispatch Queue] Creating queue instance (${DISPATCH_QUEUE_NAME}).`);
   queue = new Queue(DISPATCH_QUEUE_NAME, {
     connection: await getProducerConnection(),
     defaultJobOptions: {
@@ -251,6 +266,9 @@ async function processNewDispatchJob(data) {
   if (payload.retryCount > DISPATCH_MAX_RETRIES) {
     return { skipped: true, reason: "max_retries_reached" };
   }
+  console.log(
+    `[Dispatch Queue] Processing new-job requestId=${jobId} retryCount=${payload.retryCount} source=${payload.source}`
+  );
 
   const pool = await getPool();
   const requestRow = await fetchRequestRow(pool, jobId);
@@ -276,6 +294,9 @@ async function processNewDispatchJob(data) {
     amount: requestRow.amount,
     contact_name: requestRow.contact_name || DEFAULT_CUSTOMER_NAME,
   });
+  console.log(
+    `[Dispatch Queue] Technician candidates requestId=${jobId} count=${Array.isArray(candidates) ? candidates.length : 0}`
+  );
 
   const nextCandidate = (candidates || []).find((candidate) => {
     const candidateId = String(candidate?.id || "").trim();
@@ -295,6 +316,9 @@ async function processNewDispatchJob(data) {
       },
       DISPATCH_RETRY_DELAY_MS
     );
+    console.warn(
+      `[Dispatch Queue] No eligible technician for requestId=${jobId}. Requeued retryCount=${payload.retryCount + 1}`
+    );
     return { queued: true, reason: "no_available_candidate" };
   }
 
@@ -306,6 +330,9 @@ async function processNewDispatchJob(data) {
 
   await upsertPendingOffer(pool, jobId, technicianId);
   const offerPayload = buildOfferPayload(requestRow, nextCandidate);
+  console.log(
+    `[Dispatch Queue] Dispatching JOB_ALERT requestId=${jobId} technicianId=${technicianId} retryCount=${payload.retryCount}`
+  );
 
   if (socketService.io) {
     socketService.io.to(`technician_${technicianId}`).emit("JOB_ALERT", offerPayload);
@@ -324,6 +351,9 @@ async function processNewDispatchJob(data) {
     attemptedTechnicianIds: nextAttempted,
     source: "offer_timeout",
   });
+  console.log(
+    `[Dispatch Queue] Timeout scheduled requestId=${jobId} technicianId=${technicianId} timeoutMs=${DISPATCH_OFFER_TIMEOUT_MS}`
+  );
 
   return { queued: true, technicianId };
 }
@@ -333,6 +363,9 @@ async function processDispatchTimeoutJob(data) {
   const jobId = payload.jobId;
   const technicianId = asPositiveInt(data?.technicianId);
   if (!jobId || !technicianId) return { skipped: true, reason: "invalid_timeout_payload" };
+  console.log(
+    `[Dispatch Queue] Processing timeout requestId=${jobId} technicianId=${technicianId} retryCount=${payload.retryCount}`
+  );
 
   const pool = await getPool();
   const requestRow = await fetchRequestRow(pool, jobId);
@@ -364,6 +397,7 @@ async function processDispatchTimeoutJob(data) {
      WHERE id = ?`,
     [pendingOfferId]
   );
+  console.log(`[Dispatch Queue] Offer expired requestId=${jobId} technicianId=${technicianId}`);
 
   const takenPayload = {
     jobId: String(jobId),
@@ -389,11 +423,15 @@ async function processDispatchTimeoutJob(data) {
     },
     DISPATCH_RETRY_DELAY_MS
   );
+  console.log(
+    `[Dispatch Queue] Requeued after timeout requestId=${jobId} nextRetryCount=${payload.retryCount + 1}`
+  );
   return { queued: true, reason: "requeued_after_timeout" };
 }
 
 async function processDispatchQueueJob(job) {
   if (!job || !job.name) return { skipped: true, reason: "invalid_job" };
+  console.log(`[Dispatch Queue] Worker received job name=${job.name} id=${job.id}`);
   if (job.name === NEW_JOB_EVENT) return processNewDispatchJob(job.data || {});
   if (job.name === DISPATCH_TIMEOUT_EVENT) return processDispatchTimeoutJob(job.data || {});
   return { skipped: true, reason: `unknown_event:${job.name}` };
@@ -404,21 +442,34 @@ export async function enqueueDispatchJob(payload, options = {}) {
     return { queued: false, reason: "redis_not_configured" };
   }
 
-  const q = await getDispatchQueue();
-  if (!q) return { queued: false, reason: "queue_unavailable" };
-
   const normalizedPayload = buildQueuePayload(payload);
   if (!normalizedPayload.jobId) {
     return { queued: false, reason: "invalid_job_id" };
   }
 
-  const delayMs = Math.max(0, Number(options.delayMs || 0));
-  const queuedJob = await q.add(NEW_JOB_EVENT, normalizedPayload, {
-    delay: delayMs,
-    jobId: `${NEW_JOB_EVENT}:${normalizedPayload.jobId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-  });
+  try {
+    const q = await getDispatchQueue();
+    if (!q) return { queued: false, reason: "queue_unavailable" };
 
-  return { queued: true, id: queuedJob?.id || null };
+    const delayMs = Math.max(0, Number(options.delayMs || 0));
+    console.log(
+      `[Dispatch Queue] Adding job requestId=${normalizedPayload.jobId} retryCount=${normalizedPayload.retryCount} delayMs=${delayMs}`
+    );
+    const queuedJob = await q.add(NEW_JOB_EVENT, normalizedPayload, {
+      delay: delayMs,
+      jobId: `${NEW_JOB_EVENT}:${normalizedPayload.jobId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    });
+    console.log(
+      `[Dispatch Queue] Job added requestId=${normalizedPayload.jobId} queueJobId=${queuedJob?.id || "n/a"}`
+    );
+    return { queued: true, id: queuedJob?.id || null };
+  } catch (error) {
+    console.error(
+      `[Dispatch Queue] Failed to enqueue requestId=${normalizedPayload.jobId}:`,
+      error?.message || error
+    );
+    return { queued: false, reason: "enqueue_failed" };
+  }
 }
 
 export async function startDispatchQueueWorker() {
@@ -428,42 +479,55 @@ export async function startDispatchQueueWorker() {
   }
   if (worker) return true;
 
-  await getDispatchQueue();
+  try {
+    console.log(`[Dispatch Queue] Starting worker. pid=${process.pid}, queue=${DISPATCH_QUEUE_NAME}`);
+    await getDispatchQueue();
 
-  queueEvents = new QueueEvents(DISPATCH_QUEUE_NAME, {
-    connection: await getEventsConnection(),
-  });
-  queueEvents.on("failed", ({ jobId, failedReason }) => {
-    console.error(`[Dispatch Queue] Job ${jobId} failed: ${failedReason}`);
-  });
-  await queueEvents.waitUntilReady();
+    queueEvents = new QueueEvents(DISPATCH_QUEUE_NAME, {
+      connection: await getEventsConnection(),
+    });
+    queueEvents.on("failed", ({ jobId, failedReason }) => {
+      console.error(`[Dispatch Queue] Job ${jobId} failed: ${failedReason}`);
+    });
+    queueEvents.on("waiting", ({ jobId }) => {
+      console.log(`[Dispatch Queue] Job waiting id=${jobId}`);
+    });
+    queueEvents.on("active", ({ jobId }) => {
+      console.log(`[Dispatch Queue] Job active id=${jobId}`);
+    });
+    await queueEvents.waitUntilReady();
 
-  worker = new Worker(
-    DISPATCH_QUEUE_NAME,
-    async (job) => processDispatchQueueJob(job),
-    {
-      connection: await getWorkerConnection(),
-      concurrency: DISPATCH_WORKER_CONCURRENCY,
-    }
-  );
-
-  worker.on("completed", (job) => {
-    if (!job) return;
-    console.log(`[Dispatch Queue] Completed ${job.name} job id=${job.id}`);
-  });
-
-  worker.on("failed", (job, error) => {
-    console.error(
-      `[Dispatch Queue] Failed ${job?.name || "unknown"} job id=${job?.id || "n/a"}:`,
-      error?.message || error
+    worker = new Worker(
+      DISPATCH_QUEUE_NAME,
+      async (job) => processDispatchQueueJob(job),
+      {
+        connection: await getWorkerConnection(),
+        concurrency: DISPATCH_WORKER_CONCURRENCY,
+      }
     );
-  });
 
-  await worker.waitUntilReady();
-  console.log(
-    `[Dispatch Queue] Worker started. queue=${DISPATCH_QUEUE_NAME}, concurrency=${DISPATCH_WORKER_CONCURRENCY}, timeoutMs=${DISPATCH_OFFER_TIMEOUT_MS}`
-  );
-  return true;
+    worker.on("completed", (job) => {
+      if (!job) return;
+      console.log(`[Dispatch Queue] Completed ${job.name} job id=${job.id}`);
+    });
+
+    worker.on("failed", (job, error) => {
+      console.error(
+        `[Dispatch Queue] Failed ${job?.name || "unknown"} job id=${job?.id || "n/a"}:`,
+        error?.message || error
+      );
+    });
+
+    await worker.waitUntilReady();
+    console.log(
+      `[Dispatch Queue] Worker started. queue=${DISPATCH_QUEUE_NAME}, concurrency=${DISPATCH_WORKER_CONCURRENCY}, timeoutMs=${DISPATCH_OFFER_TIMEOUT_MS}`
+    );
+    return true;
+  } catch (error) {
+    console.error("[Dispatch Queue] Worker start failed:", error?.message || error);
+    await stopDispatchQueueWorker();
+    return false;
+  }
 }
 
 export async function stopDispatchQueueWorker() {
