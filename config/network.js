@@ -167,7 +167,7 @@ export function buildCorsOptions() {
       return callback(new Error(`CORS policy violation for origin: ${origin}`));
     },
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
     exposedHeaders: ["Content-Type", "Authorization"],
     maxAge: 86400,

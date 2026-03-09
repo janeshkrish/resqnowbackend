@@ -23,6 +23,7 @@ import adminExtendedNotificationsRouter from "./routes/adminExtended.notificatio
 import adminExtendedComplaintsRouter from "./routes/adminExtended.complaints.js";
 import notificationsRouter from "./routes/notifications.js";
 import adminCommandCenterRouter from "./routes/adminCommandCenter.js";
+import jobsRouter from "./routes/jobs.js";
 
 import {
   getApiBaseUrl,
@@ -175,6 +176,7 @@ function createApp() {
   app.use("/api/admin-extended", adminExtendedNotificationsRouter);
   app.use("/api/admin-extended", adminExtendedComplaintsRouter);
   app.use("/api/notifications", notificationsRouter);
+  app.use("/api/jobs", jobsRouter);
   app.use("/api/admin/command-center", adminCommandCenterRouter);
 
   app.get("/health", (_req, res) => {

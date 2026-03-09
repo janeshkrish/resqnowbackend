@@ -10,6 +10,14 @@ const router = Router();
 const ROUTES_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_ROOT = path.resolve(ROUTES_DIR, "..");
 const WORKSPACE_ROOT = path.resolve(BACKEND_ROOT, "..");
+const DEFAULT_ANDROID_APK_FILE_NAME = "app-release.apk";
+
+const ANDROID_APK_RELATIVE_DIRECTORIES = [
+    ["resqnowfrontend", "android", "app", "release"],
+    ["android", "app", "release"],
+    ["resqnowfrontend", "android", "app", "build", "outputs", "apk", "release"],
+    ["android", "app", "build", "outputs", "apk", "release"],
+];
 
 function normalizeAbsolutePath(value) {
     const raw = String(value || "").trim();
@@ -17,22 +25,54 @@ function normalizeAbsolutePath(value) {
     return path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(process.cwd(), raw);
 }
 
+function getParentChain(startPath, maxDepth = 4) {
+    const chain = [];
+    let current = normalizeAbsolutePath(startPath);
+    for (let depth = 0; depth < maxDepth; depth += 1) {
+        if (!current) break;
+        chain.push(current);
+        const parent = path.dirname(current);
+        if (!parent || parent === current) break;
+        current = parent;
+    }
+    return chain;
+}
+
+function getFileStatSafe(filePath) {
+    try {
+        if (!filePath || !fs.existsSync(filePath)) return null;
+        const stat = fs.statSync(filePath);
+        return stat.isFile() ? stat : null;
+    } catch {
+        return null;
+    }
+}
+
 function collectAndroidApkLookupCandidates() {
     const envDirectory = normalizeAbsolutePath(process.env.ANDROID_APK_RELEASE_DIR || process.env.APK_RELEASE_DIR);
     const envFile = normalizeAbsolutePath(process.env.ANDROID_APK_PATH || process.env.APK_PATH);
+    const envFileName = String(process.env.ANDROID_APK_FILE_NAME || DEFAULT_ANDROID_APK_FILE_NAME).trim() || DEFAULT_ANDROID_APK_FILE_NAME;
+
+    const rootCandidates = [
+        BACKEND_ROOT,
+        WORKSPACE_ROOT,
+        process.cwd(),
+        ...getParentChain(BACKEND_ROOT, 6),
+        ...getParentChain(process.cwd(), 6),
+    ];
 
     const directoryCandidates = [
         envDirectory,
-        path.resolve(BACKEND_ROOT, "..", "resqnowfrontend", "android", "app", "release"),
-        path.resolve(WORKSPACE_ROOT, "resqnowfrontend", "android", "app", "release"),
-        path.resolve(process.cwd(), "..", "resqnowfrontend", "android", "app", "release"),
-        path.resolve(process.cwd(), "resqnowfrontend", "android", "app", "release"),
-        path.resolve(process.cwd(), "android", "app", "release"),
-    ].filter(Boolean);
+        ...rootCandidates.flatMap((rootPath) =>
+            ANDROID_APK_RELATIVE_DIRECTORIES.map((segments) => path.resolve(rootPath, ...segments))
+        ),
+    ].filter(Boolean).map((entry) => path.normalize(entry));
 
     return {
+        envDirectory,
         envFile,
-        directoryCandidates: [...new Set(directoryCandidates.map((entry) => path.normalize(entry)))],
+        fileNameCandidates: [...new Set([envFileName, DEFAULT_ANDROID_APK_FILE_NAME])],
+        directoryCandidates: [...new Set(directoryCandidates)],
     };
 }
 
@@ -41,24 +81,60 @@ function resolveAndroidApkPath() {
     const checks = [];
 
     if (lookup.envFile) {
-        const exists = fs.existsSync(lookup.envFile) && fs.statSync(lookup.envFile).isFile();
-        checks.push({ type: "file", path: lookup.envFile, exists });
-        if (exists) {
+        const envFileStat = getFileStatSafe(lookup.envFile);
+        checks.push({
+            type: "env_file",
+            path: lookup.envFile,
+            exists: Boolean(envFileStat),
+        });
+        if (envFileStat) {
             return {
                 apkPath: lookup.envFile,
                 releaseDir: path.dirname(lookup.envFile),
+                source: "env_file",
+                stat: envFileStat,
                 checks,
             };
         }
     }
 
     for (const directoryPath of lookup.directoryCandidates) {
-        const exists = fs.existsSync(directoryPath) && fs.statSync(directoryPath).isDirectory();
-        checks.push({ type: "directory", path: directoryPath, exists });
-        if (!exists) continue;
+        let directoryStat = null;
+        try {
+            if (fs.existsSync(directoryPath)) {
+                const stat = fs.statSync(directoryPath);
+                if (stat.isDirectory()) {
+                    directoryStat = stat;
+                }
+            }
+        } catch {
+            directoryStat = null;
+        }
+        checks.push({ type: "directory", path: directoryPath, exists: Boolean(directoryStat) });
+        if (!directoryStat) continue;
+
+        for (const fileName of lookup.fileNameCandidates) {
+            const explicitPath = path.resolve(directoryPath, fileName);
+            const explicitStat = getFileStatSafe(explicitPath);
+            checks.push({
+                type: "explicit_file",
+                path: explicitPath,
+                exists: Boolean(explicitStat),
+            });
+            if (explicitStat) {
+                return {
+                    apkPath: explicitPath,
+                    releaseDir: directoryPath,
+                    source: "explicit_filename",
+                    stat: explicitStat,
+                    checks,
+                };
+            }
+        }
 
         const metadataPath = path.join(directoryPath, "output-metadata.json");
-        const metadataExists = fs.existsSync(metadataPath) && fs.statSync(metadataPath).isFile();
+        const metadataStat = getFileStatSafe(metadataPath);
+        const metadataExists = Boolean(metadataStat);
         checks.push({ type: "metadata", path: metadataPath, exists: metadataExists });
 
         if (metadataExists) {
@@ -67,12 +143,18 @@ function resolveAndroidApkPath() {
                 const outputFile = String(metadata?.elements?.[0]?.outputFile || "").trim();
                 if (outputFile) {
                     const resolvedOutput = path.resolve(directoryPath, outputFile);
-                    const outputExists = fs.existsSync(resolvedOutput) && fs.statSync(resolvedOutput).isFile();
-                    checks.push({ type: "metadata_output", path: resolvedOutput, exists: outputExists });
-                    if (outputExists) {
+                    const outputStat = getFileStatSafe(resolvedOutput);
+                    checks.push({
+                        type: "metadata_output",
+                        path: resolvedOutput,
+                        exists: Boolean(outputStat),
+                    });
+                    if (outputStat) {
                         return {
                             apkPath: resolvedOutput,
                             releaseDir: directoryPath,
+                            source: "metadata_output",
+                            stat: outputStat,
                             checks,
                         };
                     }
@@ -91,13 +173,21 @@ function resolveAndroidApkPath() {
             .readdirSync(directoryPath)
             .filter((entry) => entry.toLowerCase().endsWith(".apk"))
             .map((entry) => path.join(directoryPath, entry))
-            .filter((entry) => fs.existsSync(entry) && fs.statSync(entry).isFile())
-            .sort();
+            .map((entry) => ({ path: entry, stat: getFileStatSafe(entry) }))
+            .filter((entry) => Boolean(entry.stat))
+            .sort((a, b) => {
+                const aTime = Number(a.stat?.mtimeMs || 0);
+                const bTime = Number(b.stat?.mtimeMs || 0);
+                return bTime - aTime;
+            });
 
         if (apkCandidates.length > 0) {
+            const firstCandidate = apkCandidates[0];
             return {
-                apkPath: apkCandidates[0],
+                apkPath: firstCandidate.path,
                 releaseDir: directoryPath,
+                source: "directory_scan",
+                stat: firstCandidate.stat,
                 checks,
             };
         }
@@ -106,8 +196,33 @@ function resolveAndroidApkPath() {
     return {
         apkPath: null,
         releaseDir: null,
+        source: null,
+        stat: null,
         checks,
     };
+}
+
+function toIsoOrNull(value) {
+    try {
+        if (!value) return null;
+        const date = value instanceof Date ? value : new Date(value);
+        return Number.isNaN(date.getTime()) ? null : date.toISOString();
+    } catch {
+        return null;
+    }
+}
+
+function getAndroidApkMissingMessage() {
+    return "Android app package is not available yet. Please upload app-release.apk to resqnowfrontend/android/app/release.";
+}
+
+function setAndroidApkHeaders(res, fileName, fileSize = null) {
+    res.setHeader("Content-Type", "application/vnd.android.package-archive");
+    res.setHeader("Content-Disposition", `attachment; filename=\"${fileName}\"`);
+    if (Number.isFinite(Number(fileSize)) && Number(fileSize) >= 0) {
+        res.setHeader("Content-Length", String(fileSize));
+    }
+    res.setHeader("Cache-Control", "public, max-age=300, must-revalidate");
 }
 
 /**
@@ -218,10 +333,50 @@ router.get("/reverse-geocode", async (req, res) => {
 });
 
 /**
- * GET /api/public/android-app/download
- * Download latest Android APK from release output folder.
+ * GET /api/public/android-app/status
+ * Resolve whether Android APK is currently available and where it was found.
  */
-router.get("/android-app/download", async (_req, res) => {
+router.get("/android-app/status", async (_req, res) => {
+    try {
+        const resolution = resolveAndroidApkPath();
+        const apkPath = resolution?.apkPath;
+        const fileName = apkPath ? path.basename(apkPath) : null;
+        const fileSize = Number(resolution?.stat?.size || 0) || null;
+        const modifiedAt = toIsoOrNull(resolution?.stat?.mtime || null);
+
+        if (apkPath) {
+            console.info("[Android APK Status] APK found.", {
+                apkPath,
+                source: resolution?.source || null,
+                releaseDir: resolution?.releaseDir || null,
+                cwd: process.cwd(),
+            });
+        } else {
+            console.warn("[Android APK Status] APK not found.", {
+                cwd: process.cwd(),
+                backendRoot: BACKEND_ROOT,
+                checks: resolution?.checks || [],
+            });
+        }
+
+        return res.json({
+            available: Boolean(apkPath),
+            apkPath,
+            fileName,
+            fileSize,
+            modifiedAt,
+            downloadUrl: "/api/public/android-app/download",
+            source: resolution?.source || null,
+            releaseDir: resolution?.releaseDir || null,
+            error: apkPath ? null : getAndroidApkMissingMessage(),
+        });
+    } catch (error) {
+        console.error("[Android APK Status] Error:", error);
+        return res.status(500).json({ error: "Failed to resolve Android app package status." });
+    }
+});
+
+async function handleAndroidApkDownload(res, { headOnly = false } = {}) {
     try {
         const resolution = resolveAndroidApkPath();
         const apkPath = resolution?.apkPath;
@@ -232,22 +387,33 @@ router.get("/android-app/download", async (_req, res) => {
                 checks: resolution?.checks || [],
             });
             return res.status(404).json({
-                error: "Android app package is not available yet. Please upload app-release.apk to resqnowfrontend/android/app/release.",
+                error: getAndroidApkMissingMessage(),
             });
+        }
+
+        const fileName = path.basename(apkPath);
+        setAndroidApkHeaders(res, fileName, resolution?.stat?.size);
+
+        if (headOnly) {
+            console.info("[Android APK Download] HEAD resolved.", {
+                apkPath,
+                source: resolution?.source || null,
+                releaseDir: resolution?.releaseDir || null,
+                cwd: process.cwd(),
+            });
+            return res.status(200).end();
         }
 
         console.info("[Android APK Download] Serving APK.", {
             apkPath,
+            source: resolution?.source || null,
             releaseDir: resolution?.releaseDir || null,
             cwd: process.cwd(),
         });
 
-        const fileName = path.basename(apkPath);
-        res.setHeader("Content-Type", "application/vnd.android.package-archive");
-        res.setHeader("Content-Disposition", `attachment; filename=\"${fileName}\"`);
-
         return res.download(apkPath, fileName, (error) => {
             if (!error) return;
+            console.error("[Android APK Download] Stream error:", error);
             if (!res.headersSent) {
                 res.status(500).json({ error: "Failed to download Android app package." });
             }
@@ -256,6 +422,22 @@ router.get("/android-app/download", async (_req, res) => {
         console.error("[Android APK Download] Error:", error);
         return res.status(500).json({ error: "Failed to prepare Android app download." });
     }
+}
+
+/**
+ * HEAD /api/public/android-app/download
+ * Check whether Android APK is available for download.
+ */
+router.head("/android-app/download", async (_req, res) => {
+    return handleAndroidApkDownload(res, { headOnly: true });
+});
+
+/**
+ * GET /api/public/android-app/download
+ * Download latest Android APK from release output folder.
+ */
+router.get("/android-app/download", async (_req, res) => {
+    return handleAndroidApkDownload(res, { headOnly: false });
 });
 
 export default router;
