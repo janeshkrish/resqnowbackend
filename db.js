@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS technicians (
   name VARCHAR(255) NOT NULL,
   email VARCHAR(255) UNIQUE NOT NULL,
   phone VARCHAR(50),
+  upi_id VARCHAR(120),
   service_type VARCHAR(100),
   location VARCHAR(255),
   status ENUM('pending','approved','rejected') DEFAULT 'pending',
@@ -342,6 +343,19 @@ export async function updateTechniciansTableSchema() {
   // New columns for comprehensive technician data model
   await addColumnIfNotExists(p, 'technicians', 'resume_url VARCHAR(1024)');
   await addColumnIfNotExists(p, 'technicians', 'documents JSON');
+  await addColumnIfNotExists(p, 'technicians', 'upi_id VARCHAR(120)');
+  try {
+    await p.query(
+      `UPDATE technicians
+       SET upi_id = JSON_UNQUOTE(JSON_EXTRACT(payment_details, '$.upi_id'))
+       WHERE (upi_id IS NULL OR TRIM(upi_id) = '')
+         AND payment_details IS NOT NULL
+         AND JSON_UNQUOTE(JSON_EXTRACT(payment_details, '$.upi_id')) IS NOT NULL
+         AND TRIM(JSON_UNQUOTE(JSON_EXTRACT(payment_details, '$.upi_id'))) <> ''`
+    );
+  } catch (err) {
+    console.log("Note: could not backfill technicians.upi_id from payment_details:", err.message);
+  }
   await addColumnIfNotExists(p, 'technicians', 'proprietor_name VARCHAR(255)');
   await addColumnIfNotExists(p, 'technicians', 'alternate_phone VARCHAR(50)');
   await addColumnIfNotExists(p, 'technicians', 'whatsapp_number VARCHAR(50)');
@@ -438,6 +452,7 @@ CREATE TABLE IF NOT EXISTS payments (
   platform_fee DECIMAL(10, 2) DEFAULT 0.00,
   technician_amount DECIMAL(10, 2) DEFAULT 0.00,
   is_settled BOOLEAN DEFAULT TRUE,
+  payment_to_technician_status VARCHAR(20) DEFAULT 'pending',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (service_request_id) REFERENCES service_requests(id)
@@ -451,6 +466,7 @@ export async function ensurePaymentsTable() {
   await addColumnIfNotExists(p, 'payments', 'platform_fee DECIMAL(10, 2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'payments', 'technician_amount DECIMAL(10, 2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'payments', 'is_settled BOOLEAN DEFAULT TRUE');
+  await addColumnIfNotExists(p, 'payments', "payment_to_technician_status VARCHAR(20) DEFAULT 'pending'");
 }
 
 export async function updatePaymentsTableSchema() {
@@ -459,6 +475,17 @@ export async function updatePaymentsTableSchema() {
     await p.query("ALTER TABLE payments MODIFY COLUMN status VARCHAR(50) DEFAULT 'pending'");
   } catch (err) {
     console.log("Note: could not modify payments.status column:", err.message);
+  }
+
+  await addColumnIfNotExists(p, "payments", "payment_to_technician_status VARCHAR(20) DEFAULT 'pending'");
+  try {
+    await p.query(
+      `UPDATE payments
+       SET payment_to_technician_status = 'pending'
+       WHERE payment_to_technician_status IS NULL OR TRIM(payment_to_technician_status) = ''`
+    );
+  } catch (err) {
+    console.log("Note: could not normalize payments.payment_to_technician_status:", err.message);
   }
 }
 

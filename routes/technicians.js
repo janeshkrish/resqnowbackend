@@ -172,6 +172,7 @@ function rowToTechnician(row) {
     name: row.name,
     email: row.email,
     phone: row.phone || "",
+    upi_id: row.upi_id || payment_details?.upi_id || "",
     proprietor_name: row.proprietor_name || "",
     alternate_phone: row.alternate_phone || "",
     whatsapp_number: row.whatsapp_number || "",
@@ -343,6 +344,7 @@ router.post("/register", async (req, res) => {
     const location = (locality || address || "").trim() || "â€”";
     const normalizedDocuments = sanitizeTechnicianDocuments(documents);
     const normalizedResumeUrl = normalizeUploadResourcePath(resume_url);
+    const upiId = String(payment_details?.upi_id || req.body?.upi_id || "").trim();
 
     const specialtiesJson = JSON.stringify(normalizedSpecialties);
     const pricingJson = JSON.stringify(pricing && typeof pricing === "object" ? pricing : {});
@@ -363,7 +365,7 @@ router.post("/register", async (req, res) => {
 
     const result = await pool.execute(
       `INSERT INTO technicians (
-        name, email, phone,
+        name, email, phone, upi_id,
         proprietor_name, alternate_phone, whatsapp_number,
         service_type, location, status, is_active, is_available, password_hash,
         address, region, district, state, locality, google_maps_link,
@@ -371,11 +373,12 @@ router.post("/register", async (req, res) => {
         service_area_range, experience,
         specialties, pricing, working_hours, service_costs, payment_details, app_readiness, vehicle_types,
         resume_url, documents, latitude, longitude
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         trimmedName,
         normalizedEmail,
         (phone || "").trim(),
+        upiId || null,
         (proprietor_name || "").trim(),
         (alternate_phone || "").trim(),
         (whatsapp_number || "").trim(),
@@ -1511,6 +1514,7 @@ router.post("/create", verifyAdmin, async (req, res) => {
     const location = (locality || address || "").trim() || "—";
     const normalizedDocuments = sanitizeTechnicianDocuments(documents);
     const normalizedResumeUrl = normalizeUploadResourcePath(resume_url);
+    const upiId = String(payment_details?.upi_id || req.body?.upi_id || "").trim();
     const requestedStatus = String(status || "").toLowerCase();
     const appStatus = requestedStatus === "approved" ? "approved" : "pending";
 
@@ -1526,7 +1530,7 @@ router.post("/create", verifyAdmin, async (req, res) => {
     const pool = await db.getPool();
     const result = await pool.execute(
       `INSERT INTO technicians(
-        name, email, phone,
+        name, email, phone, upi_id,
         proprietor_name, alternate_phone, whatsapp_number,
         service_type, location, status, password_hash,
         address, region, district, state, locality, google_maps_link,
@@ -1534,11 +1538,12 @@ router.post("/create", verifyAdmin, async (req, res) => {
         service_area_range, experience,
         specialties, pricing, working_hours, service_costs, payment_details, app_readiness, vehicle_types,
         resume_url, documents
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         trimmedName,
         normalizedEmail,
         (phone || "").trim(),
+        upiId || null,
         (proprietor_name || "").trim(),
         (alternate_phone || "").trim(),
         (whatsapp_number || "").trim(),

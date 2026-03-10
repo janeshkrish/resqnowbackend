@@ -1,6 +1,28 @@
 import { getPool } from "../db.js";
 import { buildPagination, likeFilter, toNumber, toPositiveInt } from "./utils.js";
 
+const TECHNICIAN_PAYOUT_PERCENT = 0.9;
+const PAYMENT_TO_TECHNICIAN_STATUS = Object.freeze({
+  pending: "pending",
+  completed: "completed",
+});
+
+function roundMoney(value) {
+  return Number((toNumber(value) + Number.EPSILON).toFixed(2));
+}
+
+function calculateTechnicianAmount(amount) {
+  return roundMoney(toNumber(amount) * TECHNICIAN_PAYOUT_PERCENT);
+}
+
+function normalizePaymentToTechnicianStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === PAYMENT_TO_TECHNICIAN_STATUS.completed) {
+    return PAYMENT_TO_TECHNICIAN_STATUS.completed;
+  }
+  return PAYMENT_TO_TECHNICIAN_STATUS.pending;
+}
+
 function csvEscape(value) {
   if (value == null) return "";
   const str = String(value);
@@ -11,15 +33,30 @@ function csvEscape(value) {
 }
 
 function buildCsv(rows) {
-  const headers = ["transactionId", "user", "technician", "amount", "status", "date"];
+  const headers = [
+    "transactionId",
+    "requestId",
+    "user",
+    "technician",
+    "upiId",
+    "amount",
+    "technicianAmount",
+    "paymentToTechnicianStatus",
+    "status",
+    "date",
+  ];
   const lines = [headers.join(",")];
 
   rows.forEach((row) => {
     lines.push([
       csvEscape(row.transactionId),
+      csvEscape(row.requestId),
       csvEscape(row.user),
       csvEscape(row.technician),
+      csvEscape(row.upiId),
       csvEscape(row.amount),
+      csvEscape(row.technicianAmount),
+      csvEscape(row.paymentToTechnicianStatus),
       csvEscape(row.status),
       csvEscape(row.date),
     ].join(","));
@@ -29,12 +66,16 @@ function buildCsv(rows) {
 }
 
 function mapTransaction(row) {
+  const amount = roundMoney(row.amount || 0);
   return {
     transactionId: row.transaction_id,
     requestId: row.request_id ?? null,
     user: row.user_name,
     technician: row.technician_name,
-    amount: Number(row.amount || 0),
+    upiId: row.upi_id || null,
+    amount,
+    technicianAmount: calculateTechnicianAmount(amount),
+    paymentToTechnicianStatus: normalizePaymentToTechnicianStatus(row.payment_to_technician_status),
     status: row.status,
     date: row.created_at,
   };
@@ -117,20 +158,33 @@ export async function getFinanceTransactions(req, res) {
         CAST(p.id AS CHAR) LIKE ?
         OR LOWER(COALESCE(u.full_name, '')) LIKE ?
         OR LOWER(COALESCE(t.name, '')) LIKE ?
+        OR LOWER(COALESCE(NULLIF(TRIM(t.upi_id), ''), JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id')), '')) LIKE ?
       )`);
-      values.push(like, like, like);
+      values.push(like, like, like, like);
     }
 
     if (status && status !== "all") {
-      whereClauses.push(`LOWER(COALESCE(
-        CASE
-          WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
-          WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
-          ELSE p.status
-        END,
-        ''
-      )) = ?`);
-      values.push(status);
+      if (status === "payment_pending") {
+        whereClauses.push(
+          "LOWER(COALESCE(NULLIF(TRIM(p.payment_to_technician_status), ''), 'pending')) = ?"
+        );
+        values.push(PAYMENT_TO_TECHNICIAN_STATUS.pending);
+      } else if (status === "payment_completed") {
+        whereClauses.push(
+          "LOWER(COALESCE(NULLIF(TRIM(p.payment_to_technician_status), ''), 'pending')) = ?"
+        );
+        values.push(PAYMENT_TO_TECHNICIAN_STATUS.completed);
+      } else {
+        whereClauses.push(`LOWER(COALESCE(
+          CASE
+            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
+            WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
+            ELSE p.status
+          END,
+          ''
+        )) = ?`);
+        values.push(status);
+      }
     }
 
     const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
@@ -142,7 +196,9 @@ export async function getFinanceTransactions(req, res) {
          p.service_request_id AS request_id,
          COALESCE(u.full_name, CONCAT('User #', p.user_id)) AS user_name,
          COALESCE(t.name, 'Unassigned') AS technician_name,
+         COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), '')) AS upi_id,
          p.amount,
+         COALESCE(NULLIF(LOWER(TRIM(p.payment_to_technician_status)), ''), 'pending') AS payment_to_technician_status,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
            WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
@@ -196,7 +252,9 @@ export async function exportFinanceCsv(req, res) {
          p.service_request_id AS request_id,
          COALESCE(u.full_name, CONCAT('User #', p.user_id)) AS user_name,
          COALESCE(t.name, 'Unassigned') AS technician_name,
+         COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), '')) AS upi_id,
          p.amount,
+         COALESCE(NULLIF(LOWER(TRIM(p.payment_to_technician_status)), ''), 'pending') AS payment_to_technician_status,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
            WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'
@@ -224,6 +282,54 @@ export async function exportFinanceCsv(req, res) {
   }
 }
 
+export async function markTechnicianPaymentCompleted(req, res) {
+  try {
+    const transactionId = Number.parseInt(String(req.params?.transactionId || req.params?.id || ""), 10);
+    if (!Number.isInteger(transactionId) || transactionId <= 0) {
+      return res.status(400).json({ error: "Invalid transaction id." });
+    }
+
+    const pool = await getPool();
+    const [existingRows] = await pool.query(
+      `SELECT
+         id,
+         COALESCE(NULLIF(LOWER(TRIM(payment_to_technician_status)), ''), 'pending') AS payment_to_technician_status
+       FROM payments
+       WHERE id = ?
+       LIMIT 1`,
+      [transactionId]
+    );
+
+    if (!existingRows || existingRows.length === 0) {
+      return res.status(404).json({ error: "Transaction not found." });
+    }
+
+    const currentStatus = normalizePaymentToTechnicianStatus(existingRows[0].payment_to_technician_status);
+    if (currentStatus !== PAYMENT_TO_TECHNICIAN_STATUS.completed) {
+      await pool.execute(
+        "UPDATE payments SET payment_to_technician_status = ? WHERE id = ?",
+        [PAYMENT_TO_TECHNICIAN_STATUS.completed, transactionId]
+      );
+    }
+
+    req.io?.emit?.("admin:payment_update", {
+      transactionId,
+      paymentToTechnicianStatus: PAYMENT_TO_TECHNICIAN_STATUS.completed,
+      at: new Date().toISOString(),
+    });
+
+    return res.json({
+      success: true,
+      transactionId,
+      paymentToTechnicianStatus: PAYMENT_TO_TECHNICIAN_STATUS.completed,
+      alreadyCompleted: currentStatus === PAYMENT_TO_TECHNICIAN_STATUS.completed,
+    });
+  } catch (error) {
+    console.error("[admin.finance.payTechnician] failed:", error?.message || error);
+    return res.status(500).json({ error: "Failed to update technician payment status." });
+  }
+}
+
 export async function getFlaggedPayments(req, res) {
   try {
     const limit = toPositiveInt(req.query?.limit, 100, { min: 1, max: 500 });
@@ -235,7 +341,9 @@ export async function getFlaggedPayments(req, res) {
          p.service_request_id AS request_id,
          COALESCE(u.full_name, CONCAT('User #', p.user_id)) AS user_name,
          COALESCE(t.name, 'Unassigned') AS technician_name,
+         COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), '')) AS upi_id,
          p.amount,
+         COALESCE(NULLIF(LOWER(TRIM(p.payment_to_technician_status)), ''), 'pending') AS payment_to_technician_status,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
            WHEN LOWER(COALESCE(sr.status, '')) IN ('completed', 'paid') THEN 'completed'

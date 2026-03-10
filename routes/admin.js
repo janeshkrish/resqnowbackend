@@ -26,6 +26,7 @@ import {
   getFinanceTransactions,
   exportFinanceCsv,
   getFlaggedPayments,
+  markTechnicianPaymentCompleted,
 } from "../controllers/financeController.js";
 import { getAnalytics } from "../controllers/analyticsController.js";
 import {
@@ -90,6 +91,7 @@ router.get("/finance/transactions", getFinanceTransactions);
 router.get("/finance/export", exportFinanceCsv);
 router.get("/finance/flagged", getFlaggedPayments);
 router.get("/finance/audit-logs", getAdminAuditLogs);
+router.post("/pay-technician/:transactionId", markTechnicianPaymentCompleted);
 
 router.get("/analytics", getAnalytics);
 
