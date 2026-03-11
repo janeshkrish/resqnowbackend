@@ -13,6 +13,7 @@ const ACTIVE_REQUEST_STATES = [
   "arrived",
   "in_progress",
   "in-progress",
+  "awaiting_payment",
   "payment_pending",
 ];
 
@@ -23,7 +24,7 @@ const REQUEST_STATUS_FILTER_SET = {
   processing: ["processing"],
   in_progress: ["in_progress", "in-progress"],
   service_started: ["service_started", "en-route", "on-the-way", "arrived"],
-  payment_pending: ["payment_pending"],
+  payment_pending: ["payment_pending", "awaiting_payment"],
   completed: ["completed", "paid"],
   cancelled: ["cancelled"],
 };
@@ -41,6 +42,9 @@ function normalizeRequestStatusKey(value) {
     "in_progress": "in-progress",
     "in progress": "in-progress",
     "payment-pending": "payment_pending",
+    "awaiting-payment": "payment_pending",
+    "awaiting payment": "payment_pending",
+    "awaiting_payment": "payment_pending",
   };
 
   const mapped = map[normalized] || normalized;
@@ -72,6 +76,9 @@ function canonicalizeRequestStatus(value) {
   }
   if (normalized === "paid") {
     return "completed";
+  }
+  if (normalized === "awaiting_payment") {
+    return "payment_pending";
   }
   return normalized || "pending";
 }

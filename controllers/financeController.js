@@ -1,7 +1,6 @@
 import { getPool } from "../db.js";
 import { buildPagination, likeFilter, toNumber, toPositiveInt } from "./utils.js";
 
-const TECHNICIAN_PAYOUT_PERCENT = 0.9;
 const PAYMENT_TO_TECHNICIAN_STATUS = Object.freeze({
   pending: "pending",
   completed: "completed",
@@ -9,10 +8,6 @@ const PAYMENT_TO_TECHNICIAN_STATUS = Object.freeze({
 
 function roundMoney(value) {
   return Number((toNumber(value) + Number.EPSILON).toFixed(2));
-}
-
-function calculateTechnicianAmount(amount) {
-  return roundMoney(toNumber(amount) * TECHNICIAN_PAYOUT_PERCENT);
 }
 
 function normalizePaymentToTechnicianStatus(value) {
@@ -40,6 +35,7 @@ function buildCsv(rows) {
     "technician",
     "upiId",
     "amount",
+    "platformFee",
     "technicianAmount",
     "paymentToTechnicianStatus",
     "status",
@@ -55,6 +51,7 @@ function buildCsv(rows) {
       csvEscape(row.technician),
       csvEscape(row.upiId),
       csvEscape(row.amount),
+      csvEscape(row.platformFee),
       csvEscape(row.technicianAmount),
       csvEscape(row.paymentToTechnicianStatus),
       csvEscape(row.status),
@@ -65,16 +62,36 @@ function buildCsv(rows) {
   return `${lines.join("\n")}\n`;
 }
 
+function resolvePaymentBreakdown(row) {
+  const totalAmount = roundMoney(row?.amount || 0);
+  const explicitTechnicianAmount = toNumber(row?.technician_amount);
+  const explicitPlatformFee = toNumber(row?.platform_fee);
+
+  const technicianAmount = explicitTechnicianAmount > 0
+    ? roundMoney(explicitTechnicianAmount)
+    : roundMoney(Math.max(0, totalAmount - Math.max(0, explicitPlatformFee)));
+  const platformFee = explicitPlatformFee >= 0
+    ? roundMoney(explicitPlatformFee)
+    : roundMoney(Math.max(0, totalAmount - technicianAmount));
+
+  return {
+    totalAmount,
+    technicianAmount,
+    platformFee,
+  };
+}
+
 function mapTransaction(row) {
-  const amount = roundMoney(row.amount || 0);
+  const { totalAmount, technicianAmount, platformFee } = resolvePaymentBreakdown(row);
   return {
     transactionId: row.transaction_id,
     requestId: row.request_id ?? null,
     user: row.user_name,
     technician: row.technician_name,
     upiId: row.upi_id || null,
-    amount,
-    technicianAmount: calculateTechnicianAmount(amount),
+    amount: totalAmount,
+    platformFee,
+    technicianAmount,
     paymentToTechnicianStatus: normalizePaymentToTechnicianStatus(row.payment_to_technician_status),
     status: row.status,
     date: row.created_at,
@@ -91,7 +108,7 @@ export async function getFinanceSummary(_req, res) {
       [completedTransactionsRows],
     ] = await Promise.all([
       pool.query(
-        `SELECT IFNULL(SUM(p.amount), 0) AS total
+        `SELECT IFNULL(SUM(p.platform_fee), 0) AS total
          FROM payments p
          LEFT JOIN service_requests sr ON sr.id = p.service_request_id
          WHERE LOWER(COALESCE(
@@ -198,6 +215,8 @@ export async function getFinanceTransactions(req, res) {
          COALESCE(t.name, 'Unassigned') AS technician_name,
          COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), '')) AS upi_id,
          p.amount,
+         p.platform_fee,
+         p.technician_amount,
          COALESCE(NULLIF(LOWER(TRIM(p.payment_to_technician_status)), ''), 'pending') AS payment_to_technician_status,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
@@ -254,6 +273,8 @@ export async function exportFinanceCsv(req, res) {
          COALESCE(t.name, 'Unassigned') AS technician_name,
          COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), '')) AS upi_id,
          p.amount,
+         p.platform_fee,
+         p.technician_amount,
          COALESCE(NULLIF(LOWER(TRIM(p.payment_to_technician_status)), ''), 'pending') AS payment_to_technician_status,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'
@@ -343,6 +364,8 @@ export async function getFlaggedPayments(req, res) {
          COALESCE(t.name, 'Unassigned') AS technician_name,
          COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), '')) AS upi_id,
          p.amount,
+         p.platform_fee,
+         p.technician_amount,
          COALESCE(NULLIF(LOWER(TRIM(p.payment_to_technician_status)), ''), 'pending') AS payment_to_technician_status,
          CASE
            WHEN LOWER(COALESCE(sr.status, '')) = 'cancelled' THEN 'cancelled'

@@ -66,7 +66,7 @@ const toPercentOrZero = (value) => {
 const isRequestAlreadyPaid = (requestRow) => {
     const status = String(requestRow?.status || "").toLowerCase();
     const paymentStatus = String(requestRow?.payment_status || "").toLowerCase();
-    return status === "paid" || paymentStatus === "completed";
+    return ["paid", "completed"].includes(status) || ["paid", "completed"].includes(paymentStatus);
 };
 
 function getStoredDiscountOptions(requestRow) {
@@ -113,7 +113,10 @@ async function evaluateWelcomeCouponForRequest({
          FROM service_requests
          WHERE user_id = ?
            AND id <> ?
-           AND (LOWER(COALESCE(payment_status, '')) = 'completed' OR LOWER(COALESCE(status, '')) = 'paid')`,
+           AND (
+             LOWER(COALESCE(payment_status, '')) IN ('completed', 'paid')
+             OR LOWER(COALESCE(status, '')) IN ('paid', 'completed')
+           )`,
         [userId, requestId]
     );
     const completedServicesCount = Number(completedRows?.[0]?.count || 0);
@@ -126,7 +129,7 @@ async function evaluateWelcomeCouponForRequest({
              WHERE user_id = ?
                AND id <> ?
                AND LOWER(COALESCE(status, '')) <> 'cancelled'
-               AND LOWER(COALESCE(payment_status, '')) <> 'completed'
+               AND LOWER(COALESCE(payment_status, '')) NOT IN ('completed', 'paid')
                AND UPPER(COALESCE(applied_coupon_code, '')) = ?`,
             [userId, requestId, configuredCode]
         );
@@ -492,8 +495,8 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
         );
 
         const requestWasPaid = (
-            String(request.status || "").toLowerCase() === "paid" ||
-            String(request.payment_status || "").toLowerCase() === "completed"
+            ["paid", "completed"].includes(String(request.status || "").toLowerCase()) ||
+            ["paid", "completed"].includes(String(request.payment_status || "").toLowerCase())
         );
 
         await conn.execute(
@@ -507,7 +510,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
             `UPDATE service_requests
              SET payment_status = ?, payment_method = ?, status = ?, amount = ?, updated_at = NOW()
              WHERE id = ?`,
-            ["completed", "razorpay", "paid", breakdown.baseAmount, requestId]
+            ["paid", "razorpay", "completed", breakdown.baseAmount, requestId]
         );
         if (request.technician_id) {
             await releaseTechnicianAvailability(conn, request.technician_id, requestId);
@@ -660,7 +663,7 @@ async function processFinalizedServicePaymentNotifications(finalized, { paymentM
     if (finalized.technicianId) {
         socketService.notifyTechnician(finalized.technicianId, "job:status_update", {
             requestId: finalized.requestId,
-            status: "paid"
+            status: "completed"
         });
         socketService.notifyTechnician(finalized.technicianId, "job:list_update", {
             requestId: finalized.requestId,
@@ -671,11 +674,11 @@ async function processFinalizedServicePaymentNotifications(finalized, { paymentM
     if (finalized.userId) {
         socketService.notifyUser(finalized.userId, "payment_completed", {
             requestId: finalized.requestId,
-            status: "paid"
+            status: "completed"
         });
         socketService.notifyUser(finalized.userId, "job:status_update", {
             requestId: finalized.requestId,
-            status: "paid"
+            status: "completed"
         });
     }
 }
@@ -1358,9 +1361,9 @@ router.post('/cash', verifyUser, async (req, res) => {
                      updated_at = NOW()
                  WHERE id = ?`,
                 [
-                    'completed',
-                    'cash',
                     'paid',
+                    'cash',
+                    'completed',
                     breakdown.baseAmount,
                     coupon.appliedCode || null,
                     coupon.isApplied ? coupon.discountPercent : 0,
@@ -1371,7 +1374,7 @@ router.post('/cash', verifyUser, async (req, res) => {
             if (technicianId) {
                 await releaseTechnicianAvailability(conn, technicianId, requestId);
             }
-            console.log('REQUEST STATUS UPDATED:', { requestId, status: 'paid', amount: breakdown.baseAmount });
+            console.log('REQUEST STATUS UPDATED:', { requestId, status: 'completed', amount: breakdown.baseAmount });
 
             await conn.execute(
                 `INSERT INTO payments (user_id, service_request_id, payment_method, status, amount, platform_fee, technician_amount, is_settled)
@@ -1450,11 +1453,11 @@ router.post('/cash', verifyUser, async (req, res) => {
             });
 
             if (technicianId) {
-                socketService.notifyTechnician(technicianId, 'job:status_update', { requestId, status: 'paid' });
+                socketService.notifyTechnician(technicianId, 'job:status_update', { requestId, status: 'completed' });
                 socketService.notifyTechnician(technicianId, 'job:list_update', { requestId, action: 'updated' });
             }
-            socketService.notifyUser(userId, 'payment_completed', { requestId, status: 'paid' });
-            socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'paid' });
+            socketService.notifyUser(userId, 'payment_completed', { requestId, status: 'completed' });
+            socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'completed' });
 
             const [updatedRows] = await pool.query('SELECT * FROM service_requests WHERE id = ?', [requestId]);
             res.json({ success: true, request: updatedRows[0] });
@@ -1543,7 +1546,10 @@ router.get('/diagnostics/overview', verifyAdmin, async (req, res) => {
 
         const records = rows.map((row) => {
             const checks = {
-                request_paid_consistent: !(String(row.request_status) === "paid" && String(row.request_payment_status) !== "completed"),
+                request_paid_consistent: !(
+                    ["paid", "completed"].includes(String(row.request_status || "").toLowerCase()) &&
+                    !["paid", "completed"].includes(String(row.request_payment_status || "").toLowerCase())
+                ),
                 payment_method_consistent: !row.request_payment_method || String(row.request_payment_method) === String(row.payment_method)
             };
             return { ...row, checks };
@@ -1606,9 +1612,12 @@ router.get('/diagnostics/request/:requestId', verifyAdmin, async (req, res) => {
 
         const checks = {
             request_exists: true,
-            paid_status_consistent: !(['paid'].includes(String(request.status)) && String(request.payment_status) !== 'completed'),
-            payment_row_exists_if_paid: !(['paid'].includes(String(request.status)) && paymentRows.length === 0),
-            invoice_exists_if_paid: !(['paid'].includes(String(request.status)) && invoiceRows.length === 0),
+            paid_status_consistent: !(
+                ['paid', 'completed'].includes(String(request.status || '').toLowerCase()) &&
+                !['paid', 'completed'].includes(String(request.payment_status || '').toLowerCase())
+            ),
+            payment_row_exists_if_paid: !(['paid', 'completed'].includes(String(request.status || '').toLowerCase()) && paymentRows.length === 0),
+            invoice_exists_if_paid: !(['paid', 'completed'].includes(String(request.status || '').toLowerCase()) && invoiceRows.length === 0),
             invoice_pdf_present: !latestInvoice || !!latestInvoice.has_invoice_pdf,
             cash_due_record_present: !latestPayment || latestPayment.payment_method !== 'cash' || dueRows.length > 0,
         };

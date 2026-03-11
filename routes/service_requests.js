@@ -13,7 +13,7 @@ import {
     parseVehicleTypes,
     serviceDomainsFromCosts
 } from "../services/serviceNormalization.js";
-import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/pricingEstimator.js";
+import { estimateRequestAmount, estimateRequestAmountAsync, estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 import { computePaymentAmounts, getPlatformPricingConfig } from "../services/platformPricing.js";
 import { enqueueDispatchJob } from "../services/dispatchQueueService.js";
 import {
@@ -126,6 +126,7 @@ const VALID_STATUSES = new Set([
     'arrived',
     'in_progress',
     'in-progress',
+    'awaiting_payment',
     'payment_pending',
     'completed',
     'cancelled',
@@ -149,7 +150,11 @@ function normalizeStatus(status) {
         'processing': 'processing',
         'en_route': 'en-route',
         'en-route': 'en-route',
-        'payment_pending': 'payment_pending'
+        'payment_pending': 'payment_pending',
+        'payment-pending': 'payment_pending',
+        'awaiting_payment': 'awaiting_payment',
+        'awaiting-payment': 'awaiting_payment',
+        'awaiting payment': 'awaiting_payment'
     };
     if (map[s]) return map[s];
     if (VALID_STATUSES.has(s)) return s;
@@ -195,7 +200,7 @@ router.get("/", verifyUser, async (req, res) => {
             status: row.status,
             serviceStatus: row.status,
             payment_status: row.payment_status,
-            paymentStatus: String(row.payment_status || "").toLowerCase() === "completed" ? "paid" : (row.payment_status || null),
+            paymentStatus: ["completed", "paid"].includes(String(row.payment_status || "").toLowerCase()) ? "paid" : (row.payment_status || null),
             created_at: row.created_at,
             updated_at: row.updated_at,
             technician_id: row.technician_id,
@@ -555,7 +560,9 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 COALESCE(sr.amount, sr.service_charge, 0) AS amount,
                 d.status AS offer_status,
                 t.latitude AS technician_lat,
-                t.longitude AS technician_lng
+                t.longitude AS technician_lng,
+                t.pricing AS technician_pricing,
+                t.service_costs AS technician_service_costs
             FROM service_requests sr
             LEFT JOIN dispatch_offers d
                 ON d.service_request_id = sr.id
@@ -572,6 +579,16 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
         }
 
         const row = rows[0];
+        const estimatedAmount = await estimateTechnicianPayoutAsync(
+            { service_type: row.service_type, vehicle_type: row.vehicle_type },
+            {
+                id: technicianId,
+                pricing: row.technician_pricing,
+                service_costs: row.technician_service_costs
+            },
+            { technicianId }
+        );
+        const resolvedOfferAmount = toPositiveMoney(estimatedAmount) ?? 0;
         const normalizedStatus = normalizeStatus(row?.status) || String(row?.status || "").trim().toLowerCase();
         const offerStatus = String(row?.offer_status || "").trim().toLowerCase();
         const assignedTechnicianId = row?.technician_id == null ? null : String(row.technician_id);
@@ -626,7 +643,6 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 vehicle_type: row.vehicle_type,
                 customerName: row.contact_name || "Customer",
                 address: row.address || "",
-                amount: Number(row.amount || 0),
                 status: normalizedStatus,
                 offer_status: offerStatus || null,
                 location: {
@@ -638,6 +654,8 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 location_lng: Number.isFinite(customerLng) ? customerLng : null,
                 distance: distanceKm,
                 locationDistance: distanceKm != null ? `${distanceKm.toFixed(1)} km` : "Nearby",
+                amount: resolvedOfferAmount,
+                priceAmount: resolvedOfferAmount,
             },
         });
     } catch (err) {
@@ -784,9 +802,9 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             }
         }
 
-        // If tech marks job as completed, move to payment_pending until user payment is finished.
-        if (normalized === 'completed' && String(request.status || '').toLowerCase() !== 'paid') {
-            newStatus = 'payment_pending';
+        // If tech marks work done, move to awaiting_payment until user payment is finished.
+        if (normalized === 'completed' && !['paid', 'completed'].includes(String(request.status || '').toLowerCase())) {
+            newStatus = 'awaiting_payment';
         }
 
         // Timestamp logic
@@ -801,10 +819,12 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             newStatus === 'on-the-way'
         ) {
             timestampUpdate = ", started_at = COALESCE(started_at, NOW()), start_time = COALESCE(start_time, NOW())";
-        } else if (normalized === 'completed' || newStatus === 'payment_pending' || newStatus === 'paid') {
+        } else if (normalized === 'completed' || newStatus === 'awaiting_payment' || newStatus === 'payment_pending' || newStatus === 'paid' || newStatus === 'completed') {
             // mark completed_at
             timestampUpdate = ", completed_at = NOW()";
-            await releaseTechnicianAvailability(pool, technicianId, requestId);
+            if (newStatus === 'paid' || newStatus === 'completed') {
+                await releaseTechnicianAvailability(pool, technicianId, requestId);
+            }
         }
 
         const shouldUpdateAmount = toPositiveMoney(reassignedAmount) != null;
@@ -836,7 +856,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                     newStatus === 'in-progress' ||
                     newStatus === 'in_progress'
                 ) ? new Date().toISOString() : undefined,
-                completed_at: (normalized === 'completed' || newStatus === 'payment_pending') ? new Date().toISOString() : undefined
+                completed_at: (normalized === 'completed' || newStatus === 'awaiting_payment' || newStatus === 'payment_pending') ? new Date().toISOString() : undefined
             });
         }
 
@@ -858,7 +878,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                 emailSubject = "Technician Has Arrived - ResQNow";
                 emailHtml = `<p><b>${techName}</b> has arrived at your location.</p>
                              <p>Please look for them and meet at the specified address.</p>`;
-            } else if (newStatus === 'payment_pending') {
+            } else if (newStatus === 'awaiting_payment' || newStatus === 'payment_pending') {
                 emailSubject = "Service Completed – Payment Pending - ResQNow";
                 emailHtml = `<p>Your ${request.service_type} service has been completed by <b>${techName}</b>.</p>
                              <p>Please complete the payment to finalize the request. You can pay via the app.</p>`;
@@ -906,7 +926,7 @@ router.patch("/:id/status", verifyUser, async (req, res) => {
 
         if (normalized === 'cancelled') {
             // Rule: Cannot cancel if technician has arrived or job is done
-            if (['arrived', 'service_started', 'in-progress', 'in_progress', 'payment_pending', 'completed', 'paid'].includes(String(reqData.status || '').toLowerCase())) {
+            if (['arrived', 'service_started', 'in-progress', 'in_progress', 'awaiting_payment', 'payment_pending', 'completed', 'paid'].includes(String(reqData.status || '').toLowerCase())) {
                 return res.status(400).json({ error: `Cannot cancel request when status is '${reqData.status}'.` });
             }
         }
@@ -1054,7 +1074,7 @@ router.get("/:id", verifyUser, async (req, res) => {
             ...row,
             _id: String(row.id),
             serviceStatus: row.status,
-            paymentStatus: String(row.payment_status || "").toLowerCase() === "completed" ? "paid" : (row.payment_status || null),
+            paymentStatus: ["completed", "paid"].includes(String(row.payment_status || "").toLowerCase()) ? "paid" : (row.payment_status || null),
             technician: row.technician_id ? {
                 id: row.technician_id,
                 name: row.technician_name,
@@ -1093,7 +1113,7 @@ router.post("/:id/payment-order", verifyUser, async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: "Request not found" });
         const request = rows[0];
 
-        if (String(request.payment_status || "").toLowerCase() === "completed" || String(request.status || "").toLowerCase() === "paid") {
+        if (["completed", "paid"].includes(String(request.payment_status || "").toLowerCase()) || ["paid", "completed"].includes(String(request.status || "").toLowerCase())) {
             return res.status(409).json({ error: "Request already paid" });
         }
 
@@ -1197,7 +1217,7 @@ router.post("/:id/verify-payment", verifyUser, async (req, res) => {
         }
 
         const requestRow = reqRows[0];
-        if (String(requestRow.payment_status || "").toLowerCase() === "completed" || String(requestRow.status || "").toLowerCase() === "paid") {
+        if (["completed", "paid"].includes(String(requestRow.payment_status || "").toLowerCase()) || ["paid", "completed"].includes(String(requestRow.status || "").toLowerCase())) {
             return res.json({ success: true, alreadyPaid: true });
         }
 
@@ -1307,7 +1327,7 @@ router.post("/:id/payment-cash", verifyUser, async (req, res) => {
 
             // 1. Update Request
             await conn.execute(
-                "UPDATE service_requests SET payment_status = 'completed', payment_method = 'cash', status = 'paid', amount = ?, updated_at = NOW() WHERE id = ?",
+                "UPDATE service_requests SET payment_status = 'paid', payment_method = 'cash', status = 'completed', amount = ?, updated_at = NOW() WHERE id = ?",
                 [breakdown.baseAmount, requestId]
             );
             if (technicianId) {
@@ -1316,9 +1336,9 @@ router.post("/:id/payment-cash", verifyUser, async (req, res) => {
 
             // 2. Insert Payment Record (Cash)
             await conn.execute(
-                `INSERT INTO payments (user_id, service_request_id, payment_method, status, amount, platform_fee, is_settled) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [userId, requestId, 'cash', 'completed', breakdown.totalAmount, breakdown.platformFee, false]
+                `INSERT INTO payments (user_id, service_request_id, payment_method, status, amount, platform_fee, technician_amount, is_settled) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [userId, requestId, 'cash', 'completed', breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, false]
             );
 
             // 3. Insert Technician Due (CRITICAL REQUIREMENT)
@@ -1387,11 +1407,11 @@ router.post("/:id/payment-cash", verifyUser, async (req, res) => {
 
                 // Notify parties
                 if (technicianId) {
-                    socketService.notifyTechnician(technicianId, 'job:status_update', { requestId, status: 'paid' });
+                    socketService.notifyTechnician(technicianId, 'job:status_update', { requestId, status: 'completed' });
                 }
-                socketService.notifyUser(userId, 'payment_completed', { requestId, status: 'paid' });
+                socketService.notifyUser(userId, 'payment_completed', { requestId, status: 'completed' });
                 // Also emit a job:status_update so existing tracking listeners react
-                socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'paid' });
+                socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'completed' });
 
                 // Send invoice email if we have customer email
                 if (invDetails?.customer_email) {

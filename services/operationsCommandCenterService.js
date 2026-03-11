@@ -18,6 +18,7 @@ const ACTIVE_MONITORING_STATUSES = new Set([
   "en-route",
   "on-the-way",
   "arrived",
+  "awaiting_payment",
   "payment_pending",
 ]);
 

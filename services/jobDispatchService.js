@@ -265,8 +265,6 @@ export const jobDispatchService = {
             }, t, { technicianId: t.id });
             const resolvedOfferAmount =
                 toPositiveMoney(estimatedAmount) ??
-                toPositiveMoney(jobRequest.amount) ??
-                toPositiveMoney(jobRequest.service_charge) ??
                 0;
             const offerPayload = {
                 requestId: jobRequest.id,
@@ -342,6 +340,7 @@ export const jobDispatchService = {
                 "on-the-way",
                 "arrived",
                 "in-progress",
+                "awaiting_payment",
                 "payment_pending",
                 "paid",
             ]);

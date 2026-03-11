@@ -11,6 +11,7 @@ const ACTIVE_JOB_STATUSES = [
   "arrived",
   "in_progress",
   "in-progress",
+  "awaiting_payment",
   "payment_pending",
 ];
 

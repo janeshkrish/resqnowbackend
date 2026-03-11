@@ -216,6 +216,11 @@ const toPositiveMoney = (value) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const toMoneyOrNull = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 const roundMoney = (value) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return 0;
@@ -241,7 +246,7 @@ async function fetchTechnicianFinancialSnapshot(pool, technicianId) {
   };
 }
 
-async function resolveTechnicianJobAmount(jobRow, technicianProfile, pricingConfig = null) {
+async function resolveTechnicianJobAmount(jobRow, technicianProfile, _pricingConfig = null) {
   const techAmount = await estimateTechnicianPayoutAsync(
     { service_type: jobRow?.service_type, vehicle_type: jobRow?.vehicle_type },
     technicianProfile || null,
@@ -249,10 +254,7 @@ async function resolveTechnicianJobAmount(jobRow, technicianProfile, pricingConf
   );
   if (techAmount != null) return techAmount;
 
-  const direct = toPositiveMoney(jobRow?.amount ?? jobRow?.service_charge ?? jobRow?.serviceCharge);
-  if (direct != null) return direct;
-
-  return 0;
+  return null;
 }
 
 const ACTIVE_TECHNICIAN_JOB_STATUSES = Object.freeze([
@@ -268,6 +270,7 @@ const ACTIVE_TECHNICIAN_JOB_STATUSES = Object.freeze([
   "in_progress",
   "in-progress",
   "processing",
+  "awaiting_payment",
   "payment_pending",
 ]);
 
@@ -307,7 +310,7 @@ function buildActiveJobResponse(jobRow, resolvedAmount) {
   const address = toOptionalString(jobRow.address);
   const status = toOptionalString(jobRow.status);
   const description = toOptionalString(jobRow.description);
-  const amount = toPositiveMoney(resolvedAmount ?? jobRow.amount ?? jobRow.service_charge) || 0;
+  const amount = toPositiveMoney(resolvedAmount);
 
   return {
     id,
@@ -793,7 +796,7 @@ router.patch("/me/location", verifyTechnician, async (req, res) => {
           `SELECT id
            FROM service_requests
            WHERE technician_id = ?
-             AND LOWER(COALESCE(status, '')) IN (
+            AND LOWER(COALESCE(status, '')) IN (
                'assigned',
                'accepted',
                'processing',
@@ -803,6 +806,7 @@ router.patch("/me/location", verifyTechnician, async (req, res) => {
                'arrived',
                'in_progress',
                'in-progress',
+               'awaiting_payment',
                'payment_pending'
              )
            ORDER BY updated_at DESC
@@ -1352,7 +1356,7 @@ router.patch("/location", verifyTechnician, async (req, res) => {
           `SELECT id
            FROM service_requests
            WHERE technician_id = ?
-             AND LOWER(COALESCE(status, '')) IN (
+            AND LOWER(COALESCE(status, '')) IN (
                'assigned',
                'accepted',
                'processing',
@@ -1362,6 +1366,7 @@ router.patch("/location", verifyTechnician, async (req, res) => {
                'arrived',
                'in_progress',
                'in-progress',
+               'awaiting_payment',
                'payment_pending'
              )
            ORDER BY updated_at DESC
@@ -1434,11 +1439,11 @@ router.get("/me/active-job-legacy", verifyTechnician, async (req, res) => {
 
     // Find job where status is assigned, accepted, processing, en-route, or in-progress
     // Exclude completed or cancelled matches
-    // Also include 'payment_pending' if you want them to see it before it's fully closed? Yes.
+    // Also include 'awaiting_payment/payment_pending' to keep payment-gated lifecycle visible.
     const [rows] = await pool.query(
       `SELECT * FROM service_requests 
        WHERE technician_id = ?
-      AND status IN('assigned', 'accepted', 'processing', 'en-route', 'in_progress', 'in-progress', 'payment_pending')
+      AND status IN('assigned', 'accepted', 'processing', 'en-route', 'in_progress', 'in-progress', 'awaiting_payment', 'payment_pending')
        ORDER BY created_at DESC LIMIT 1`,
       [technicianId]
     );
@@ -1792,13 +1797,62 @@ router.post("/me/verify-dues", verifyTechnician, async (req, res) => {
 // WILDCARD ROUTES (Must be last)
 // ============================================
 
+const mapTechnicianServicePricingRows = (rows = []) =>
+  (rows || []).map((row) => ({
+    id: row.id,
+    service_domain: row.service_domain || "",
+    service_name: row.service_domain || "",
+    vehicle_type: row.vehicle_type || "",
+    vehicle_type_pricing: row.vehicle_type || "",
+    visit_charge: toMoneyOrNull(row.visit_charge),
+    service_charge: toMoneyOrNull(row.service_charge),
+    extra_km_charge: toMoneyOrNull(row.extra_km_charge),
+    labour_min: toMoneyOrNull(row.labour_min),
+    labour_max: toMoneyOrNull(row.labour_max),
+    delivery_charge: toMoneyOrNull(row.delivery_charge),
+    price_2w_min: toMoneyOrNull(row.price_2w_min),
+    price_2w_max: toMoneyOrNull(row.price_2w_max),
+    price_4w_min: toMoneyOrNull(row.price_4w_min),
+    price_4w_max: toMoneyOrNull(row.price_4w_max),
+  }));
+
 router.get("/:id", verifyAdmin, async (req, res) => {
   try {
     const id = req.params.id;
-    const rows = await db.query("SELECT * FROM technicians WHERE id = ? LIMIT 1", [id]);
-    const row = rows[0];
+    const pool = await db.getPool();
+    const [rows] = await pool.query("SELECT * FROM technicians WHERE id = ? LIMIT 1", [id]);
+    const row = rows?.[0];
     if (!row) return res.status(404).json({ error: "Technician not found." });
-    return res.json(rowToTechnician(row));
+
+    const [serviceRows] = await pool.query(
+      `SELECT
+         id,
+         service_domain,
+         vehicle_type,
+         visit_charge,
+         service_charge,
+         extra_km_charge,
+         labour_min,
+         labour_max,
+         delivery_charge,
+         price_2w_min,
+         price_2w_max,
+         price_4w_min,
+         price_4w_max
+       FROM technician_services
+       WHERE technician_id = ?
+       ORDER BY service_domain ASC, vehicle_type ASC, updated_at DESC, id DESC`,
+      [id]
+    );
+
+    const technician = rowToTechnician(row);
+    if (Array.isArray(serviceRows) && serviceRows.length > 0) {
+      const pricingRows = mapTechnicianServicePricingRows(serviceRows);
+      technician.service_costs = pricingRows;
+      technician.services_pricing = pricingRows;
+    }
+
+    return res.json(technician);
   } catch (err) {
     return res.status(500).json({ error: err.message || "Failed to fetch technician." });
   }

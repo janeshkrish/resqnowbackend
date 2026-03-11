@@ -8,6 +8,7 @@ const ACTIVE_JOB_STATUSES = new Set([
   "arrived",
   "in_progress",
   "in-progress",
+  "awaiting_payment",
   "payment_pending",
 ]);
 
@@ -103,6 +104,7 @@ export async function reconcileTechnicianAvailability(connOrPool) {
            'arrived',
            'in_progress',
            'in-progress',
+           'awaiting_payment',
            'payment_pending'
          )
        GROUP BY sr.technician_id

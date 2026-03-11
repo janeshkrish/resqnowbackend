@@ -678,6 +678,51 @@ async function replaceTechnicianServicePricingRows(conn, technicianId, entries) 
   await conn.query(query);
 }
 
+router.put("/technician/:id/pricing", async (req, res) => {
+  const technicianId = Number(req.params.id);
+  if (!Number.isInteger(technicianId) || technicianId <= 0) {
+    return res.status(400).json({ error: "Invalid technician id." });
+  }
+
+  const serviceCostsInput = req.body?.service_costs ?? req.body?.services_pricing ?? req.body?.pricing_config;
+  if (serviceCostsInput == null) {
+    return res.status(400).json({ error: "service_costs is required." });
+  }
+
+  const normalizedEntries = normalizeServiceCostEntries(serviceCostsInput);
+  const pool = await db.getPool();
+  const conn = await pool.getConnection();
+
+  try {
+    await conn.beginTransaction();
+    const [existingRows] = await conn.query("SELECT id FROM technicians WHERE id = ? LIMIT 1", [technicianId]);
+    if (!Array.isArray(existingRows) || existingRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Technician not found." });
+    }
+
+    await replaceTechnicianServicePricingRows(conn, technicianId, normalizedEntries);
+    await conn.execute(
+      "UPDATE technicians SET service_costs = ? WHERE id = ?",
+      [JSON.stringify(normalizedEntries), technicianId]
+    );
+
+    await conn.commit();
+    return res.json({
+      success: true,
+      message: "Technician pricing updated successfully.",
+      technician_id: technicianId,
+      service_costs: normalizedEntries,
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error("[Admin technician pricing update]", err);
+    return res.status(500).json({ error: "Failed to update technician pricing." });
+  } finally {
+    conn.release();
+  }
+});
+
 router.put("/update-technician/:id", async (req, res) => {
   const technicianId = Number(req.params.id);
   if (!Number.isInteger(technicianId) || technicianId <= 0) {

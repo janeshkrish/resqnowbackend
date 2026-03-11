@@ -402,7 +402,7 @@ class NotificationService {
       } else if (status === "in-progress") {
         title = "Service Started";
         body = "Your technician has started working on your request.";
-      } else if (status === "completed" || status === "payment_pending") {
+      } else if (status === "completed" || status === "awaiting_payment" || status === "payment_pending") {
         title = "Service Completed";
         body = "Service is complete. Please finish payment to close the request.";
       } else if (status === "paid") {
