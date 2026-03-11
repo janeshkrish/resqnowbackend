@@ -1,9 +1,16 @@
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "./serviceNormalization.js";
 import { getPlatformPricingConfig, getServiceMatrixAmount } from "./platformPricing.js";
+import * as db from "../db.js";
 
 const toNum = (v) => {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+const roundMoney = (value) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.round((parsed + Number.EPSILON) * 100) / 100;
 };
 
 const safeParse = (value) => {
@@ -159,6 +166,72 @@ const normalizeVehicleHint = (value) => {
   return "";
 };
 
+let technicianServicesLookupEnabled = true;
+
+const toTechnicianId = (value) => {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
+
+const toStoredVehicleKey = (value) => {
+  const canonical = canonicalizeVehicleFamily(value);
+  return canonical || "";
+};
+
+const resolveVehicleSpecificServicePrice = (row, vehicle) => {
+  if (!row || !vehicle) return null;
+  if (vehicle === "bike") {
+    return toNum(row.price_2w_min ?? row.price_2w_max);
+  }
+  if (vehicle === "car" || vehicle === "commercial" || vehicle === "ev") {
+    return toNum(row.price_4w_min ?? row.price_4w_max);
+  }
+  return null;
+};
+
+const calculateTechnicianServiceRowPayout = (row, vehicle) => {
+  if (!row) return null;
+  const visitCharge = toNum(row.visit_charge) || 0;
+  const deliveryCharge = toNum(row.delivery_charge) || 0;
+  const coreServiceCharge =
+    resolveVehicleSpecificServicePrice(row, vehicle) ??
+    toNum(row.service_charge) ??
+    toNum(row.labour_min) ??
+    0;
+  const payout = visitCharge + deliveryCharge + coreServiceCharge;
+  return payout > 0 ? roundMoney(payout) : null;
+};
+
+async function fromTechnicianServicesTable({ technicianId, domain, vehicle }) {
+  const normalizedTechId = toTechnicianId(technicianId);
+  if (!technicianServicesLookupEnabled || !normalizedTechId || !domain || !vehicle) return null;
+
+  try {
+    const pool = await db.getPool();
+    const vehicleKey = toStoredVehicleKey(vehicle);
+    const [rows] = await pool.query(
+      `SELECT *
+       FROM technician_services
+       WHERE technician_id = ?
+         AND service_domain = ?
+         AND (vehicle_type = ? OR vehicle_type = '')
+       ORDER BY CASE WHEN vehicle_type = ? THEN 0 ELSE 1 END, updated_at DESC, id DESC
+       LIMIT 1`,
+      [normalizedTechId, domain, vehicleKey, vehicleKey]
+    );
+
+    const row = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+    return calculateTechnicianServiceRowPayout(row, vehicle);
+  } catch (err) {
+    const code = String(err?.code || "").toUpperCase();
+    const message = String(err?.message || "");
+    if (code === "ER_NO_SUCH_TABLE" || /technician_services/i.test(message)) {
+      technicianServicesLookupEnabled = false;
+    }
+    return null;
+  }
+}
+
 const getEntryVehicleMatchState = (entry, vehicle) => {
   if (!entry || typeof entry !== "object" || !vehicle) return null;
   const hints = [
@@ -242,6 +315,29 @@ function fromTechnicianPricing(tech, domain, vehicle) {
   return null;
 }
 
+export async function estimateTechnicianPayoutAsync(
+  { service_type, vehicle_type },
+  tech = null,
+  options = {}
+) {
+  const domain = canonicalizeServiceDomain(String(service_type || "").replace(/^(car|bike|ev|commercial)-/i, ""));
+  const vehicle = canonicalizeVehicleFamily(vehicle_type || String(service_type || "").split("-")[0]);
+  if (!domain || !vehicle) return null;
+
+  const technicianId = options?.technicianId ?? tech?.id ?? tech?.technician_id ?? null;
+  const tableAmount = await fromTechnicianServicesTable({
+    technicianId,
+    domain,
+    vehicle
+  });
+  if (tableAmount != null) return tableAmount;
+
+  const techAmount = tech ? fromTechnicianPricing(tech, domain, vehicle) : null;
+  if (techAmount != null) return techAmount;
+
+  return null;
+}
+
 export function estimateRequestAmount({ service_type, vehicle_type }, tech = null) {
   const domain = canonicalizeServiceDomain(String(service_type || "").replace(/^(car|bike|ev|commercial)-/i, ""));
   const vehicle = canonicalizeVehicleFamily(vehicle_type || String(service_type || "").split("-")[0]);
@@ -257,7 +353,11 @@ export async function estimateRequestAmountAsync(
   tech = null,
   pricingConfig = null
 ) {
-  const techAmount = estimateRequestAmount({ service_type, vehicle_type }, tech);
+  const techAmount = await estimateTechnicianPayoutAsync(
+    { service_type, vehicle_type },
+    tech,
+    { technicianId: tech?.id ?? tech?.technician_id ?? null }
+  );
   if (techAmount != null) return techAmount;
 
   const config = pricingConfig || await getPlatformPricingConfig();

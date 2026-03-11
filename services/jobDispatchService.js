@@ -8,8 +8,7 @@ import {
     parseVehicleTypes,
     serviceDomainsFromCosts,
 } from "./serviceNormalization.js";
-import { estimateRequestAmountAsync } from "./pricingEstimator.js";
-import { getPlatformPricingConfig } from "./platformPricing.js";
+import { estimateTechnicianPayoutAsync } from "./pricingEstimator.js";
 import { markTechnicianReserved } from "./technicianStateService.js";
 
 
@@ -236,7 +235,6 @@ export const jobDispatchService = {
     async dispatchJob(jobRequest, technicians) {
         if (!technicians || technicians.length === 0) return;
         const pool = await db.getPool();
-        const pricingConfig = await getPlatformPricingConfig();
 
         // De-duplicate by existing offers so a technician gets one active alert per request
         const [existingOffers] = await pool.query(
@@ -261,10 +259,15 @@ export const jobDispatchService = {
 
         // 2. Send WebSocket Alerts
         for (const t of freshTechnicians) {
-            const estimatedAmount = await estimateRequestAmountAsync({
+            const estimatedAmount = await estimateTechnicianPayoutAsync({
                 service_type: jobRequest.service_type,
                 vehicle_type: jobRequest.vehicle_type
-            }, t, pricingConfig);
+            }, t, { technicianId: t.id });
+            const resolvedOfferAmount =
+                toPositiveMoney(estimatedAmount) ??
+                toPositiveMoney(jobRequest.amount) ??
+                toPositiveMoney(jobRequest.service_charge) ??
+                0;
             const offerPayload = {
                 requestId: jobRequest.id,
                 serviceType: jobRequest.service_type,
@@ -272,8 +275,8 @@ export const jobDispatchService = {
                 location: { lat: jobRequest.location_lat, lng: jobRequest.location_lng },
                 address: jobRequest.address,
                 customerName: jobRequest.contact_name || "Valued Customer",
-                amount: estimatedAmount,
-                priceAmount: estimatedAmount,
+                amount: resolvedOfferAmount,
+                priceAmount: resolvedOfferAmount,
                 distance: t.distanceText,
                 locationDistance: t.distanceText,
                 eta: t.etaText,
@@ -353,14 +356,13 @@ export const jobDispatchService = {
                 return { success: false, code: "technician_not_found", reason: "Technician not found" };
             }
             tech = techRows[0];
-            const pricingConfig = await getPlatformPricingConfig();
-            const estimatedAmount = await estimateRequestAmountAsync(
+            const estimatedAmount = await estimateTechnicianPayoutAsync(
                 {
                     service_type: sourceJob?.service_type,
                     vehicle_type: sourceJob?.vehicle_type
                 },
                 tech,
-                pricingConfig
+                { technicianId }
             );
             assignedAmount =
                 toPositiveMoney(estimatedAmount) ??

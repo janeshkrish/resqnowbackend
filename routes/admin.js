@@ -550,6 +550,229 @@ router.post("/dispatch-retry/:requestId", async (req, res) => {
 
 // --- Technician management (admin only) ---
 
+const safeJsonParse = (value, fallback) => {
+  if (value == null) return fallback;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return value;
+};
+
+const toNonNegativeMoney = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+};
+
+const normalizeStringArray = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+};
+
+const normalizeServiceCostEntries = (value) => {
+  const parsed = safeJsonParse(value, value);
+  const rows = [];
+
+  if (Array.isArray(parsed)) {
+    rows.push(...parsed);
+  } else if (parsed && typeof parsed === "object") {
+    Object.entries(parsed).forEach(([serviceName, config]) => {
+      if (config && typeof config === "object") {
+        rows.push({ service_name: serviceName, ...config });
+      } else {
+        rows.push({ service_name: serviceName, service_charge: config });
+      }
+    });
+  }
+
+  return rows
+    .map((entry) => {
+      const row = entry && typeof entry === "object" ? entry : {};
+      const serviceDomain = canonicalizeServiceDomain(
+        row.service_domain ||
+        row.service_name ||
+        row.serviceType ||
+        row.service ||
+        row.domain
+      );
+      if (!serviceDomain) return null;
+
+      const vehicleType =
+        canonicalizeVehicleFamily(
+          row.vehicle_type_pricing ||
+          row.vehicle_type ||
+          row.vehicleType ||
+          row.vehicle
+        ) || "";
+
+      return {
+        service_domain: serviceDomain,
+        vehicle_type: vehicleType,
+        visit_charge: toNonNegativeMoney(row.visit_charge ?? row.visitCharge ?? row.base_charge ?? row.baseCharge),
+        service_charge: toNonNegativeMoney(row.service_charge ?? row.serviceCharge ?? row.amount ?? row.price),
+        extra_km_charge: toNonNegativeMoney(row.extra_km_charge ?? row.extraKmCharge),
+        labour_min: toNonNegativeMoney(row.labour_min ?? row.labourMin),
+        labour_max: toNonNegativeMoney(row.labour_max ?? row.labourMax),
+        delivery_charge: toNonNegativeMoney(row.delivery_charge ?? row.deliveryCharge),
+        price_2w_min: toNonNegativeMoney(row.price_2w_min ?? row.price2wmin ?? row.price_2w),
+        price_2w_max: toNonNegativeMoney(row.price_2w_max ?? row.price2wmax),
+        price_4w_min: toNonNegativeMoney(row.price_4w_min ?? row.price4wmin ?? row.price_4w),
+        price_4w_max: toNonNegativeMoney(row.price_4w_max ?? row.price4wmax),
+        metadata: row,
+      };
+    })
+    .filter(Boolean);
+};
+
+async function replaceTechnicianServicePricingRows(conn, technicianId, entries) {
+  await conn.execute("DELETE FROM technician_services WHERE technician_id = ?", [technicianId]);
+  if (!Array.isArray(entries) || entries.length === 0) return;
+
+  const values = entries.map((entry) => ([
+    technicianId,
+    entry.service_domain,
+    entry.vehicle_type || "",
+    entry.visit_charge,
+    entry.service_charge,
+    entry.extra_km_charge,
+    entry.labour_min,
+    entry.labour_max,
+    entry.delivery_charge,
+    entry.price_2w_min,
+    entry.price_2w_max,
+    entry.price_4w_min,
+    entry.price_4w_max,
+    JSON.stringify(entry.metadata || {})
+  ]));
+
+  const query = conn.format(
+    `INSERT INTO technician_services (
+      technician_id,
+      service_domain,
+      vehicle_type,
+      visit_charge,
+      service_charge,
+      extra_km_charge,
+      labour_min,
+      labour_max,
+      delivery_charge,
+      price_2w_min,
+      price_2w_max,
+      price_4w_min,
+      price_4w_max,
+      metadata
+    ) VALUES ?`,
+    [values]
+  );
+  await conn.query(query);
+}
+
+router.put("/update-technician/:id", async (req, res) => {
+  const technicianId = Number(req.params.id);
+  if (!Number.isInteger(technicianId) || technicianId <= 0) {
+    return res.status(400).json({ error: "Invalid technician id." });
+  }
+
+  const pool = await db.getPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [existingRows] = await conn.query("SELECT * FROM technicians WHERE id = ? LIMIT 1", [technicianId]);
+    if (!Array.isArray(existingRows) || existingRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Technician not found." });
+    }
+    const existing = existingRows[0];
+
+    const shopName = String(req.body?.shop_name ?? req.body?.name ?? existing.name ?? "").trim();
+    if (!shopName) {
+      await conn.rollback();
+      return res.status(400).json({ error: "Shop name is required." });
+    }
+
+    const proprietorName = String(req.body?.proprietor_name ?? existing.proprietor_name ?? "").trim();
+    const contactNumber = String(req.body?.contact ?? req.body?.phone ?? existing.phone ?? "").trim();
+    const address = String(req.body?.address ?? existing.address ?? "").trim();
+
+    const incomingServices = normalizeStringArray(req.body?.services ?? req.body?.specialties);
+    const currentServices = normalizeStringArray(safeJsonParse(existing.specialties, []));
+    const specialties = incomingServices.length > 0 ? incomingServices : currentServices;
+    const primaryService =
+      canonicalizeServiceDomain(req.body?.service_type || specialties[0] || existing.service_type || "other") ||
+      canonicalizeServiceDomain(existing.service_type) ||
+      "other";
+
+    const serviceCostsInput = req.body?.service_costs ?? req.body?.services_pricing ?? req.body?.pricing_config;
+    const serviceCostsNormalized =
+      serviceCostsInput != null
+        ? normalizeServiceCostEntries(serviceCostsInput)
+        : safeJsonParse(existing.service_costs, []);
+
+    const pricingInput = req.body?.pricing;
+    const pricing = pricingInput != null ? safeJsonParse(pricingInput, {}) : safeJsonParse(existing.pricing, {});
+
+    const documentsInput = req.body?.verification_images ?? req.body?.documents;
+    const documents =
+      documentsInput != null
+        ? safeJsonParse(documentsInput, {})
+        : safeJsonParse(existing.documents, {});
+
+    await conn.execute(
+      `UPDATE technicians
+       SET name = ?,
+           proprietor_name = ?,
+           phone = ?,
+           address = ?,
+           service_type = ?,
+           specialties = ?,
+           pricing = ?,
+           service_costs = ?,
+           documents = ?
+       WHERE id = ?`,
+      [
+        shopName,
+        proprietorName || null,
+        contactNumber || null,
+        address || null,
+        primaryService,
+        JSON.stringify(specialties),
+        JSON.stringify(pricing && typeof pricing === "object" ? pricing : {}),
+        JSON.stringify(Array.isArray(serviceCostsNormalized) ? serviceCostsNormalized : []),
+        JSON.stringify(documents && typeof documents === "object" ? documents : {}),
+        technicianId
+      ]
+    );
+
+    if (serviceCostsInput != null) {
+      await replaceTechnicianServicePricingRows(conn, technicianId, serviceCostsNormalized);
+    }
+
+    await conn.commit();
+    const [updatedRows] = await pool.query("SELECT * FROM technicians WHERE id = ? LIMIT 1", [technicianId]);
+    return res.json({
+      message: "Technician updated successfully.",
+      technician: Array.isArray(updatedRows) && updatedRows.length > 0 ? updatedRows[0] : null
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error("[Admin update-technician]", err);
+    return res.status(500).json({ error: "Failed to update technician." });
+  } finally {
+    conn.release();
+  }
+});
+
 router.get("/technicians", async (req, res) => {
   try {
     const status = (req.query.status || "").toLowerCase();

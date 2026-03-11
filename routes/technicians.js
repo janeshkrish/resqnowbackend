@@ -14,7 +14,7 @@ import {
   normalizeVehicleTypes,
   normalizeServiceCosts,
 } from "../services/serviceNormalization.js";
-import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/pricingEstimator.js";
+import { estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
 import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js";
 
@@ -242,22 +242,17 @@ async function fetchTechnicianFinancialSnapshot(pool, technicianId) {
 }
 
 async function resolveTechnicianJobAmount(jobRow, technicianProfile, pricingConfig = null) {
-  const techAmount = technicianProfile
-    ? estimateRequestAmount(
-      { service_type: jobRow?.service_type, vehicle_type: jobRow?.vehicle_type },
-      technicianProfile
-    )
-    : null;
+  const techAmount = await estimateTechnicianPayoutAsync(
+    { service_type: jobRow?.service_type, vehicle_type: jobRow?.vehicle_type },
+    technicianProfile || null,
+    { technicianId: technicianProfile?.id ?? jobRow?.technician_id ?? null }
+  );
   if (techAmount != null) return techAmount;
 
   const direct = toPositiveMoney(jobRow?.amount ?? jobRow?.service_charge ?? jobRow?.serviceCharge);
   if (direct != null) return direct;
 
-  return estimateRequestAmountAsync(
-    { service_type: jobRow?.service_type, vehicle_type: jobRow?.vehicle_type },
-    technicianProfile || null,
-    pricingConfig
-  );
+  return 0;
 }
 
 const ACTIVE_TECHNICIAN_JOB_STATUSES = Object.freeze([

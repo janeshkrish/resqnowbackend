@@ -189,6 +189,48 @@ export async function ensureServiceRequestsTable() {
   await p.execute(SERVICE_REQUESTS_TABLE_SQL);
 }
 
+const TECHNICIAN_SERVICES_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS technician_services (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  technician_id INT NOT NULL,
+  service_domain VARCHAR(100) NOT NULL,
+  vehicle_type VARCHAR(32) NOT NULL DEFAULT '',
+  visit_charge DECIMAL(10, 2) NULL,
+  service_charge DECIMAL(10, 2) NULL,
+  extra_km_charge DECIMAL(10, 2) NULL,
+  labour_min DECIMAL(10, 2) NULL,
+  labour_max DECIMAL(10, 2) NULL,
+  delivery_charge DECIMAL(10, 2) NULL,
+  price_2w_min DECIMAL(10, 2) NULL,
+  price_2w_max DECIMAL(10, 2) NULL,
+  price_4w_min DECIMAL(10, 2) NULL,
+  price_4w_max DECIMAL(10, 2) NULL,
+  metadata JSON,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_technician_services (technician_id, service_domain, vehicle_type),
+  INDEX idx_technician_services_lookup (technician_id, service_domain),
+  FOREIGN KEY (technician_id) REFERENCES technicians(id)
+)
+`.trim();
+
+export async function ensureTechnicianServicesTable() {
+  const p = await getPool();
+  await p.execute(TECHNICIAN_SERVICES_TABLE_SQL);
+  await addColumnIfNotExists(p, "technician_services", "vehicle_type VARCHAR(32) NOT NULL DEFAULT ''");
+  await addColumnIfNotExists(p, "technician_services", "visit_charge DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "service_charge DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "extra_km_charge DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "labour_min DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "labour_max DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "delivery_charge DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "price_2w_min DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "price_2w_max DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "price_4w_min DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "price_4w_max DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "metadata JSON");
+}
+
 const DISPATCH_OFFERS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS dispatch_offers (
   id INT AUTO_INCREMENT PRIMARY KEY,
