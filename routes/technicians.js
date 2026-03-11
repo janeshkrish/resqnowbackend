@@ -260,6 +260,133 @@ async function resolveTechnicianJobAmount(jobRow, technicianProfile, pricingConf
   );
 }
 
+const ACTIVE_TECHNICIAN_JOB_STATUSES = Object.freeze([
+  "assigned",
+  "technician_assigned",
+  "accepted",
+  "service_started",
+  "en-route",
+  "en_route",
+  "on-the-way",
+  "on_the_way",
+  "arrived",
+  "in_progress",
+  "in-progress",
+  "processing",
+  "payment_pending",
+]);
+
+const normalizeIdentifier = (value) => String(value ?? "").trim();
+
+const toOptionalString = (value) => {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized : null;
+};
+
+const toOptionalNumber = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
+const toOptionalPhone = (value) => {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const compact = raw.replace(/[^\d+]/g, "");
+  return compact || null;
+};
+
+function buildActiveJobResponse(jobRow, resolvedAmount) {
+  if (!jobRow) return null;
+
+  const id = String(jobRow.id ?? "");
+  const serviceType = toOptionalString(jobRow.service_type);
+  const vehicleType = toOptionalString(jobRow.vehicle_type);
+  const vehicleModel = toOptionalString(jobRow.vehicle_model);
+  const vehicleDetails = [vehicleType, vehicleModel].filter(Boolean).join(" ").trim() || null;
+  const customerName = toOptionalString(jobRow.contact_name) || toOptionalString(jobRow.user_name);
+  const phoneNumber = toOptionalPhone(jobRow.contact_phone) || toOptionalPhone(jobRow.user_phone);
+  const pickupLatitude = toOptionalNumber(jobRow.customer_location_lat ?? jobRow.location_lat);
+  const pickupLongitude = toOptionalNumber(jobRow.customer_location_lng ?? jobRow.location_lng);
+  const destinationLatitude = toOptionalNumber(jobRow.destination_lat ?? jobRow.destinationLatitude);
+  const destinationLongitude = toOptionalNumber(jobRow.destination_lng ?? jobRow.destinationLongitude);
+  const address = toOptionalString(jobRow.address);
+  const status = toOptionalString(jobRow.status);
+  const description = toOptionalString(jobRow.description);
+  const amount = toPositiveMoney(resolvedAmount ?? jobRow.amount ?? jobRow.service_charge) || 0;
+
+  return {
+    id,
+    requestId: id,
+    customerName,
+    serviceType,
+    vehicleDetails,
+    phoneNumber,
+    pickupLatitude,
+    pickupLongitude,
+    destinationLatitude,
+    destinationLongitude,
+    jobStatus: status,
+    amount,
+    address,
+    description,
+    status,
+    contact_name: customerName,
+    contact_phone: phoneNumber,
+    service_type: serviceType,
+    vehicle_type: vehicleType,
+    vehicle_model: vehicleModel,
+    location_lat: pickupLatitude,
+    location_lng: pickupLongitude,
+    location: {
+      lat: pickupLatitude,
+      lng: pickupLongitude,
+      address,
+    },
+    user: {
+      name: customerName,
+      phone: phoneNumber,
+    },
+    service: {
+      type: serviceType,
+      description,
+    },
+    vehicle: {
+      type: vehicleType,
+      model: vehicleModel,
+      details: vehicleDetails,
+    },
+  };
+}
+
+async function fetchActiveTechnicianJob(technicianId) {
+  const normalizedTechnicianId = normalizeIdentifier(technicianId);
+  if (!normalizedTechnicianId) return null;
+
+  const pool = await db.getPool();
+  const statusPlaceholders = ACTIVE_TECHNICIAN_JOB_STATUSES.map(() => "?").join(", ");
+  const [rows] = await pool.query(
+    `SELECT sr.*, u.full_name AS user_name, u.phone AS user_phone
+     FROM service_requests sr
+     LEFT JOIN users u ON sr.user_id = u.id
+     WHERE sr.technician_id = ?
+       AND LOWER(COALESCE(sr.status, '')) IN (${statusPlaceholders})
+     ORDER BY sr.updated_at DESC, sr.created_at DESC
+     LIMIT 1`,
+    [normalizedTechnicianId, ...ACTIVE_TECHNICIAN_JOB_STATUSES]
+  );
+
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+
+  const job = rows[0];
+  const [techRows] = await pool.query(
+    "SELECT pricing, service_costs FROM technicians WHERE id = ? LIMIT 1",
+    [normalizedTechnicianId]
+  );
+  const pricingConfig = await getPlatformPricingConfig();
+  const resolvedAmount = await resolveTechnicianJobAmount(job, techRows?.[0] || null, pricingConfig);
+  return buildActiveJobResponse(job, resolvedAmount);
+}
+
 // Get technician's service requests
 router.get("/requests", verifyTechnician, async (req, res) => {
   try {
@@ -719,45 +846,30 @@ router.patch("/me/location", verifyTechnician, async (req, res) => {
 
 router.get("/me/active-job", verifyTechnician, async (req, res) => {
   try {
-    const pool = await db.getPool();
-    // Find any job that is NOT completed or cancelled
-    const [rows] = await pool.query(
-      `SELECT * FROM service_requests 
-       WHERE technician_id = ? 
-       AND status NOT IN ('completed', 'cancelled', 'rejected') 
-       ORDER BY created_at DESC LIMIT 1`,
-      [req.technicianId]
-    );
-    console.log(`[Active Job] Tech: ${req.technicianId}, Found: ${rows.length}, Status: ${rows[0]?.status}`);
+    const activeJob = await fetchActiveTechnicianJob(req.technicianId);
+    return res.json(activeJob);
+  } catch (err) {
+    console.error("[Technician] me/active-job error:", err);
+    return res.status(500).json({ error: "Failed to fetch active job." });
+  }
+});
 
-    if (rows.length === 0) {
-      return res.json(null);
+router.get("/active-job/:techId", verifyTechnician, async (req, res) => {
+  try {
+    const requestedTechId = normalizeIdentifier(req.params.techId);
+    const authenticatedTechId = normalizeIdentifier(req.technicianId);
+
+    if (!requestedTechId) {
+      return res.status(400).json({ error: "Valid technician id is required." });
+    }
+    if (authenticatedTechId && authenticatedTechId !== requestedTechId) {
+      return res.status(403).json({ error: "Forbidden" });
     }
 
-    const job = rows[0];
-    // Fetch customer info
-    const [users] = await pool.query("SELECT full_name, phone FROM users WHERE id = ?", [job.user_id]);
-    const [techRows] = await pool.query(
-      "SELECT pricing, service_costs FROM technicians WHERE id = ? LIMIT 1",
-      [req.technicianId]
-    );
-    const pricingConfig = await getPlatformPricingConfig();
-    const resolvedAmount = await resolveTechnicianJobAmount(job, techRows?.[0] || null, pricingConfig);
-
-    return res.json({
-      id: String(job.id),
-      contact_name: users[0]?.full_name || "Customer",
-      contact_phone: users[0]?.phone || job.contact_phone || null,
-      service_type: job.service_type,
-      vehicle_type: job.vehicle_type,
-      vehicle_model: job.vehicle_model,
-      location: { lat: job.location_lat, lng: job.location_lng, address: job.address },
-      address: job.address, // Added top-level address
-      status: job.status,
-      distance: 0,
-      amount: resolvedAmount
-    });
-  } catch {
+    const activeJob = await fetchActiveTechnicianJob(requestedTechId);
+    return res.json(activeJob);
+  } catch (err) {
+    console.error("[Technician] active-job/:techId error:", err);
     return res.status(500).json({ error: "Failed to fetch active job." });
   }
 });
@@ -765,49 +877,8 @@ router.get("/me/active-job", verifyTechnician, async (req, res) => {
 // New endpoint to match spec: GET /api/technician/current-job
 router.get('/current-job', verifyTechnician, async (req, res) => {
   try {
-    const pool = await db.getPool();
-    const [rows] = await pool.query(
-      `SELECT sr.*, u.full_name as user_name, u.phone as user_phone
-       FROM service_requests sr
-       LEFT JOIN users u ON sr.user_id = u.id
-       WHERE sr.technician_id = ?
-      AND sr.status NOT IN('completed', 'cancelled', 'rejected')
-       ORDER BY sr.created_at DESC LIMIT 1`,
-      [req.technicianId]
-    );
-
-    if (rows.length === 0) return res.json(null);
-
-    const job = rows[0];
-    const [techRows] = await pool.query(
-      "SELECT pricing, service_costs FROM technicians WHERE id = ? LIMIT 1",
-      [req.technicianId]
-    );
-    const pricingConfig = await getPlatformPricingConfig();
-    const resolvedAmount = await resolveTechnicianJobAmount(job, techRows?.[0] || null, pricingConfig);
-
-    return res.json({
-      requestId: job.id,
-      status: job.status,
-      amount: resolvedAmount,
-      user: {
-        name: job.user_name || 'Not Available',
-        phone: job.user_phone || job.contact_phone || 'Not Available'
-      },
-      service: {
-        type: job.service_type || 'Not Available',
-        description: job.description || 'Not Available'
-      },
-      vehicle: {
-        type: job.vehicle_type || 'Not Available',
-        model: job.vehicle_model || 'Not Available'
-      },
-      location: {
-        lat: job.location_lat || null,
-        lng: job.location_lng || null,
-        address: job.address || 'Not Available'
-      }
-    });
+    const activeJob = await fetchActiveTechnicianJob(req.technicianId);
+    return res.json(activeJob);
   } catch (err) {
     console.error('[Technician] current-job error:', err);
     return res.status(500).json({ error: 'Failed to fetch current job.' });
