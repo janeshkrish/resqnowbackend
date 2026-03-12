@@ -1677,13 +1677,33 @@ router.get("/me/reviews", verifyTechnician, async (req, res) => {
 
 router.get("/me/notifications", verifyTechnician, async (req, res) => {
   try {
+    const technicianId = req.technicianId;
     const pool = await db.getPool();
-    // In a real app, notifications might be filtered by receiver_id, 
-    // but the current schema suggests a global notifications table or we need to add receiver_id.
-    // For now, let's fetch notifications and assume technician specific ones are needed later.
-    // Actually, looking at the schema, it's generic. Let's fetch the latest 20.
     const [rows] = await pool.query(
-      "SELECT * FROM notifications ORDER BY created_at DESC LIMIT 20"
+      `
+      SELECT
+        CONCAT('offer-', d.id) AS id,
+        'job_offer' AS type,
+        'New job request' AS title,
+        CONCAT(
+          'Service: ',
+          COALESCE(sr.service_type, 'Roadside assistance'),
+          CASE
+            WHEN COALESCE(sr.address, '') = '' THEN ''
+            ELSE CONCAT(' at ', sr.address)
+          END
+        ) AS message,
+        FALSE AS is_read,
+        COALESCE(d.sent_at, sr.updated_at, sr.created_at) AS created_at
+      FROM dispatch_offers d
+      JOIN service_requests sr ON sr.id = d.service_request_id
+      WHERE d.technician_id = ?
+        AND LOWER(COALESCE(d.status, '')) = 'pending'
+        AND LOWER(COALESCE(sr.status, '')) IN ('pending', 'assigned', 'technician_assigned')
+      ORDER BY COALESCE(d.sent_at, sr.updated_at, sr.created_at) DESC
+      LIMIT 20
+      `,
+      [technicianId]
     );
     return res.json(rows);
   } catch (err) {

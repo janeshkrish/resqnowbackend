@@ -708,6 +708,13 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             return res.status(404).json({ error: "Request not found or not assigned to you." });
         }
         const request = requests[0];
+        const currentRequestStatus = normalizeStatus(request.status);
+        const rejectableOfferStatuses = new Set(["pending", "assigned", "technician_assigned"]);
+        if (normalized === "rejected" && !rejectableOfferStatuses.has(currentRequestStatus)) {
+            return res.status(409).json({
+                error: `Cannot reject request when status is '${request.status || currentRequestStatus || "unknown"}'.`
+            });
+        }
 
         // Fetch user and tech info upfront
         const [users] = await pool.query("SELECT email, full_name FROM users WHERE id = ?", [request.user_id]);
