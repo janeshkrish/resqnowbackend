@@ -127,6 +127,20 @@ function resolveAdminId(req) {
   return String(req.adminEmail || req.admin?.email || "admin");
 }
 
+function emitAdminNotification(req, payload = {}) {
+  const title = String(payload.title || "").trim();
+  const message = String(payload.message || "").trim();
+  if (!title || !message) return;
+
+  req.io?.emit?.("admin:notification", {
+    id: payload.id ?? null,
+    type: payload.type || ADMIN_NOTIFICATION_TYPES.SYSTEM_ALERT,
+    title,
+    message,
+    created_at: payload.created_at || new Date().toISOString(),
+  });
+}
+
 function normalizeTechnicianIds(value) {
   if (!Array.isArray(value)) return [];
   return Array.from(
@@ -162,6 +176,12 @@ async function sendAdminSystemAnnouncement(req, res) {
     metadata: req.body?.metadata || null,
   });
   const notificationId = await persistAdminSystemAlert(title, message);
+  emitAdminNotification(req, {
+    id: notificationId,
+    type: ADMIN_NOTIFICATION_TYPES.SYSTEM_ALERT,
+    title,
+    message,
+  });
   return res.status(201).json({ success: true, notificationId, payload });
 }
 
@@ -185,6 +205,12 @@ async function sendAdminTechnicianBroadcast(req, res) {
     technicianIds,
   });
   const notificationId = await persistAdminSystemAlert(title, message);
+  emitAdminNotification(req, {
+    id: notificationId,
+    type: ADMIN_NOTIFICATION_TYPES.SYSTEM_ALERT,
+    title,
+    message,
+  });
   return res.status(201).json({ success: true, notificationId, payload });
 }
 
@@ -206,6 +232,12 @@ async function sendAdminEmergencyMessage(req, res) {
     },
   });
   const notificationId = await persistAdminSystemAlert(title, message);
+  emitAdminNotification(req, {
+    id: notificationId,
+    type: ADMIN_NOTIFICATION_TYPES.SYSTEM_ALERT,
+    title,
+    message,
+  });
   return res.status(201).json({ success: true, notificationId, payload });
 }
 

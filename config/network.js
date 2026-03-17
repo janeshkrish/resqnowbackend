@@ -168,7 +168,14 @@ export function buildCorsOptions() {
     },
     credentials: true,
     methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Cache-Control",
+      "Pragma",
+      "Last-Event-ID",
+    ],
     exposedHeaders: ["Content-Type", "Authorization"],
     maxAge: 86400,
   };
