@@ -68,9 +68,9 @@ export async function getTechnicians(req, res) {
     }
 
     if (["logged_in", "logged-in", "loggedin", "in"].includes(loginStatusFilter)) {
-      whereClauses.push("COALESCE(t.is_logged_in, 0) = 1");
+      whereClauses.push("(COALESCE(t.is_logged_in, 0) = 1 OR tls.current_session_login_at IS NOT NULL)");
     } else if (["logged_out", "logged-out", "loggedout", "out"].includes(loginStatusFilter)) {
-      whereClauses.push("COALESCE(t.is_logged_in, 0) = 0");
+      whereClauses.push("(COALESCE(t.is_logged_in, 0) = 0 AND tls.current_session_login_at IS NULL)");
     }
 
     if (visibilityFilter === "visible") {
@@ -99,6 +99,9 @@ export async function getTechnicians(req, res) {
          COALESCE(v.is_visible, 1) AS is_visible,
          COALESCE(n.note_text, '') AS admin_note,
          COALESCE(tls.current_session_login_at, NULL) AS current_session_login_at,
+         tls.latest_login_at,
+         tls.latest_logout_at,
+         tls.latest_seen_at,
          COALESCE(tls.logged_seconds_24h, 0) AS logged_seconds_24h,
          COALESCE(tls.logged_seconds_total, 0) AS logged_seconds_total,
          COALESCE(SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN (${sqlPlaceholders(ACTIVE_JOB_STATUSES)}) THEN 1 ELSE 0 END), 0) AS active_jobs
@@ -108,6 +111,9 @@ export async function getTechnicians(req, res) {
          SELECT
            technician_id,
            MAX(CASE WHEN logout_at IS NULL THEN login_at END) AS current_session_login_at,
+           MAX(login_at) AS latest_login_at,
+           MAX(logout_at) AS latest_logout_at,
+           MAX(COALESCE(last_seen_at, logout_at, login_at)) AS latest_seen_at,
            SUM(
              CASE
                WHEN COALESCE(logout_at, NOW()) > DATE_SUB(NOW(), INTERVAL 24 HOUR)
@@ -164,6 +170,9 @@ export async function getTechnicians(req, res) {
          v.is_visible,
          n.note_text,
          tls.current_session_login_at,
+         tls.latest_login_at,
+         tls.latest_logout_at,
+         tls.latest_seen_at,
          tls.logged_seconds_24h,
          tls.logged_seconds_total
        ORDER BY active_jobs DESC, t.name ASC
@@ -174,6 +183,13 @@ export async function getTechnicians(req, res) {
     const [countRows] = await pool.query(
       `SELECT COUNT(*) AS total
        FROM technicians t
+       LEFT JOIN (
+         SELECT
+           technician_id,
+           MAX(CASE WHEN logout_at IS NULL THEN login_at END) AS current_session_login_at
+         FROM technician_login_sessions
+         GROUP BY technician_id
+       ) tls ON tls.technician_id = t.id
        LEFT JOIN (
          SELECT tan.technician_id,
                 JSON_EXTRACT(tan.metadata, '$.isVisible') AS is_visible
@@ -192,18 +208,30 @@ export async function getTechnicians(req, res) {
     const total = Number(countRows?.[0]?.total || 0);
 
     return res.json({
-      data: rows.map((row) => ({
+      data: rows.map((row) => {
+        const hasOpenSession = Boolean(row.current_session_login_at);
+        const isLoggedIn = Boolean(row.is_logged_in) || hasOpenSession;
+        const lastLoginAt = row.last_login_at || row.latest_login_at || row.current_session_login_at || null;
+        const lastLogoutAt = row.last_logout_at || row.latest_logout_at || null;
+        const lastSeenAt =
+          row.last_seen_at ||
+          row.latest_seen_at ||
+          row.current_session_login_at ||
+          row.latest_login_at ||
+          null;
+
+        return {
         technicianId: row.technician_id,
         name: row.name,
         status: row.is_active && row.is_available ? "Online" : "Offline",
-        loginStatus: row.is_logged_in ? "Logged In" : "Logged Out",
+        loginStatus: isLoggedIn ? "Logged In" : "Logged Out",
         activeJobs: Number(row.active_jobs || 0),
         rating: Number(row.rating || 0),
         visibility: normalizeVisibility(row.is_visible, true),
         adminNote: row.admin_note || "",
-        lastLoginAt: row.last_login_at || null,
-        lastLogoutAt: row.last_logout_at || null,
-        lastSeenAt: row.last_seen_at || null,
+        lastLoginAt,
+        lastLogoutAt,
+        lastSeenAt,
         currentSessionStartedAt: row.current_session_login_at || null,
         currentSessionHours: (() => {
           if (!row.current_session_login_at) return 0;
@@ -214,7 +242,8 @@ export async function getTechnicians(req, res) {
         loggedInHours24h: Number((Number(row.logged_seconds_24h || 0) / 3600).toFixed(2)),
         loggedInHoursTotal: Number((Number(row.logged_seconds_total || 0) / 3600).toFixed(2)),
         inactivityAlertSentAt: row.login_reminder_sent_at || null,
-      })),
+      };
+      }),
       pagination: {
         page,
         limit,
