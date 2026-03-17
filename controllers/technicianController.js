@@ -410,6 +410,7 @@ export async function sendTechnicianLoginReminder(req, res) {
 export async function getTechnicianLoginActivity(req, res) {
   try {
     await ensureAdminExtendedSchema();
+    res.set("Cache-Control", "no-store");
 
     const technicianId = toPositiveInt(req.params?.technicianId, 0, { min: 1, max: Number.MAX_SAFE_INTEGER });
     const sessionLimit = toPositiveInt(req.query?.sessionLimit, 50, { min: 1, max: 500 });
@@ -562,6 +563,7 @@ export async function getTechnicianLoginActivity(req, res) {
     })();
 
     return res.json({
+      generatedAt: new Date().toISOString(),
       technician: {
         technicianId: Number(technician.technician_id),
         name: technician.name || "Technician",
