@@ -18,6 +18,7 @@ import {
 } from "../controllers/requestController.js";
 import {
   getTechnicians,
+  getTechnicianLoginActivity,
   toggleTechnicianVisibility,
   addTechnicianNote,
   sendTechnicianLoginReminder,
@@ -83,6 +84,7 @@ router.post("/close", closeRequest);
 router.post("/requests/close", closeRequest);
 
 router.get("/technicians", getTechnicians);
+router.get("/technician/:technicianId/login-activity", getTechnicianLoginActivity);
 router.post("/technician/toggle", toggleTechnicianVisibility);
 router.post("/technician/note", addTechnicianNote);
 router.post("/technician/send-login-reminder", sendTechnicianLoginReminder);

@@ -406,3 +406,218 @@ export async function sendTechnicianLoginReminder(req, res) {
     return res.status(500).json({ error: "Failed to send login reminder." });
   }
 }
+
+export async function getTechnicianLoginActivity(req, res) {
+  try {
+    await ensureAdminExtendedSchema();
+
+    const technicianId = toPositiveInt(req.params?.technicianId, 0, { min: 1, max: Number.MAX_SAFE_INTEGER });
+    const sessionLimit = toPositiveInt(req.query?.sessionLimit, 50, { min: 1, max: 500 });
+    const alertLimit = toPositiveInt(req.query?.alertLimit, 50, { min: 1, max: 500 });
+
+    if (!technicianId) {
+      return res.status(400).json({ error: "Valid technicianId is required." });
+    }
+
+    const pool = await getPool();
+    const nowMs = Date.now();
+
+    const [technicianRows] = await pool.query(
+      `SELECT
+         t.id AS technician_id,
+         t.name,
+         t.email,
+         t.status AS approval_status,
+         COALESCE(t.is_active, 0) AS is_active,
+         COALESCE(t.is_available, 0) AS is_available,
+         COALESCE(t.is_logged_in, 0) AS is_logged_in,
+         t.last_login_at,
+         t.last_logout_at,
+         t.last_seen_at,
+         t.login_reminder_sent_at,
+         COALESCE(v.is_visible, 1) AS is_visible,
+         COALESCE(rollup.current_session_login_at, NULL) AS current_session_login_at,
+         rollup.latest_login_at,
+         rollup.latest_logout_at,
+         rollup.latest_seen_at,
+         COALESCE(rollup.logged_seconds_24h, 0) AS logged_seconds_24h,
+         COALESCE(rollup.logged_seconds_7d, 0) AS logged_seconds_7d,
+         COALESCE(rollup.logged_seconds_total, 0) AS logged_seconds_total
+       FROM technicians t
+       LEFT JOIN (
+         SELECT
+           technician_id,
+           MAX(CASE WHEN logout_at IS NULL THEN login_at END) AS current_session_login_at,
+           MAX(login_at) AS latest_login_at,
+           MAX(logout_at) AS latest_logout_at,
+           MAX(COALESCE(last_seen_at, logout_at, login_at)) AS latest_seen_at,
+           SUM(
+             CASE
+               WHEN COALESCE(logout_at, NOW()) > DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                 THEN GREATEST(
+                   TIMESTAMPDIFF(
+                     SECOND,
+                     GREATEST(login_at, DATE_SUB(NOW(), INTERVAL 24 HOUR)),
+                     COALESCE(logout_at, NOW())
+                   ),
+                   0
+                 )
+               ELSE 0
+             END
+           ) AS logged_seconds_24h,
+           SUM(
+             CASE
+               WHEN COALESCE(logout_at, NOW()) > DATE_SUB(NOW(), INTERVAL 7 DAY)
+                 THEN GREATEST(
+                   TIMESTAMPDIFF(
+                     SECOND,
+                     GREATEST(login_at, DATE_SUB(NOW(), INTERVAL 7 DAY)),
+                     COALESCE(logout_at, NOW())
+                   ),
+                   0
+                 )
+               ELSE 0
+             END
+           ) AS logged_seconds_7d,
+           SUM(GREATEST(TIMESTAMPDIFF(SECOND, login_at, COALESCE(logout_at, NOW())), 0)) AS logged_seconds_total
+         FROM technician_login_sessions
+         GROUP BY technician_id
+       ) rollup ON rollup.technician_id = t.id
+       LEFT JOIN (
+         SELECT tan.technician_id,
+                JSON_EXTRACT(tan.metadata, '$.isVisible') AS is_visible
+         FROM technician_admin_notes tan
+         INNER JOIN (
+           SELECT technician_id, MAX(id) AS max_id
+           FROM technician_admin_notes
+           WHERE note_type = 'visibility'
+           GROUP BY technician_id
+         ) latest ON latest.max_id = tan.id
+       ) v ON v.technician_id = t.id
+       WHERE t.id = ?
+       LIMIT 1`,
+      [technicianId]
+    );
+
+    const technician = technicianRows?.[0];
+    if (!technician) {
+      return res.status(404).json({ error: "Technician not found." });
+    }
+
+    const [sessionRows] = await pool.query(
+      `SELECT
+         id,
+         login_at,
+         last_seen_at,
+         logout_at,
+         ended_reason,
+         duration_seconds,
+         source,
+         metadata,
+         created_at,
+         updated_at
+       FROM technician_login_sessions
+       WHERE technician_id = ?
+       ORDER BY login_at DESC
+       LIMIT ?`,
+      [technicianId, sessionLimit]
+    );
+
+    const [alertRows] = await pool.query(
+      `SELECT
+         id,
+         alert_type,
+         status,
+         message,
+         metadata,
+         sent_at,
+         created_at
+       FROM technician_activity_alerts
+       WHERE technician_id = ?
+       ORDER BY sent_at DESC, id DESC
+       LIMIT ?`,
+      [technicianId, alertLimit]
+    );
+
+    const hasOpenSession = Boolean(technician.current_session_login_at);
+    const isLoggedIn = Boolean(technician.is_logged_in) || hasOpenSession;
+    const lastLoginAt =
+      technician.last_login_at ||
+      technician.latest_login_at ||
+      technician.current_session_login_at ||
+      null;
+    const lastLogoutAt = technician.last_logout_at || technician.latest_logout_at || null;
+    const lastSeenAt =
+      technician.last_seen_at ||
+      technician.latest_seen_at ||
+      technician.current_session_login_at ||
+      technician.latest_login_at ||
+      null;
+
+    const currentSessionHours = (() => {
+      if (!technician.current_session_login_at) return 0;
+      const startedAtMs = new Date(technician.current_session_login_at).getTime();
+      if (!Number.isFinite(startedAtMs)) return 0;
+      return Number(Math.max(0, (nowMs - startedAtMs) / 3600000).toFixed(2));
+    })();
+
+    return res.json({
+      technician: {
+        technicianId: Number(technician.technician_id),
+        name: technician.name || "Technician",
+        email: technician.email || "",
+        approvalStatus: String(technician.approval_status || "").trim().toLowerCase() || "pending",
+        availabilityStatus:
+          technician.is_active && technician.is_available ? "Online" : "Offline",
+        loginStatus: isLoggedIn ? "Logged In" : "Logged Out",
+        visibility: normalizeVisibility(technician.is_visible, true),
+        lastLoginAt: lastLoginAt || null,
+        lastLogoutAt: lastLogoutAt || null,
+        lastSeenAt: lastSeenAt || null,
+        inactivityAlertSentAt: technician.login_reminder_sent_at || null,
+        currentSessionStartedAt: technician.current_session_login_at || null,
+        currentSessionHours,
+        loggedInHours24h: Number((Number(technician.logged_seconds_24h || 0) / 3600).toFixed(2)),
+        loggedInHours7d: Number((Number(technician.logged_seconds_7d || 0) / 3600).toFixed(2)),
+        loggedInHoursTotal: Number((Number(technician.logged_seconds_total || 0) / 3600).toFixed(2)),
+      },
+      sessions: (sessionRows || []).map((row) => {
+        const loginMs = row.login_at ? new Date(row.login_at).getTime() : null;
+        const logoutMs = row.logout_at ? new Date(row.logout_at).getTime() : null;
+        const derivedSeconds =
+          Number.isFinite(loginMs) && loginMs != null
+            ? Math.max(0, Math.floor(((Number.isFinite(logoutMs) && logoutMs != null ? logoutMs : nowMs) - loginMs) / 1000))
+            : 0;
+        const baseDurationSeconds = Number(row.duration_seconds || 0);
+        const durationSeconds = baseDurationSeconds > 0 ? baseDurationSeconds : derivedSeconds;
+
+        return {
+          sessionId: Number(row.id),
+          loginAt: row.login_at || null,
+          lastSeenAt: row.last_seen_at || null,
+          logoutAt: row.logout_at || null,
+          isActive: !row.logout_at,
+          endedReason: row.ended_reason || null,
+          source: row.source || null,
+          durationSeconds: Number(durationSeconds),
+          durationHours: Number((durationSeconds / 3600).toFixed(2)),
+          metadata: parseJson(row.metadata, null),
+          createdAt: row.created_at || null,
+          updatedAt: row.updated_at || null,
+        };
+      }),
+      alerts: (alertRows || []).map((row) => ({
+        alertId: Number(row.id),
+        alertType: row.alert_type || "unknown",
+        status: row.status || "sent",
+        message: row.message || "",
+        sentAt: row.sent_at || null,
+        createdAt: row.created_at || null,
+        metadata: parseJson(row.metadata, null),
+      })),
+    });
+  } catch (error) {
+    console.error("[admin.technicians.loginActivity] failed:", error?.message || error);
+    return res.status(500).json({ error: "Failed to fetch technician login activity." });
+  }
+}
