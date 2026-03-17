@@ -15,6 +15,12 @@ import {
 } from "../services/platformPricing.js";
 import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/pricingEstimator.js";
 import { releaseTechnicianAvailability } from "../services/technicianStateService.js";
+import { buildMarketplacePricingSnapshot, findReusablePendingOrder } from "../services/marketplacePaymentService.js";
+import { creditTechnicianWalletForPayment } from "../services/marketplaceWalletService.js";
+import {
+    PAYMENT_LEDGER_STATUS,
+    PAYMENT_TO_TECHNICIAN_STATUS,
+} from "../models/marketplaceConstants.js";
 
 const router = express.Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -41,6 +47,17 @@ const ensureRazorpayConfigured = (res) => {
     });
     return false;
 };
+
+function sendDeprecatedPaymentRoute(res, replacementPath, details) {
+    res.setHeader("Deprecation", "true");
+    res.setHeader("Sunset", "Wed, 31 Dec 2026 23:59:59 GMT");
+    return res.status(410).json({
+        error: "This payment endpoint has been deprecated. Use the canonical /api/payments/* service-request flow instead.",
+        deprecated: true,
+        replacement: replacementPath,
+        details,
+    });
+}
 
 function paymentDiag(event, data = {}) {
     console.log("[PAYMENT_DIAG]", JSON.stringify({
@@ -264,8 +281,10 @@ async function upsertPendingRazorpayPayment({
     userId,
     requestId,
     orderId,
-    breakdown
+    breakdown,
+    coupon = null,
 }) {
+    const pricingSnapshot = buildMarketplacePricingSnapshot({ breakdown, coupon });
     const [existing] = await pool.query(
         `SELECT id
          FROM payments
@@ -278,9 +297,22 @@ async function upsertPendingRazorpayPayment({
     if (existing.length > 0) {
         await pool.execute(
             `UPDATE payments
-             SET status = ?, amount = ?, platform_fee = ?, technician_amount = ?, is_settled = TRUE
+             SET status = ?, currency = ?, amount = ?, base_amount = ?, platform_fee = ?, payment_fee = ?,
+                 technician_amount = ?, is_settled = TRUE, payment_to_technician_status = ?, ledger_status = ?, pricing_snapshot = ?
              WHERE id = ?`,
-            ["PENDING", breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, existing[0].id]
+            [
+                "PENDING",
+                breakdown.currency,
+                breakdown.totalAmount,
+                breakdown.baseAmount,
+                breakdown.platformFee,
+                breakdown.paymentFee,
+                breakdown.baseAmount,
+                PAYMENT_TO_TECHNICIAN_STATUS.pending,
+                PAYMENT_LEDGER_STATUS.pending,
+                JSON.stringify(pricingSnapshot),
+                existing[0].id
+            ]
         );
         return existing[0].id;
     }
@@ -291,21 +323,33 @@ async function upsertPendingRazorpayPayment({
             service_request_id,
             payment_method,
             status,
+            currency,
             amount,
+            base_amount,
             platform_fee,
+            payment_fee,
             technician_amount,
             is_settled,
+            payment_to_technician_status,
+            ledger_status,
+            pricing_snapshot,
             razorpay_order_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             userId,
             requestId,
             "razorpay",
             "PENDING",
+            breakdown.currency,
             breakdown.totalAmount,
+            breakdown.baseAmount,
             breakdown.platformFee,
+            breakdown.paymentFee,
             breakdown.baseAmount,
             true,
+            PAYMENT_TO_TECHNICIAN_STATUS.pending,
+            PAYMENT_LEDGER_STATUS.pending,
+            JSON.stringify(pricingSnapshot),
             orderId
         ]
     );
@@ -320,8 +364,10 @@ async function markClientSideVerification({
     orderId,
     paymentId,
     signature,
-    breakdown
+    breakdown,
+    coupon = null,
 }) {
+    const pricingSnapshot = buildMarketplacePricingSnapshot({ breakdown, coupon });
     const [existing] = await pool.query(
         `SELECT id
          FROM payments
@@ -334,9 +380,22 @@ async function markClientSideVerification({
     if (existing.length > 0) {
         await pool.execute(
             `UPDATE payments
-             SET status = ?, razorpay_payment_id = ?, razorpay_signature = ?, amount = ?, platform_fee = ?, technician_amount = ?, is_settled = TRUE
+             SET status = ?, razorpay_payment_id = ?, razorpay_signature = ?, currency = ?, amount = ?, base_amount = ?,
+                 platform_fee = ?, payment_fee = ?, technician_amount = ?, is_settled = TRUE, pricing_snapshot = ?, verified_at = NOW()
              WHERE id = ?`,
-            ["PROCESSING", paymentId, signature, breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, existing[0].id]
+            [
+                "PROCESSING",
+                paymentId,
+                signature,
+                breakdown.currency,
+                breakdown.totalAmount,
+                breakdown.baseAmount,
+                breakdown.platformFee,
+                breakdown.paymentFee,
+                breakdown.baseAmount,
+                JSON.stringify(pricingSnapshot),
+                existing[0].id
+            ]
         );
         return existing[0].id;
     }
@@ -347,26 +406,40 @@ async function markClientSideVerification({
             service_request_id,
             payment_method,
             status,
+            currency,
             amount,
+            base_amount,
             platform_fee,
+            payment_fee,
             technician_amount,
             is_settled,
+            payment_to_technician_status,
+            ledger_status,
+            pricing_snapshot,
             razorpay_order_id,
             razorpay_payment_id,
-            razorpay_signature
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            razorpay_signature,
+            verified_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             userId,
             requestId,
             "razorpay",
             "PROCESSING",
+            breakdown.currency,
             breakdown.totalAmount,
+            breakdown.baseAmount,
             breakdown.platformFee,
+            breakdown.paymentFee,
             breakdown.baseAmount,
             true,
+            PAYMENT_TO_TECHNICIAN_STATUS.pending,
+            PAYMENT_LEDGER_STATUS.pending,
+            JSON.stringify(pricingSnapshot),
             orderId,
             paymentId,
-            signature
+            signature,
+            new Date()
         ]
     );
 
@@ -386,6 +459,7 @@ function buildInvoiceData({ invoiceId, request, breakdown, paymentId, orderId })
         technicianName: request.technician_name || "Assigned Technician",
         amount: breakdown.baseAmount,
         platformFee: breakdown.platformFee,
+        paymentFee: breakdown.paymentFee,
         gst: 0,
         totalAmount: breakdown.totalAmount,
         paymentMethod: "razorpay",
@@ -423,6 +497,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
         invoiceStatus: null,
         customerEmail: null,
         invoiceData: null,
+        walletTransactionId: null,
     };
 
     try {
@@ -501,9 +576,20 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
 
         await conn.execute(
             `UPDATE payments
-             SET status = ?, amount = ?, platform_fee = ?, technician_amount = ?, is_settled = TRUE, razorpay_payment_id = ?
+             SET status = ?, currency = ?, amount = ?, base_amount = ?, platform_fee = ?, payment_fee = ?,
+                 technician_amount = ?, is_settled = TRUE, razorpay_payment_id = ?, captured_at = NOW()
              WHERE id = ?`,
-            ["completed", breakdown.totalAmount, breakdown.platformFee, breakdown.baseAmount, paymentId, paymentRow.id]
+            [
+                "completed",
+                breakdown.currency,
+                breakdown.totalAmount,
+                breakdown.baseAmount,
+                breakdown.platformFee,
+                breakdown.paymentFee,
+                breakdown.baseAmount,
+                paymentId,
+                paymentRow.id
+            ]
         );
 
         await conn.execute(
@@ -535,7 +621,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
             await conn.execute(
                 `UPDATE invoices
                  SET user_id = ?, order_id = ?, service_request_id = ?, technician_id = ?, razorpay_payment_id = ?, amount = ?,
-                     platform_fee = ?, technician_amount = ?, gst = ?, total_amount = ?
+                     platform_fee = ?, payment_fee = ?, technician_amount = ?, gst = ?, total_amount = ?
                  WHERE id = ?`,
                 [
                     request.user_id,
@@ -545,6 +631,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
                     paymentId,
                     breakdown.totalAmount,
                     breakdown.platformFee,
+                    breakdown.paymentFee,
                     breakdown.baseAmount,
                     0,
                     breakdown.totalAmount,
@@ -572,10 +659,11 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
                     service_request_id,
                     technician_id,
                     platform_fee,
+                    payment_fee,
                     technician_amount,
                     gst,
                     total_amount
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     request.user_id,
                     orderId,
@@ -586,6 +674,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
                     requestId,
                     request.technician_id || null,
                     breakdown.platformFee,
+                    breakdown.paymentFee,
                     breakdown.baseAmount,
                     0,
                     breakdown.totalAmount
@@ -593,6 +682,28 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
             );
             invoiceId = insertInvoiceResult.insertId;
             invoiceStatus = "GENERATED";
+        }
+
+        let walletCreditOutcome = {
+            credited: false,
+            duplicate: false,
+            walletTransactionId: paymentRow.wallet_transaction_id || null,
+        };
+        if (request.technician_id) {
+            walletCreditOutcome = await creditTechnicianWalletForPayment(conn, {
+                technicianId: request.technician_id,
+                paymentId: paymentRow.id,
+                serviceRequestId: requestId,
+                amount: breakdown.baseAmount,
+                currency: breakdown.currency,
+                description: `Marketplace service payment credited for request #${requestId}.`,
+                idempotencyKey: `payment-credit:${paymentRow.id}`,
+                metadata: {
+                    orderId,
+                    paymentId,
+                    requestId,
+                },
+            });
         }
 
         if (request.technician_id && !requestWasPaid) {
@@ -623,6 +734,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
                 paymentId,
                 orderId
             }),
+            walletTransactionId: walletCreditOutcome.walletTransactionId || null,
         };
 
         return result;
@@ -870,50 +982,11 @@ router.post("/verify-registration-payment", verifyTechnician, async (req, res) =
  * Create a Razorpay order for a service booking fee.
  */
 router.post("/create-service-order", verifyUser, async (req, res) => {
-    try {
-        if (!ensureRazorpayConfigured(res)) return;
-        const userId = req.user.userId;
-        const { serviceType, vehicleType } = req.body;
-
-        const pricingConfig = await getPlatformPricingConfig();
-        const hasServiceHint = !!String(serviceType || "").trim() || !!String(vehicleType || "").trim();
-        const matrixAmount = hasServiceHint
-            ? await estimateRequestAmountAsync(
-                { service_type: serviceType, vehicle_type: vehicleType },
-                null,
-                pricingConfig
-            )
-            : null;
-        const resolvedAmount = Number.isFinite(Number(matrixAmount)) && Number(matrixAmount) > 0
-            ? Number(matrixAmount)
-            : Number(pricingConfig.booking_fee);
-        const finalAmount = Math.round(resolvedAmount * 100);
-
-        const options = {
-            amount: finalAmount,
-            currency: pricingConfig.currency || "INR",
-            receipt: `service_receipt_${userId}_${Date.now()}`,
-            notes: {
-                userId,
-                serviceType,
-                vehicleType,
-                resolvedAmount: String(resolvedAmount)
-            }
-        };
-
-        const order = await razorpay.orders.create(options);
-
-        res.json({
-            success: true,
-            order_id: order.id,
-            amount: order.amount,
-            currency: order.currency,
-            key_id: RAZORPAY_KEY_ID
-        });
-    } catch (err) {
-        console.error("[Payments] Create service order error:", err);
-        res.status(500).json({ error: "Failed to create service payment order." });
-    }
+    return sendDeprecatedPaymentRoute(
+        res,
+        "/api/payments/create-order",
+        "Pass a concrete service request id in the request body: { requestId, couponCode? }."
+    );
 });
 
 /**
@@ -921,28 +994,11 @@ router.post("/create-service-order", verifyUser, async (req, res) => {
  * Verify the payment signature for a service booking.
  */
 router.post("/verify-service-payment", verifyUser, async (req, res) => {
-    try {
-        if (!ensureRazorpayConfigured(res)) return;
-        const {
-            razorpay_order_id,
-            razorpay_payment_id,
-            razorpay_signature
-        } = req.body;
-
-        const generated_signature = crypto
-            .createHmac("sha256", RAZORPAY_KEY_SECRET)
-            .update(razorpay_order_id + "|" + razorpay_payment_id)
-            .digest("hex");
-
-        if (generated_signature === razorpay_signature) {
-            res.json({ success: true, message: "Payment verified successfully." });
-        } else {
-            res.status(400).json({ error: "Invalid payment signature." });
-        }
-    } catch (err) {
-        console.error("[Payments] Verify service payment error:", err);
-        res.status(500).json({ error: "Payment verification failed." });
-    }
+    return sendDeprecatedPaymentRoute(
+        res,
+        "/api/payments/confirm",
+        "Pass { requestId, razorpay_order_id, razorpay_payment_id, razorpay_signature }."
+    );
 });
 
 /**
@@ -955,6 +1011,7 @@ router.get("/config", async (_req, res) => {
         res.json({
             currency: pricingConfig.currency,
             platform_fee_percent: pricingConfig.platform_fee_percent,
+            payment_fee_percent: pricingConfig.payment_fee_percent,
             welcome_coupon_code: pricingConfig.welcome_coupon_code,
             welcome_coupon_discount_percent: pricingConfig.welcome_coupon_discount_percent,
             welcome_coupon_max_uses_per_user: pricingConfig.welcome_coupon_max_uses_per_user,
@@ -1016,6 +1073,8 @@ router.post('/quote', verifyUser, async (req, res) => {
                 original_platform_fee: breakdown.originalPlatformFee,
                 discount_amount: breakdown.discountAmount,
                 platform_fee: breakdown.platformFee,
+                payment_fee_percent: breakdown.paymentFeePercent,
+                payment_fee: breakdown.paymentFee,
                 total_amount: breakdown.totalAmount,
             },
             coupon: {
@@ -1085,6 +1144,65 @@ router.post('/create-order', verifyUser, async (req, res) => {
             });
         }
 
+        const reusablePayment = await findReusablePendingOrder(pool, {
+            requestId,
+            breakdown,
+        });
+
+        if (reusablePayment?.razorpay_order_id) {
+            await upsertPendingRazorpayPayment({
+                pool,
+                userId,
+                requestId,
+                orderId: reusablePayment.razorpay_order_id,
+                breakdown,
+                coupon,
+            });
+
+            await pool.execute(
+                `UPDATE service_requests
+                 SET payment_method = ?,
+                     payment_status = ?,
+                     applied_coupon_code = ?,
+                     applied_discount_percent = ?,
+                     applied_discount_amount = ?
+                 WHERE id = ?`,
+                [
+                    "razorpay",
+                    "pending",
+                    coupon.appliedCode || null,
+                    coupon.isApplied ? coupon.discountPercent : 0,
+                    breakdown.discountAmount,
+                    requestId
+                ]
+            );
+
+            return res.json({
+                id: reusablePayment.razorpay_order_id,
+                amount: Math.round(breakdown.totalAmount * 100),
+                currency: breakdown.currency,
+                receipt: `receipt_${requestId}_reused`,
+                status: String(reusablePayment.status || "pending").toLowerCase(),
+                base_amount: breakdown.baseAmount,
+                original_platform_fee: breakdown.originalPlatformFee,
+                discount_amount: breakdown.discountAmount,
+                platform_fee: breakdown.platformFee,
+                payment_fee_percent: breakdown.paymentFeePercent,
+                payment_fee: breakdown.paymentFee,
+                platform_fee_percent: breakdown.platformFeePercent,
+                total_amount: breakdown.totalAmount,
+                coupon: {
+                    applied_coupon_code: coupon.appliedCode,
+                    is_applied: coupon.isApplied,
+                    discount_percent: coupon.discountPercent,
+                    remaining_eligible_uses: coupon.remainingEligibleUses,
+                    max_uses_per_user: coupon.maxUsesPerUser,
+                },
+                key_id: RAZORPAY_KEY_ID,
+                reused: true,
+            });
+        }
+
         const options = {
             amount: Math.round(breakdown.totalAmount * 100),
             currency: breakdown.currency,
@@ -1117,7 +1235,8 @@ router.post('/create-order', verifyUser, async (req, res) => {
             userId,
             requestId,
             orderId: order.id,
-            breakdown
+            breakdown,
+            coupon,
         });
 
         await pool.execute(
@@ -1145,6 +1264,8 @@ router.post('/create-order', verifyUser, async (req, res) => {
             original_platform_fee: breakdown.originalPlatformFee,
             discount_amount: breakdown.discountAmount,
             platform_fee: breakdown.platformFee,
+            payment_fee_percent: breakdown.paymentFeePercent,
+            payment_fee: breakdown.paymentFee,
             platform_fee_percent: breakdown.platformFeePercent,
             total_amount: breakdown.totalAmount,
             coupon: {
@@ -1216,7 +1337,11 @@ router.post('/confirm', verifyUser, async (req, res) => {
             orderId: razorpay_order_id,
             paymentId: razorpay_payment_id,
             signature: razorpay_signature,
-            breakdown
+            breakdown,
+            coupon: {
+                appliedCode: requestRow.applied_coupon_code || null,
+                discountPercent: requestRow.applied_discount_percent || 0,
+            },
         });
 
         await pool.execute(
@@ -1377,16 +1502,35 @@ router.post('/cash', verifyUser, async (req, res) => {
             console.log('REQUEST STATUS UPDATED:', { requestId, status: 'completed', amount: breakdown.baseAmount });
 
             await conn.execute(
-                `INSERT INTO payments (user_id, service_request_id, payment_method, status, amount, platform_fee, technician_amount, is_settled)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                [userId, requestId, 'cash', 'completed', breakdown.totalAmount, breakdown.platformFee, techAmount, false]
+                `INSERT INTO payments (
+                    user_id, service_request_id, payment_method, status, currency, amount, base_amount,
+                    platform_fee, payment_fee, technician_amount, is_settled,
+                    payment_to_technician_status, ledger_status, pricing_snapshot
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    userId,
+                    requestId,
+                    'cash',
+                    'completed',
+                    breakdown.currency,
+                    breakdown.totalAmount,
+                    breakdown.baseAmount,
+                    breakdown.platformFee,
+                    breakdown.paymentFee,
+                    techAmount,
+                    false,
+                    PAYMENT_TO_TECHNICIAN_STATUS.notApplicable,
+                    PAYMENT_LEDGER_STATUS.skipped,
+                    JSON.stringify(buildMarketplacePricingSnapshot({ breakdown, coupon })),
+                ]
             );
 
             const [invResult] = await conn.execute(
                 `INSERT INTO invoices (
                     user_id, order_id, razorpay_payment_id, amount, invoice_pdf, status,
-                    service_request_id, technician_id, platform_fee, technician_amount, gst, total_amount
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    service_request_id, technician_id, platform_fee, payment_fee, technician_amount, gst, total_amount
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     userId,
                     `cash_${requestId}_${Date.now()}`,
@@ -1397,6 +1541,7 @@ router.post('/cash', verifyUser, async (req, res) => {
                     requestId,
                     technicianId || null,
                     breakdown.platformFee,
+                    breakdown.paymentFee,
                     techAmount,
                     0,
                     breakdown.totalAmount
@@ -1417,6 +1562,7 @@ router.post('/cash', verifyUser, async (req, res) => {
                     technicianName: "Assigned Technician",
                     amount: breakdown.baseAmount,
                     platformFee: breakdown.platformFee,
+                    paymentFee: breakdown.paymentFee,
                     totalAmount: breakdown.totalAmount,
                     paymentMethod: "cash",
                     transactionId: `CASH_${requestId}`

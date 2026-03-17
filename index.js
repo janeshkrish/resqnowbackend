@@ -75,6 +75,11 @@ async function bootstrapDatabase() {
     ensureDeviceTokensTable,
     ensurePaymentsTable,
     ensureInvoicesTable,
+    ensureTechnicianWalletsTable,
+    ensureWalletTransactionsTable,
+    ensurePayoutsTable,
+    ensurePayoutAllocationsTable,
+    ensurePaymentRefundsTable,
     ensureTechnicianApprovalAuditTable,
     ensureUserVehiclesTable,
     ensureTechnicianDuesTable,
@@ -103,6 +108,11 @@ async function bootstrapDatabase() {
     ensureDeviceTokensTable(),
     ensurePaymentsTable(),
     ensureInvoicesTable(),
+    ensureTechnicianWalletsTable(),
+    ensureWalletTransactionsTable(),
+    ensurePayoutsTable(),
+    ensurePayoutAllocationsTable(),
+    ensurePaymentRefundsTable(),
     ensureTechnicianApprovalAuditTable(),
     ensureUserVehiclesTable(),
     ensureTechnicianDuesTable(),
@@ -123,7 +133,9 @@ async function bootstrapDatabase() {
   ]);
 
   const { getPool } = await import("./db.js");
+  const { backfillMarketplaceWalletCredits } = await import("./services/marketplaceWalletService.js");
   const pool = await getPool();
+  await backfillMarketplaceWalletCredits(pool);
   await reconcileTechnicianAvailability(pool);
 }
 

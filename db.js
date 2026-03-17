@@ -414,6 +414,23 @@ async function addIndexIfNotExists(pool, table, indexName, columnsSql) {
   }
 }
 
+async function addUniqueIndexIfNotExists(pool, table, indexName, columnsSql) {
+  try {
+    await pool.query(`CREATE UNIQUE INDEX ${indexName} ON ${table} (${columnsSql})`);
+  } catch (err) {
+    const message = String(err?.message || "");
+    const isDuplicateIndex =
+      err.code === "ER_DUP_KEYNAME" ||
+      err.code === "ER_DUP_INDEX" ||
+      err.errno === 1061 ||
+      message.includes("Duplicate key name") ||
+      message.includes("already exists");
+    if (!isDuplicateIndex) {
+      console.log(`Note: Could not add unique index ${indexName} on ${table}. Error: ${message}`);
+    }
+  }
+}
+
 export async function updateTechniciansTableSchema() {
   const p = await getPool();
   await addColumnIfNotExists(p, 'technicians', 'is_active BOOLEAN DEFAULT FALSE');
@@ -540,14 +557,24 @@ CREATE TABLE IF NOT EXISTS payments (
   service_request_id INT NOT NULL,
   payment_method VARCHAR(50) DEFAULT 'razorpay',
   status VARCHAR(50) DEFAULT 'pending',
+  currency VARCHAR(10) DEFAULT 'INR',
   amount DECIMAL(10, 2),
+  base_amount DECIMAL(10, 2) DEFAULT 0.00,
   razorpay_order_id VARCHAR(255),
   razorpay_payment_id VARCHAR(255),
   razorpay_signature VARCHAR(255),
   platform_fee DECIMAL(10, 2) DEFAULT 0.00,
+  payment_fee DECIMAL(10, 2) DEFAULT 0.00,
   technician_amount DECIMAL(10, 2) DEFAULT 0.00,
+  refunded_amount DECIMAL(10, 2) DEFAULT 0.00,
+  refund_status VARCHAR(20) DEFAULT 'none',
   is_settled BOOLEAN DEFAULT TRUE,
   payment_to_technician_status VARCHAR(20) DEFAULT 'pending',
+  ledger_status VARCHAR(20) DEFAULT 'pending',
+  wallet_transaction_id BIGINT NULL,
+  pricing_snapshot JSON,
+  verified_at DATETIME NULL,
+  captured_at DATETIME NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (service_request_id) REFERENCES service_requests(id)
@@ -558,10 +585,20 @@ export async function ensurePaymentsTable() {
   const p = await getPool();
   await p.execute(PAYMENTS_TABLE_SQL);
   // Ensure columns exist if table already existed without them
+  await addColumnIfNotExists(p, 'payments', 'currency VARCHAR(10) DEFAULT "INR"');
+  await addColumnIfNotExists(p, 'payments', 'base_amount DECIMAL(10, 2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'payments', 'platform_fee DECIMAL(10, 2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'payments', 'payment_fee DECIMAL(10, 2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'payments', 'technician_amount DECIMAL(10, 2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'payments', 'refunded_amount DECIMAL(10, 2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'payments', 'refund_status VARCHAR(20) DEFAULT "none"');
   await addColumnIfNotExists(p, 'payments', 'is_settled BOOLEAN DEFAULT TRUE');
   await addColumnIfNotExists(p, 'payments', "payment_to_technician_status VARCHAR(20) DEFAULT 'pending'");
+  await addColumnIfNotExists(p, 'payments', "ledger_status VARCHAR(20) DEFAULT 'pending'");
+  await addColumnIfNotExists(p, 'payments', 'wallet_transaction_id BIGINT NULL');
+  await addColumnIfNotExists(p, 'payments', 'pricing_snapshot JSON');
+  await addColumnIfNotExists(p, 'payments', 'verified_at DATETIME NULL');
+  await addColumnIfNotExists(p, 'payments', 'captured_at DATETIME NULL');
 }
 
 export async function updatePaymentsTableSchema() {
@@ -573,6 +610,16 @@ export async function updatePaymentsTableSchema() {
   }
 
   await addColumnIfNotExists(p, "payments", "payment_to_technician_status VARCHAR(20) DEFAULT 'pending'");
+  await addColumnIfNotExists(p, "payments", "currency VARCHAR(10) DEFAULT 'INR'");
+  await addColumnIfNotExists(p, "payments", "base_amount DECIMAL(10, 2) DEFAULT 0.00");
+  await addColumnIfNotExists(p, "payments", "payment_fee DECIMAL(10, 2) DEFAULT 0.00");
+  await addColumnIfNotExists(p, "payments", "refunded_amount DECIMAL(10, 2) DEFAULT 0.00");
+  await addColumnIfNotExists(p, "payments", "refund_status VARCHAR(20) DEFAULT 'none'");
+  await addColumnIfNotExists(p, "payments", "ledger_status VARCHAR(20) DEFAULT 'pending'");
+  await addColumnIfNotExists(p, "payments", "wallet_transaction_id BIGINT NULL");
+  await addColumnIfNotExists(p, "payments", "pricing_snapshot JSON");
+  await addColumnIfNotExists(p, "payments", "verified_at DATETIME NULL");
+  await addColumnIfNotExists(p, "payments", "captured_at DATETIME NULL");
   try {
     await p.query(
       `UPDATE payments
@@ -582,6 +629,22 @@ export async function updatePaymentsTableSchema() {
   } catch (err) {
     console.log("Note: could not normalize payments.payment_to_technician_status:", err.message);
   }
+
+  try {
+    await p.query(
+      `UPDATE payments
+       SET ledger_status = 'pending'
+       WHERE ledger_status IS NULL OR TRIM(ledger_status) = ''`
+    );
+  } catch (err) {
+    console.log("Note: could not normalize payments.ledger_status:", err.message);
+  }
+
+  await addIndexIfNotExists(p, "payments", "idx_payments_request_status", "service_request_id, status");
+  await addIndexIfNotExists(p, "payments", "idx_payments_technician_payout_status", "payment_to_technician_status");
+  await addIndexIfNotExists(p, "payments", "idx_payments_wallet_transaction", "wallet_transaction_id");
+  await addUniqueIndexIfNotExists(p, "payments", "uniq_payments_razorpay_order_id", "razorpay_order_id");
+  await addUniqueIndexIfNotExists(p, "payments", "uniq_payments_razorpay_payment_id", "razorpay_payment_id");
 }
 
 const TECHNICIAN_DUES_TABLE_SQL = `
@@ -604,6 +667,182 @@ export async function ensureTechnicianDuesTable() {
   await addColumnIfNotExists(p, 'technician_dues', 'service_request_id INT');
 }
 
+const TECHNICIAN_WALLETS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS technician_wallets (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  technician_id INT NOT NULL UNIQUE,
+  currency VARCHAR(10) NOT NULL DEFAULT 'INR',
+  total_earned DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+  withdrawable_balance DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+  total_paid_out DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+  on_hold_balance DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+  last_transaction_at DATETIME NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (technician_id) REFERENCES technicians(id)
+)
+`.trim();
+
+export async function ensureTechnicianWalletsTable() {
+  const p = await getPool();
+  await p.execute(TECHNICIAN_WALLETS_TABLE_SQL);
+  await addColumnIfNotExists(p, 'technician_wallets', 'currency VARCHAR(10) NOT NULL DEFAULT "INR"');
+  await addColumnIfNotExists(p, 'technician_wallets', 'total_earned DECIMAL(12, 2) NOT NULL DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'technician_wallets', 'withdrawable_balance DECIMAL(12, 2) NOT NULL DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'technician_wallets', 'total_paid_out DECIMAL(12, 2) NOT NULL DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'technician_wallets', 'on_hold_balance DECIMAL(12, 2) NOT NULL DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'technician_wallets', 'last_transaction_at DATETIME NULL');
+}
+
+const WALLET_TRANSACTIONS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  wallet_id BIGINT NOT NULL,
+  technician_id INT NOT NULL,
+  service_request_id INT NULL,
+  payment_id INT NULL,
+  payout_id BIGINT NULL,
+  entry_type VARCHAR(40) NOT NULL,
+  direction ENUM('credit', 'debit') NOT NULL,
+  amount DECIMAL(12, 2) NOT NULL,
+  allocated_amount DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+  balance_before DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+  balance_after DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+  description VARCHAR(255) NULL,
+  reference_type VARCHAR(40) NULL,
+  reference_id VARCHAR(64) NULL,
+  idempotency_key VARCHAR(128) NULL,
+  metadata JSON NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (wallet_id) REFERENCES technician_wallets(id),
+  FOREIGN KEY (technician_id) REFERENCES technicians(id),
+  FOREIGN KEY (service_request_id) REFERENCES service_requests(id),
+  FOREIGN KEY (payment_id) REFERENCES payments(id)
+)
+`.trim();
+
+export async function ensureWalletTransactionsTable() {
+  const p = await getPool();
+  await p.execute(WALLET_TRANSACTIONS_TABLE_SQL);
+  await addColumnIfNotExists(p, 'wallet_transactions', 'allocated_amount DECIMAL(12, 2) NOT NULL DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'wallet_transactions', 'description VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'wallet_transactions', 'reference_type VARCHAR(40) NULL');
+  await addColumnIfNotExists(p, 'wallet_transactions', 'reference_id VARCHAR(64) NULL');
+  await addColumnIfNotExists(p, 'wallet_transactions', 'idempotency_key VARCHAR(128) NULL');
+  await addColumnIfNotExists(p, 'wallet_transactions', 'metadata JSON NULL');
+  await addIndexIfNotExists(p, 'wallet_transactions', 'idx_wallet_transactions_technician_time', 'technician_id, created_at');
+  await addIndexIfNotExists(p, 'wallet_transactions', 'idx_wallet_transactions_payment', 'payment_id');
+  await addIndexIfNotExists(p, 'wallet_transactions', 'idx_wallet_transactions_payout', 'payout_id');
+  await addUniqueIndexIfNotExists(p, 'wallet_transactions', 'uniq_wallet_transactions_idempotency_key', 'idempotency_key');
+}
+
+const PAYOUTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS payouts (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  payout_reference VARCHAR(64) NOT NULL UNIQUE,
+  idempotency_key VARCHAR(128) NULL,
+  technician_id INT NOT NULL,
+  wallet_id BIGINT NOT NULL,
+  amount DECIMAL(12, 2) NOT NULL,
+  currency VARCHAR(10) NOT NULL DEFAULT 'INR',
+  status VARCHAR(20) NOT NULL DEFAULT 'draft',
+  payout_method VARCHAR(40) NULL,
+  destination_reference VARCHAR(255) NULL,
+  external_reference VARCHAR(255) NULL,
+  notes TEXT NULL,
+  created_by VARCHAR(255) NULL,
+  processed_by VARCHAR(255) NULL,
+  processed_at DATETIME NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (technician_id) REFERENCES technicians(id),
+  FOREIGN KEY (wallet_id) REFERENCES technician_wallets(id)
+)
+`.trim();
+
+export async function ensurePayoutsTable() {
+  const p = await getPool();
+  await p.execute(PAYOUTS_TABLE_SQL);
+  await addColumnIfNotExists(p, 'payouts', 'idempotency_key VARCHAR(128) NULL');
+  await addColumnIfNotExists(p, 'payouts', 'currency VARCHAR(10) NOT NULL DEFAULT "INR"');
+  await addColumnIfNotExists(p, 'payouts', 'status VARCHAR(20) NOT NULL DEFAULT "draft"');
+  await addColumnIfNotExists(p, 'payouts', 'payout_method VARCHAR(40) NULL');
+  await addColumnIfNotExists(p, 'payouts', 'destination_reference VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'payouts', 'external_reference VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'payouts', 'notes TEXT NULL');
+  await addColumnIfNotExists(p, 'payouts', 'created_by VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'payouts', 'processed_by VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'payouts', 'processed_at DATETIME NULL');
+  await addIndexIfNotExists(p, 'payouts', 'idx_payouts_technician_status', 'technician_id, status');
+  await addIndexIfNotExists(p, 'payouts', 'idx_payouts_processed_at', 'processed_at');
+  await addUniqueIndexIfNotExists(p, 'payouts', 'uniq_payouts_idempotency_key', 'idempotency_key');
+}
+
+const PAYOUT_ALLOCATIONS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS payout_allocations (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  payout_id BIGINT NOT NULL,
+  wallet_transaction_id BIGINT NOT NULL,
+  payment_id INT NULL,
+  service_request_id INT NULL,
+  amount DECIMAL(12, 2) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (payout_id) REFERENCES payouts(id),
+  FOREIGN KEY (wallet_transaction_id) REFERENCES wallet_transactions(id),
+  FOREIGN KEY (payment_id) REFERENCES payments(id),
+  FOREIGN KEY (service_request_id) REFERENCES service_requests(id)
+)
+`.trim();
+
+export async function ensurePayoutAllocationsTable() {
+  const p = await getPool();
+  await p.execute(PAYOUT_ALLOCATIONS_TABLE_SQL);
+  await addIndexIfNotExists(p, 'payout_allocations', 'idx_payout_allocations_payout', 'payout_id');
+  await addIndexIfNotExists(p, 'payout_allocations', 'idx_payout_allocations_wallet_txn', 'wallet_transaction_id');
+}
+
+const PAYMENT_REFUNDS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS payment_refunds (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  refund_reference VARCHAR(64) NOT NULL UNIQUE,
+  idempotency_key VARCHAR(128) NULL,
+  payment_id INT NOT NULL,
+  service_request_id INT NOT NULL,
+  technician_id INT NULL,
+  wallet_transaction_id BIGINT NULL,
+  amount DECIMAL(12, 2) NOT NULL,
+  technician_adjustment_amount DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+  status VARCHAR(30) NOT NULL DEFAULT 'processed',
+  reason VARCHAR(255) NULL,
+  external_reference VARCHAR(255) NULL,
+  requested_by VARCHAR(255) NULL,
+  processed_at DATETIME NULL,
+  metadata JSON NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (payment_id) REFERENCES payments(id),
+  FOREIGN KEY (service_request_id) REFERENCES service_requests(id),
+  FOREIGN KEY (technician_id) REFERENCES technicians(id)
+)
+`.trim();
+
+export async function ensurePaymentRefundsTable() {
+  const p = await getPool();
+  await p.execute(PAYMENT_REFUNDS_TABLE_SQL);
+  await addColumnIfNotExists(p, 'payment_refunds', 'idempotency_key VARCHAR(128) NULL');
+  await addColumnIfNotExists(p, 'payment_refunds', 'wallet_transaction_id BIGINT NULL');
+  await addColumnIfNotExists(p, 'payment_refunds', 'technician_adjustment_amount DECIMAL(12, 2) NOT NULL DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'payment_refunds', 'status VARCHAR(30) NOT NULL DEFAULT "processed"');
+  await addColumnIfNotExists(p, 'payment_refunds', 'reason VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'payment_refunds', 'external_reference VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'payment_refunds', 'requested_by VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'payment_refunds', 'processed_at DATETIME NULL');
+  await addColumnIfNotExists(p, 'payment_refunds', 'metadata JSON NULL');
+  await addIndexIfNotExists(p, 'payment_refunds', 'idx_payment_refunds_payment', 'payment_id');
+  await addIndexIfNotExists(p, 'payment_refunds', 'idx_payment_refunds_technician', 'technician_id, created_at');
+  await addUniqueIndexIfNotExists(p, 'payment_refunds', 'uniq_payment_refunds_idempotency_key', 'idempotency_key');
+}
+
 // Invoices table keeps generated invoice PDF in TiDB (LONGBLOB) for Render-safe storage.
 const INVOICES_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS invoices (
@@ -618,6 +857,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   service_request_id INT,
   technician_id INT,
   platform_fee DECIMAL(12,2) DEFAULT 0.00,
+  payment_fee DECIMAL(12,2) DEFAULT 0.00,
   technician_amount DECIMAL(12,2) DEFAULT 0.00,
   gst DECIMAL(12,2) DEFAULT 0.00,
   total_amount DECIMAL(12,2) DEFAULT 0.00,
@@ -637,6 +877,7 @@ export async function ensureInvoicesTable() {
   await addColumnIfNotExists(p, 'invoices', 'service_request_id INT');
   await addColumnIfNotExists(p, 'invoices', 'technician_id INT');
   await addColumnIfNotExists(p, 'invoices', 'platform_fee DECIMAL(12,2) DEFAULT 0.00');
+  await addColumnIfNotExists(p, 'invoices', 'payment_fee DECIMAL(12,2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'invoices', 'technician_amount DECIMAL(12,2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'invoices', 'gst DECIMAL(12,2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'invoices', 'total_amount DECIMAL(12,2) DEFAULT 0.00');
@@ -647,6 +888,7 @@ CREATE TABLE IF NOT EXISTS platform_pricing_config (
   id INT AUTO_INCREMENT PRIMARY KEY,
   currency VARCHAR(10) NOT NULL DEFAULT 'INR',
   platform_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000,
+  payment_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.020000,
   welcome_coupon_code VARCHAR(64) NOT NULL DEFAULT 'RESQ10',
   welcome_coupon_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000,
   welcome_coupon_max_uses_per_user INT NOT NULL DEFAULT 2,
@@ -668,6 +910,7 @@ export async function ensurePlatformPricingConfigTable() {
   await p.execute(PLATFORM_PRICING_CONFIG_TABLE_SQL);
   await addColumnIfNotExists(p, 'platform_pricing_config', 'currency VARCHAR(10) NOT NULL DEFAULT "INR"');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'platform_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000');
+  await addColumnIfNotExists(p, 'platform_pricing_config', 'payment_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.020000');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_code VARCHAR(64) NOT NULL DEFAULT "RESQ10"');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_max_uses_per_user INT NOT NULL DEFAULT 2');

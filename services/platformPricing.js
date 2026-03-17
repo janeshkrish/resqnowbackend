@@ -1,10 +1,11 @@
 import { getPool } from "../db.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "./serviceNormalization.js";
+import { roundMoney as roundCurrencyMoney, toPaise, fromPaise } from "../utils/money.js";
 
 const CACHE_TTL_MS = Math.max(5000, Number(process.env.PRICING_CONFIG_CACHE_TTL_MS || 30000));
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
-const roundMoney = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+const roundMoney = (value) => roundCurrencyMoney(value, 0);
 
 const toNumber = (value) => {
   const n = Number(value);
@@ -151,6 +152,7 @@ export const DEFAULT_PLATFORM_PRICING_CONFIG = Object.freeze({
   id: null,
   currency: "INR",
   platform_fee_percent: 0.1,
+  payment_fee_percent: 0.02,
   welcome_coupon_code: "RESQ10",
   welcome_coupon_discount_percent: 0.1,
   welcome_coupon_max_uses_per_user: 2,
@@ -240,6 +242,7 @@ function normalizeConfigRow(row) {
     id: row?.id ? Number(row.id) : null,
     currency: String(row?.currency || fallback.currency).trim().toUpperCase() || fallback.currency,
     platform_fee_percent: toPercent(row?.platform_fee_percent, fallback.platform_fee_percent),
+    payment_fee_percent: toPercent(row?.payment_fee_percent, fallback.payment_fee_percent),
     welcome_coupon_code: String(row?.welcome_coupon_code || fallback.welcome_coupon_code).trim().toUpperCase(),
     welcome_coupon_discount_percent: toPercent(
       row?.welcome_coupon_discount_percent,
@@ -269,6 +272,7 @@ async function seedDefaultConfig(pool) {
       (
         currency,
         platform_fee_percent,
+        payment_fee_percent,
         welcome_coupon_code,
         welcome_coupon_discount_percent,
         welcome_coupon_max_uses_per_user,
@@ -281,10 +285,11 @@ async function seedDefaultConfig(pool) {
         subscription_plans,
         is_active
       )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
     [
       DEFAULT_PLATFORM_PRICING_CONFIG.currency,
       DEFAULT_PLATFORM_PRICING_CONFIG.platform_fee_percent,
+      DEFAULT_PLATFORM_PRICING_CONFIG.payment_fee_percent,
       DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_code,
       DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_discount_percent,
       DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_max_uses_per_user,
@@ -374,9 +379,11 @@ export function computePaymentAmounts(baseAmount, pricingConfig = null, options 
     toPositiveNumber(baseAmount, toPositiveNumber(config.default_service_amount, DEFAULT_PLATFORM_PRICING_CONFIG.default_service_amount))
   );
   const feePercent = toPercent(config.platform_fee_percent, DEFAULT_PLATFORM_PRICING_CONFIG.platform_fee_percent);
-  const originalPlatformFee = roundMoney(safeBase * feePercent);
+  const paymentFeePercent = toPercent(config.payment_fee_percent, DEFAULT_PLATFORM_PRICING_CONFIG.payment_fee_percent);
+  const safeBasePaise = toPaise(safeBase, 0);
+  const originalPlatformFee = fromPaise(Math.round(safeBasePaise * feePercent), 0);
   const discountPercent = toPercent(options?.platformFeeDiscountPercent, 0);
-  const discountAmountByPercent = roundMoney(originalPlatformFee * discountPercent);
+  const discountAmountByPercent = fromPaise(Math.round(toPaise(originalPlatformFee, 0) * discountPercent), 0);
   const discountAmountRaw = toPositiveNumber(
     options?.platformFeeDiscountAmount,
     discountAmountByPercent,
@@ -386,7 +393,8 @@ export function computePaymentAmounts(baseAmount, pricingConfig = null, options 
     Math.min(originalPlatformFee, Math.max(0, Number(discountAmountRaw || 0)))
   );
   const platformFee = roundMoney(Math.max(0, originalPlatformFee - discountAmount));
-  const totalAmount = roundMoney(safeBase + platformFee);
+  const paymentFee = fromPaise(Math.round(safeBasePaise * paymentFeePercent), 0);
+  const totalAmount = roundMoney(safeBase + platformFee + paymentFee);
 
   return {
     currency: String(config.currency || "INR").toUpperCase(),
@@ -396,6 +404,8 @@ export function computePaymentAmounts(baseAmount, pricingConfig = null, options 
     discountAmount,
     platformFeeDiscountPercent: discountPercent,
     platformFee,
+    paymentFeePercent,
+    paymentFee,
     totalAmount,
   };
 }

@@ -18,6 +18,10 @@ import { estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
 import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js";
 import {
+  getTechnicianWalletSummary,
+  getTechnicianWalletTransactionHistory,
+} from "../services/marketplaceWalletService.js";
+import {
   markTechnicianHeartbeat,
   markTechnicianLogin,
   markTechnicianLogout,
@@ -237,21 +241,14 @@ const roundMoney = (value) => {
 };
 
 async function fetchTechnicianFinancialSnapshot(pool, technicianId) {
-  const [rows] = await pool.query(
-    `
-    SELECT
-      COALESCE(SUM(CASE WHEN p.status = 'completed' THEN p.technician_amount ELSE 0 END), 0) AS total_earnings,
-      COALESCE(SUM(CASE WHEN p.status = 'completed' AND p.is_settled = FALSE THEN p.platform_fee ELSE 0 END), 0) AS pending_dues
-    FROM payments p
-    JOIN service_requests sr ON p.service_request_id = sr.id
-    WHERE sr.technician_id = ?
-    `,
-    [technicianId]
-  );
-
+  const wallet = await getTechnicianWalletSummary(pool, technicianId);
   return {
-    total_earnings: roundMoney(rows?.[0]?.total_earnings || 0),
-    pending_dues: roundMoney(rows?.[0]?.pending_dues || 0),
+    total_earnings: roundMoney(wallet.total_earned || 0),
+    withdrawable_balance: roundMoney(wallet.withdrawable_balance || 0),
+    total_paid_out: roundMoney(wallet.total_paid_out || 0),
+    on_hold_balance: roundMoney(wallet.on_hold_balance || 0),
+    pending_dues: 0,
+    currency: wallet.currency || "INR",
   };
 }
 
@@ -1506,6 +1503,7 @@ router.get("/dashboard-stats", verifyTechnician, async (req, res) => {
   try {
     const technicianId = req.technicianId;
     const pool = await db.getPool();
+    const wallet = await getTechnicianWalletSummary(pool, technicianId);
 
     // Get completed jobs count
     const [countRows] = await pool.execute(
@@ -1513,21 +1511,21 @@ router.get("/dashboard-stats", verifyTechnician, async (req, res) => {
       [technicianId]
     );
 
-    // Earnings should come from completed payment payouts.
     const [earningsRows] = await pool.execute(
       `
-      SELECT
-        COALESCE(SUM(p.technician_amount), 0) as total,
-        COALESCE(SUM(CASE WHEN DATE(p.created_at) = CURDATE() THEN p.technician_amount ELSE 0 END), 0) as today
-      FROM payments p
-      JOIN service_requests sr ON p.service_request_id = sr.id
-      WHERE sr.technician_id = ? AND p.status = 'completed'
+      SELECT COALESCE(SUM(wt.amount), 0) as today
+      FROM wallet_transactions wt
+      WHERE wt.technician_id = ?
+        AND wt.entry_type = 'payment_credit'
+        AND DATE(wt.created_at) = CURDATE()
       `,
       [technicianId]
     );
 
     res.json({
-      totalEarnings: roundMoney(earningsRows[0]?.total || 0),
+      totalEarnings: roundMoney(wallet.total_earned || 0),
+      withdrawableBalance: roundMoney(wallet.withdrawable_balance || 0),
+      totalPaidOut: roundMoney(wallet.total_paid_out || 0),
       completedJobs: countRows[0].count || 0,
       todayEarnings: roundMoney(earningsRows[0]?.today || 0),
     });
@@ -1572,12 +1570,13 @@ router.get("/earnings-history", verifyTechnician, async (req, res) => {
     const pool = await db.getPool();
 
     const [rows] = await pool.execute(
-      `SELECT DATE(p.created_at) as date, SUM(p.technician_amount) as amount
-       FROM payments p
-       JOIN service_requests sr ON p.service_request_id = sr.id
-       WHERE sr.technician_id = ? AND p.status = 'completed' AND p.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
-       GROUP BY DATE(p.created_at)
-       ORDER BY DATE(p.created_at) ASC`,
+      `SELECT DATE(wt.created_at) as date, SUM(wt.amount) as amount
+       FROM wallet_transactions wt
+       WHERE wt.technician_id = ?
+         AND wt.entry_type = 'payment_credit'
+         AND wt.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+       GROUP BY DATE(wt.created_at)
+       ORDER BY DATE(wt.created_at) ASC`,
       [technicianId]
     );
 
@@ -1612,47 +1611,27 @@ router.get("/me/payout-transactions", verifyTechnician, async (req, res) => {
     const pool = await db.getPool();
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 100) : 20;
-
-    const [rows] = await pool.query(
-      `
-      SELECT
-        p.id AS payment_id,
-        p.service_request_id,
-        p.payment_method,
-        p.status AS payment_status,
-        p.technician_amount,
-        p.platform_fee,
-        p.is_settled,
-        p.created_at,
-        sr.service_type,
-        sr.vehicle_type,
-        sr.vehicle_model,
-        sr.address,
-        sr.status AS request_status
-      FROM payments p
-      JOIN service_requests sr ON p.service_request_id = sr.id
-      WHERE sr.technician_id = ? AND p.status = 'completed'
-      ORDER BY p.created_at DESC
-      LIMIT ?
-      `,
-      [technicianId, limit]
-    );
-
-    const transactions = (rows || []).map((row) => ({
-      payment_id: row.payment_id,
-      service_request_id: row.service_request_id,
-      payment_method: row.payment_method,
-      payment_status: row.payment_status,
-      request_status: row.request_status,
-      service_type: row.service_type,
-      vehicle_type: row.vehicle_type,
-      vehicle_model: row.vehicle_model,
-      address: row.address,
-      technician_amount: roundMoney(row.technician_amount || 0),
-      platform_fee: roundMoney(row.platform_fee || 0),
-      is_settled: !!row.is_settled,
-      created_at: row.created_at,
-    }));
+    const rows = await getTechnicianWalletTransactionHistory(pool, technicianId, limit);
+    const transactions = rows
+      .filter((row) => row.entry_type === "payment_credit" || row.entry_type === "payout_debit")
+      .map((row) => ({
+        payment_id: row.payment_id || null,
+        payout_id: row.payout_id || null,
+        service_request_id: row.service_request_id,
+        payment_method: row.entry_type === "payment_credit" ? "razorpay" : "manual_payout",
+        payment_status: row.payment_status || row.payout_status || row.entry_type,
+        request_status: row.entry_type === "payment_credit" ? "earned" : "paid_out",
+        service_type: row.service_type,
+        vehicle_type: row.vehicle_type,
+        vehicle_model: row.vehicle_model,
+        address: row.address,
+        technician_amount: roundMoney(row.amount || 0),
+        platform_fee: 0,
+        is_settled: row.entry_type === "payout_debit",
+        entry_type: row.entry_type,
+        balance_after: roundMoney(row.balance_after || 0),
+        created_at: row.created_at,
+      }));
 
     res.json(transactions);
   } catch (err) {

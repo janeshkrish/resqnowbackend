@@ -63,13 +63,18 @@ export async function generateInvoicePDF(data) {
             doc.text(Number(data.amount || 0).toFixed(2), amountX, rowY, { align: "right", width: 90 });
 
             const rowY2 = rowY + 20;
-            doc.text("Fee", itemX + 5, rowY2);
-            doc.text("Platform & Convenience Fee", descX, rowY2);
+            doc.text("Platform Fee", itemX + 5, rowY2);
+            doc.text("ResQNow marketplace service fee", descX, rowY2);
             doc.text(Number(data.platformFee || 0).toFixed(2), amountX, rowY2, { align: "right", width: 90 });
 
-            doc.moveTo(50, rowY2 + 25).lineTo(550, rowY2 + 25).strokeColor("#E2E8F0").stroke();
+            const rowY3 = rowY2 + 20;
+            doc.text("Payment Fee", itemX + 5, rowY3);
+            doc.text("Payment gateway & convenience fee", descX, rowY3);
+            doc.text(Number(data.paymentFee || 0).toFixed(2), amountX, rowY3, { align: "right", width: 90 });
 
-            const totalY = rowY2 + 35;
+            doc.moveTo(50, rowY3 + 25).lineTo(550, rowY3 + 25).strokeColor("#E2E8F0").stroke();
+
+            const totalY = rowY3 + 35;
             doc.fontSize(12).font("Helvetica-Bold").fillColor("#0F172A");
             doc.text("Total Amount", 350, totalY);
             doc.text(`INR ${Number(data.totalAmount || 0).toFixed(2)}`, amountX, totalY, { align: "right", width: 90 });

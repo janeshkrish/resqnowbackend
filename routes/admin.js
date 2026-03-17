@@ -28,7 +28,14 @@ import {
   getFinanceTransactions,
   exportFinanceCsv,
   getFlaggedPayments,
+  getPayoutHistory,
+  getPayoutQueue,
+  exportPayoutQueueCsv,
   markTechnicianPaymentCompleted,
+  getRefundHistory,
+  refundTransaction,
+  getWalletBalances,
+  triggerWalletPayout,
 } from "../controllers/financeController.js";
 import { getAnalytics } from "../controllers/analyticsController.js";
 import {
@@ -93,9 +100,16 @@ router.get("/finance/summary", getFinanceSummary);
 router.get("/finance", getFinanceTransactions);
 router.get("/finance/transactions", getFinanceTransactions);
 router.get("/finance/export", exportFinanceCsv);
+router.get("/finance/wallets", getWalletBalances);
+router.get("/finance/payouts", getPayoutHistory);
+router.post("/finance/payouts", triggerWalletPayout);
+router.get("/finance/payout-queue", getPayoutQueue);
+router.get("/finance/payout-queue/export", exportPayoutQueueCsv);
 router.get("/finance/flagged", getFlaggedPayments);
 router.get("/finance/audit-logs", getAdminAuditLogs);
 router.post("/pay-technician/:transactionId", markTechnicianPaymentCompleted);
+router.post("/finance/refund/:transactionId", refundTransaction);
+router.get("/finance/refunds/:transactionId", getRefundHistory);
 
 router.get("/analytics", getAnalytics);
 
