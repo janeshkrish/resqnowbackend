@@ -270,6 +270,50 @@ export async function ensureTechnicianLocationHistoryTable() {
   await p.execute(TECHNICIAN_LOCATION_HISTORY_TABLE_SQL);
 }
 
+const TECHNICIAN_LOGIN_SESSIONS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS technician_login_sessions (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  technician_id INT NOT NULL,
+  login_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  logout_at DATETIME NULL,
+  ended_reason VARCHAR(64) NULL,
+  duration_seconds INT UNSIGNED DEFAULT 0,
+  source VARCHAR(64) DEFAULT 'unknown',
+  metadata JSON,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_tech_login_sessions_tech_login (technician_id, login_at),
+  INDEX idx_tech_login_sessions_tech_logout (technician_id, logout_at),
+  INDEX idx_tech_login_sessions_open (technician_id, logout_at, last_seen_at)
+)
+`.trim();
+
+export async function ensureTechnicianLoginSessionsTable() {
+  const p = await getPool();
+  await p.execute(TECHNICIAN_LOGIN_SESSIONS_TABLE_SQL);
+}
+
+const TECHNICIAN_ACTIVITY_ALERTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS technician_activity_alerts (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  technician_id INT NOT NULL,
+  alert_type VARCHAR(64) NOT NULL,
+  status VARCHAR(32) DEFAULT 'sent',
+  message TEXT,
+  metadata JSON,
+  sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_technician_activity_alerts_type_time (alert_type, sent_at),
+  INDEX idx_technician_activity_alerts_tech_time (technician_id, sent_at)
+)
+`.trim();
+
+export async function ensureTechnicianActivityAlertsTable() {
+  const p = await getPool();
+  await p.execute(TECHNICIAN_ACTIVITY_ALERTS_TABLE_SQL);
+}
+
 const JOB_MONITORING_ALERTS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS job_monitoring_alerts (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -374,11 +418,16 @@ export async function updateTechniciansTableSchema() {
   const p = await getPool();
   await addColumnIfNotExists(p, 'technicians', 'is_active BOOLEAN DEFAULT FALSE');
   await addColumnIfNotExists(p, 'technicians', 'is_available BOOLEAN DEFAULT FALSE');
+  await addColumnIfNotExists(p, 'technicians', 'is_logged_in BOOLEAN DEFAULT FALSE');
   await addColumnIfNotExists(p, 'technicians', 'latitude DECIMAL(10, 8)');
   await addColumnIfNotExists(p, 'technicians', 'longitude DECIMAL(11, 8)');
   await addColumnIfNotExists(p, 'technicians', 'current_lat DECIMAL(10, 8)');
   await addColumnIfNotExists(p, 'technicians', 'current_lng DECIMAL(11, 8)');
   await addColumnIfNotExists(p, 'technicians', 'last_location_update DATETIME NULL');
+  await addColumnIfNotExists(p, 'technicians', 'last_login_at DATETIME NULL');
+  await addColumnIfNotExists(p, 'technicians', 'last_logout_at DATETIME NULL');
+  await addColumnIfNotExists(p, 'technicians', 'last_seen_at DATETIME NULL');
+  await addColumnIfNotExists(p, 'technicians', 'login_reminder_sent_at DATETIME NULL');
   await addColumnIfNotExists(p, 'technicians', 'acceptance_rate DECIMAL(5,2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'technicians', 'skill_set JSON');
   await addColumnIfNotExists(p, 'technicians', 'current_job_id INT');
@@ -422,6 +471,10 @@ export async function updateTechniciansTableSchema() {
   await addColumnIfNotExists(p, 'technicians', 'jobs_completed INT DEFAULT 0');
   await addColumnIfNotExists(p, 'technicians', 'total_earnings DECIMAL(12, 2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'technicians', 'rating DECIMAL(3, 2) DEFAULT 5.00');
+
+  await addIndexIfNotExists(p, "technicians", "idx_technicians_is_logged_in", "is_logged_in");
+  await addIndexIfNotExists(p, "technicians", "idx_technicians_last_seen_at", "last_seen_at");
+  await addIndexIfNotExists(p, "technicians", "idx_technicians_login_reminder", "login_reminder_sent_at");
 
   // New column for user phone
   await addColumnIfNotExists(p, 'users', 'phone VARCHAR(50)');

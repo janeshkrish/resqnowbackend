@@ -84,6 +84,15 @@ npm install
 - `GOOGLE_CALLBACK_URL=https://resqnowbackend.onrender.com/auth/google/callback`
 - `CORS_ALLOWED_ORIGINS=https://resqnow.org,https://www.resqnow.org`
 
+### Optional Technician Activity Monitoring
+
+- `TECHNICIAN_ACTIVITY_MONITOR_ENABLED` (default: `true`)
+- `TECHNICIAN_ACTIVITY_MONITOR_INTERVAL_MS` (default: `300000`)
+- `TECHNICIAN_ACTIVITY_IDLE_TIMEOUT_MINUTES` (default: `45`)
+- `TECHNICIAN_LOGIN_REMINDER_INACTIVITY_MINUTES` (default: `720`)
+- `TECHNICIAN_LOGIN_REMINDER_COOLDOWN_MINUTES` (default: `720`)
+- `TECHNICIAN_LOGIN_REMINDER_BATCH_SIZE` (default: `100`)
+
 ## Run
 
 ### Development

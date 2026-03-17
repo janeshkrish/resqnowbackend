@@ -338,6 +338,46 @@ class NotificationService {
       };
     }
 
+    if (userType === "technician" && event === "technician:login_reminder") {
+      const title = normalizeText(data?.title || "Please log in to ResQNow");
+      const body = normalizeText(
+        data?.message ||
+          "You have been inactive for a while. Log in to keep receiving job requests."
+      );
+      const dashboardPath = "/technician/login";
+      const dashboardLink = frontendBaseUrl ? `${frontendBaseUrl}${dashboardPath}` : undefined;
+
+      return {
+        notification: { title, body },
+        data: stringifyDataPayload({
+          event,
+          type: "LOGIN_REMINDER",
+          priority: "HIGH",
+          deepLinkPath: dashboardPath,
+          inactivityMinutes: data?.inactivityMinutes ?? "",
+        }),
+        android: {
+          priority: "high",
+          ttl: 1800000,
+        },
+        webpush: {
+          headers: {
+            Urgency: "high",
+            TTL: "1800",
+          },
+          notification: {
+            title,
+            body,
+            icon: "/icons/icon-192x192.png",
+            badge: "/icons/icon-192x192.png",
+            tag: `tech-login-reminder-${Date.now()}`,
+            requireInteraction: true,
+          },
+          ...(dashboardLink ? { fcmOptions: { link: dashboardLink } } : {}),
+        },
+      };
+    }
+
     if (
       userType === "technician" &&
       (event === "admin:system_announcement" ||

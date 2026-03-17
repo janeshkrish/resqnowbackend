@@ -1,5 +1,6 @@
 import { getPool } from "../db.js";
 import { ensureAdminExtendedSchema } from "../services/adminExtendedSchema.js";
+import { sendManualTechnicianLoginReminder } from "../services/technicianActivityService.js";
 import { buildPagination, likeFilter, parseJson, resolveAdminId, toPositiveInt } from "./utils.js";
 
 const ACTIVE_JOB_STATUSES = [
@@ -44,6 +45,7 @@ export async function getTechnicians(req, res) {
     const { page, limit, offset } = buildPagination(req.query);
     const search = String(req.query?.search || "").trim();
     const statusFilter = String(req.query?.status || "").trim().toLowerCase();
+    const loginStatusFilter = String(req.query?.loginStatus || "").trim().toLowerCase();
     const visibilityFilter = String(req.query?.visibility || "").trim().toLowerCase();
 
     const whereClauses = [];
@@ -65,6 +67,12 @@ export async function getTechnicians(req, res) {
       whereClauses.push("NOT (COALESCE(t.is_active, 0) = 1 AND COALESCE(t.is_available, 0) = 1)");
     }
 
+    if (["logged_in", "logged-in", "loggedin", "in"].includes(loginStatusFilter)) {
+      whereClauses.push("COALESCE(t.is_logged_in, 0) = 1");
+    } else if (["logged_out", "logged-out", "loggedout", "out"].includes(loginStatusFilter)) {
+      whereClauses.push("COALESCE(t.is_logged_in, 0) = 0");
+    }
+
     if (visibilityFilter === "visible") {
       whereClauses.push("COALESCE(v.is_visible, 1) = 1");
     } else if (visibilityFilter === "hidden") {
@@ -74,6 +82,7 @@ export async function getTechnicians(req, res) {
     const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
     const pool = await getPool();
+    const nowMs = Date.now();
     const [rows] = await pool.query(
       `SELECT
          t.id AS technician_id,
@@ -82,11 +91,41 @@ export async function getTechnicians(req, res) {
          COALESCE(t.rating, 0) AS rating,
          COALESCE(t.is_active, 0) AS is_active,
          COALESCE(t.is_available, 0) AS is_available,
+         COALESCE(t.is_logged_in, 0) AS is_logged_in,
+         t.last_login_at,
+         t.last_logout_at,
+         t.last_seen_at,
+         t.login_reminder_sent_at,
          COALESCE(v.is_visible, 1) AS is_visible,
          COALESCE(n.note_text, '') AS admin_note,
+         COALESCE(tls.current_session_login_at, NULL) AS current_session_login_at,
+         COALESCE(tls.logged_seconds_24h, 0) AS logged_seconds_24h,
+         COALESCE(tls.logged_seconds_total, 0) AS logged_seconds_total,
          COALESCE(SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN (${sqlPlaceholders(ACTIVE_JOB_STATUSES)}) THEN 1 ELSE 0 END), 0) AS active_jobs
        FROM technicians t
        LEFT JOIN service_requests sr ON sr.technician_id = t.id
+       LEFT JOIN (
+         SELECT
+           technician_id,
+           MAX(CASE WHEN logout_at IS NULL THEN login_at END) AS current_session_login_at,
+           SUM(
+             CASE
+               WHEN COALESCE(logout_at, NOW()) > DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                 THEN GREATEST(
+                   TIMESTAMPDIFF(
+                     SECOND,
+                     GREATEST(login_at, DATE_SUB(NOW(), INTERVAL 24 HOUR)),
+                     COALESCE(logout_at, NOW())
+                   ),
+                   0
+                 )
+               ELSE 0
+             END
+           ) AS logged_seconds_24h,
+           SUM(GREATEST(TIMESTAMPDIFF(SECOND, login_at, COALESCE(logout_at, NOW())), 0)) AS logged_seconds_total
+         FROM technician_login_sessions
+         GROUP BY technician_id
+       ) tls ON tls.technician_id = t.id
        LEFT JOIN (
          SELECT tan.technician_id,
                 JSON_EXTRACT(tan.metadata, '$.isVisible') AS is_visible
@@ -110,7 +149,23 @@ export async function getTechnicians(req, res) {
          ) latest ON latest.max_id = tan.id
        ) n ON n.technician_id = t.id
        ${whereSql}
-       GROUP BY t.id, t.name, t.email, t.rating, t.is_active, t.is_available, v.is_visible, n.note_text
+       GROUP BY
+         t.id,
+         t.name,
+         t.email,
+         t.rating,
+         t.is_active,
+         t.is_available,
+         t.is_logged_in,
+         t.last_login_at,
+         t.last_logout_at,
+         t.last_seen_at,
+         t.login_reminder_sent_at,
+         v.is_visible,
+         n.note_text,
+         tls.current_session_login_at,
+         tls.logged_seconds_24h,
+         tls.logged_seconds_total
        ORDER BY active_jobs DESC, t.name ASC
        LIMIT ? OFFSET ?`,
       [...ACTIVE_JOB_STATUSES, ...values, limit, offset]
@@ -141,10 +196,24 @@ export async function getTechnicians(req, res) {
         technicianId: row.technician_id,
         name: row.name,
         status: row.is_active && row.is_available ? "Online" : "Offline",
+        loginStatus: row.is_logged_in ? "Logged In" : "Logged Out",
         activeJobs: Number(row.active_jobs || 0),
         rating: Number(row.rating || 0),
         visibility: normalizeVisibility(row.is_visible, true),
         adminNote: row.admin_note || "",
+        lastLoginAt: row.last_login_at || null,
+        lastLogoutAt: row.last_logout_at || null,
+        lastSeenAt: row.last_seen_at || null,
+        currentSessionStartedAt: row.current_session_login_at || null,
+        currentSessionHours: (() => {
+          if (!row.current_session_login_at) return 0;
+          const startedAtMs = new Date(row.current_session_login_at).getTime();
+          if (!Number.isFinite(startedAtMs)) return 0;
+          return Number(Math.max(0, (nowMs - startedAtMs) / 3600000).toFixed(2));
+        })(),
+        loggedInHours24h: Number((Number(row.logged_seconds_24h || 0) / 3600).toFixed(2)),
+        loggedInHoursTotal: Number((Number(row.logged_seconds_total || 0) / 3600).toFixed(2)),
+        inactivityAlertSentAt: row.login_reminder_sent_at || null,
       })),
       pagination: {
         page,
@@ -271,5 +340,40 @@ export async function addTechnicianNote(req, res) {
   } catch (error) {
     console.error("[admin.technicians.note] failed:", error?.message || error);
     return res.status(500).json({ error: "Failed to add technician note." });
+  }
+}
+
+export async function sendTechnicianLoginReminder(req, res) {
+  try {
+    await ensureAdminExtendedSchema();
+
+    const technicianId = toPositiveInt(req.body?.technicianId, 0, { min: 1, max: Number.MAX_SAFE_INTEGER });
+    const message = String(req.body?.message || "").trim();
+
+    if (!technicianId) {
+      return res.status(400).json({ error: "technicianId is required." });
+    }
+
+    const adminId = resolveAdminId(req);
+    const result = await sendManualTechnicianLoginReminder({
+      technicianId,
+      adminId,
+      message: message || null,
+    });
+
+    const pool = await getPool();
+    await logAction(pool, adminId, "sendTechnicianLoginReminder", technicianId, {
+      manual: true,
+      ...(message ? { message } : {}),
+    });
+
+    return res.status(201).json(result);
+  } catch (error) {
+    const statusCode = Number(error?.statusCode || 0);
+    if (statusCode >= 400 && statusCode < 500) {
+      return res.status(statusCode).json({ error: error?.message || "Failed to send login reminder." });
+    }
+    console.error("[admin.technicians.loginReminder] failed:", error?.message || error);
+    return res.status(500).json({ error: "Failed to send login reminder." });
   }
 }

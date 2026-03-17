@@ -43,6 +43,10 @@ import {
   stopOperationsCommandCenterMonitor,
 } from "./services/operationsCommandCenterService.js";
 import { startDispatchQueueWorker, stopDispatchQueueWorker } from "./services/dispatchQueueService.js";
+import {
+  startTechnicianActivityMonitor,
+  stopTechnicianActivityMonitor,
+} from "./services/technicianActivityService.js";
 
 const PORT = Number(process.env.PORT || 3001);
 const HOST = "0.0.0.0";
@@ -78,6 +82,8 @@ async function bootstrapDatabase() {
     ensureTechnicianServicesTable,
     ensurePlatformPricingConfigTable,
     ensureTechnicianLocationHistoryTable,
+    ensureTechnicianLoginSessionsTable,
+    ensureTechnicianActivityAlertsTable,
     ensureJobMonitoringAlertsTable,
     updateTechniciansTableSchema,
     updateServiceRequestsTableSchema,
@@ -104,6 +110,8 @@ async function bootstrapDatabase() {
     ensureTechnicianServicesTable(),
     ensurePlatformPricingConfigTable(),
     ensureTechnicianLocationHistoryTable(),
+    ensureTechnicianLoginSessionsTable(),
+    ensureTechnicianActivityAlertsTable(),
     ensureJobMonitoringAlertsTable(),
   ]);
 
@@ -242,6 +250,7 @@ async function shutdown(signal) {
     if (err) {
       console.error("[SHUTDOWN] Error while closing HTTP server:", err?.message || err);
     }
+    stopTechnicianActivityMonitor();
     stopOperationsCommandCenterMonitor();
     await stopDispatchQueueWorker();
     await closePool();
@@ -280,6 +289,7 @@ async function startServer() {
     console.log("[Dispatch Queue] Embedded worker disabled (DISPATCH_WORKER_EMBEDDED=false).");
   }
   startOperationsCommandCenterMonitor();
+  startTechnicianActivityMonitor();
 
   await new Promise((resolve) => {
     httpServer.listen(PORT, HOST, resolve);

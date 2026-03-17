@@ -17,6 +17,11 @@ import {
 import { estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
 import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js";
+import {
+  markTechnicianHeartbeat,
+  markTechnicianLogin,
+  markTechnicianLogout,
+} from "../services/technicianActivityService.js";
 
 const router = Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -207,7 +212,11 @@ function rowToTechnician(row) {
     latitude: row.latitude ? parseFloat(row.latitude) : null,
     longitude: row.longitude ? parseFloat(row.longitude) : null,
     is_active: !!row.is_active,
-    is_available: !!row.is_available
+    is_available: !!row.is_available,
+    is_logged_in: !!row.is_logged_in,
+    last_login_at: row.last_login_at || null,
+    last_logout_at: row.last_logout_at || null,
+    last_seen_at: row.last_seen_at || null
   };
 }
 
@@ -621,7 +630,26 @@ router.post("/login", async (req, res) => {
         error: "Your account is pending admin approval.",
       });
     }
-    const technician = rowToTechnician(row);
+    try {
+      await markTechnicianLogin({
+        technicianId: row.id,
+        source: req.body?.source || req.get("x-client-platform") || "web",
+        metadata: {
+          ip: req.ip || null,
+          userAgent: req.get("user-agent") || null,
+        },
+      });
+    } catch (trackingError) {
+      console.error("[Technician login tracking] failed:", trackingError?.message || trackingError);
+    }
+
+    const technician = rowToTechnician({
+      ...row,
+      is_logged_in: true,
+      last_login_at: new Date(),
+      last_seen_at: new Date(),
+      login_reminder_sent_at: null,
+    });
     const token = signTechnicianToken(row.id, row.email);
     return res.json({ token, technician });
   } catch (err) {
@@ -629,9 +657,46 @@ router.post("/login", async (req, res) => {
   }
 });
 
+router.post("/logout", verifyTechnician, async (req, res) => {
+  try {
+    await markTechnicianLogout({
+      technicianId: req.technicianId,
+      reason: req.body?.reason || "logout",
+      source: req.body?.source || req.get("x-client-platform") || "web",
+    });
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("[Technician logout tracking] failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to log out." });
+  }
+});
+
+router.post("/activity/heartbeat", verifyTechnician, async (req, res) => {
+  try {
+    await markTechnicianHeartbeat({
+      technicianId: req.technicianId,
+      source: req.body?.source || req.get("x-client-platform") || "web",
+      metadata: req.body?.metadata || null,
+      createSessionIfMissing: true,
+    });
+    return res.json({ success: true, seenAt: new Date().toISOString() });
+  } catch (err) {
+    console.error("[Technician heartbeat tracking] failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to update heartbeat." });
+  }
+});
+
 
 router.get("/me", verifyTechnician, async (req, res) => {
   try {
+    void markTechnicianHeartbeat({
+      technicianId: req.technicianId,
+      source: req.get("x-client-platform") || "web",
+      createSessionIfMissing: false,
+    }).catch((trackingError) => {
+      console.error("[Technician /me heartbeat] failed:", trackingError?.message || trackingError);
+    });
+
     const rows = await db.query("SELECT * FROM technicians WHERE id = ? LIMIT 1", [req.technicianId]);
     const row = rows[0];
     if (!row) return res.status(404).json({ error: "Technician not found." });
@@ -755,6 +820,15 @@ router.patch("/me/status", verifyTechnician, async (req, res) => {
       active
     });
 
+    void markTechnicianHeartbeat({
+      technicianId: req.technicianId,
+      source: req.get("x-client-platform") || "web",
+      metadata: { active },
+      createSessionIfMissing: false,
+    }).catch((trackingError) => {
+      console.error("[Technician status heartbeat] failed:", trackingError?.message || trackingError);
+    });
+
     return res.json({ success: true, active });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Failed to update status." });
@@ -834,6 +908,18 @@ router.patch("/me/location", verifyTechnician, async (req, res) => {
       technicianId: req.technicianId,
       lat: parsedLat,
       lng: parsedLng
+    });
+
+    void markTechnicianHeartbeat({
+      technicianId: req.technicianId,
+      source: req.get("x-client-platform") || "web",
+      metadata: {
+        latitude: parsedLat,
+        longitude: parsedLng,
+      },
+      createSessionIfMissing: false,
+    }).catch((trackingError) => {
+      console.error("[Technician me/location heartbeat] failed:", trackingError?.message || trackingError);
     });
 
 
@@ -1315,6 +1401,14 @@ router.patch("/status", verifyTechnician, async (req, res) => {
        WHERE id = ?`,
       [active ? 1 : 0, active ? 1 : 0, req.technicianId]
     );
+    void markTechnicianHeartbeat({
+      technicianId: req.technicianId,
+      source: req.get("x-client-platform") || "web",
+      metadata: { active },
+      createSessionIfMissing: false,
+    }).catch((trackingError) => {
+      console.error("[Technician status heartbeat] failed:", trackingError?.message || trackingError);
+    });
     res.json({ success: true, is_active: active, is_available: active });
   } catch (err) {
     console.error("Update status error:", err);
@@ -1387,6 +1481,18 @@ router.patch("/location", verifyTechnician, async (req, res) => {
     } finally {
       conn.release();
     }
+    void markTechnicianHeartbeat({
+      technicianId: req.technicianId,
+      source: req.get("x-client-platform") || "web",
+      metadata: {
+        latitude: parsedLat,
+        longitude: parsedLng,
+      },
+      createSessionIfMissing: false,
+    }).catch((trackingError) => {
+      console.error("[Technician location heartbeat] failed:", trackingError?.message || trackingError);
+    });
+
     // Optionally trigger socket event here if not already handled by client socket
     res.json({ success: true });
   } catch (err) {

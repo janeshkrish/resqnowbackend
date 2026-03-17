@@ -20,6 +20,7 @@ import {
   getTechnicians,
   toggleTechnicianVisibility,
   addTechnicianNote,
+  sendTechnicianLoginReminder,
 } from "../controllers/technicianController.js";
 import {
   getFinanceSummary,
@@ -84,6 +85,7 @@ router.post("/requests/close", closeRequest);
 router.get("/technicians", getTechnicians);
 router.post("/technician/toggle", toggleTechnicianVisibility);
 router.post("/technician/note", addTechnicianNote);
+router.post("/technician/send-login-reminder", sendTechnicianLoginReminder);
 
 router.get("/finance/summary", getFinanceSummary);
 router.get("/finance", getFinanceTransactions);
