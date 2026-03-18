@@ -66,7 +66,7 @@ function defaultBackendUrl() {
     return "https://resqnowbackend.onrender.com";
   }
 
-  const port = process.env.PORT || "3001";
+  const port = process.env.PORT || "5000";
   return `http://localhost:${port}`;
 }
 

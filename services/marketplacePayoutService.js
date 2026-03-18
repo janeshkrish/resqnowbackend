@@ -160,6 +160,9 @@ export async function settlePaymentToTechnician({
     }
 
     const wallet = await ensureTechnicianWallet(conn, paymentRow.technician_id, paymentRow.currency || "INR");
+    if (!wallet) {
+      throw new Error("Technician wallet cannot be created because the technician no longer exists.");
+    }
     const payoutId = await createPayoutRecord(conn, {
       payoutReference: nextPayoutReference(),
       idempotencyKey: resolvedIdempotencyKey,
@@ -239,6 +242,9 @@ export async function createTechnicianWalletPayout({
     }
 
     const wallet = await ensureTechnicianWallet(conn, technicianId, "INR");
+    if (!wallet) {
+      throw new Error("Technician wallet cannot be created because the technician no longer exists.");
+    }
     const maxPayoutAmount = roundMoney(wallet.withdrawable_balance || 0);
     const payoutAmount = amount == null ? maxPayoutAmount : roundMoney(amount);
 

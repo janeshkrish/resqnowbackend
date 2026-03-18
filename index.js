@@ -48,7 +48,7 @@ import {
   stopTechnicianActivityMonitor,
 } from "./services/technicianActivityService.js";
 
-const PORT = Number(process.env.PORT || 3001);
+const PORT = Number(process.env.PORT || 5000);
 const HOST = "0.0.0.0";
 
 function shouldRunEmbeddedDispatchWorker() {
@@ -96,41 +96,49 @@ async function bootstrapDatabase() {
     updateUsersTableSchema,
   } = await import("./db.js");
 
-  await Promise.all([
-    ensureTechniciansTable(),
-    ensureUsersTable(),
-    ensureOtpRequestsTable(),
-    ensureOtpRateLimitsTable(),
-    ensureServiceRequestsTable(),
-    ensureNotificationsTable(),
-    ensureReviewsTable(),
-    ensureFilesTable(),
-    ensureDeviceTokensTable(),
-    ensurePaymentsTable(),
-    ensureInvoicesTable(),
-    ensureTechnicianWalletsTable(),
-    ensureWalletTransactionsTable(),
-    ensurePayoutsTable(),
-    ensurePayoutAllocationsTable(),
-    ensurePaymentRefundsTable(),
-    ensureTechnicianApprovalAuditTable(),
-    ensureUserVehiclesTable(),
-    ensureTechnicianDuesTable(),
-    ensureDispatchOffersTable(),
-    ensureTechnicianServicesTable(),
-    ensurePlatformPricingConfigTable(),
-    ensureTechnicianLocationHistoryTable(),
-    ensureTechnicianLoginSessionsTable(),
-    ensureTechnicianActivityAlertsTable(),
-    ensureJobMonitoringAlertsTable(),
-  ]);
+  const ensureSteps = [
+    ensureTechniciansTable,
+    ensureUsersTable,
+    ensureOtpRequestsTable,
+    ensureOtpRateLimitsTable,
+    ensureServiceRequestsTable,
+    ensureNotificationsTable,
+    ensureReviewsTable,
+    ensureFilesTable,
+    ensureDeviceTokensTable,
+    ensurePaymentsTable,
+    ensureInvoicesTable,
+    ensureTechnicianWalletsTable,
+    ensureWalletTransactionsTable,
+    ensurePayoutsTable,
+    ensurePayoutAllocationsTable,
+    ensurePaymentRefundsTable,
+    ensureTechnicianApprovalAuditTable,
+    ensureUserVehiclesTable,
+    ensureTechnicianDuesTable,
+    ensureDispatchOffersTable,
+    ensureTechnicianServicesTable,
+    ensurePlatformPricingConfigTable,
+    ensureTechnicianLocationHistoryTable,
+    ensureTechnicianLoginSessionsTable,
+    ensureTechnicianActivityAlertsTable,
+    ensureJobMonitoringAlertsTable,
+  ];
 
-  await Promise.all([
-    updateTechniciansTableSchema(),
-    updateServiceRequestsTableSchema(),
-    updatePaymentsTableSchema(),
-    updateUsersTableSchema(),
-  ]);
+  for (const ensureStep of ensureSteps) {
+    await ensureStep();
+  }
+
+  const updateSteps = [
+    updateTechniciansTableSchema,
+    updateServiceRequestsTableSchema,
+    updatePaymentsTableSchema,
+    updateUsersTableSchema,
+  ];
+
+  for (const updateStep of updateSteps) {
+    await updateStep();
+  }
 
   const { getPool } = await import("./db.js");
   const { backfillMarketplaceWalletCredits } = await import("./services/marketplaceWalletService.js");
@@ -169,7 +177,7 @@ function createApp() {
       const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
       console.log(
         `[${new Date().toISOString()}] ${requestId} ${req.method} ${req.originalUrl} ` +
-        `status=${res.statusCode} duration_ms=${durationMs.toFixed(1)} origin=${origin} ip=${req.ip}`
+        `status=${res.statusCode} duration_ms=${durationMs.toFixed(1)} origin=${origin}`
       );
     });
     next();
@@ -281,41 +289,51 @@ process.on("uncaughtException", (err) => {
 });
 
 async function startServer() {
-  // explicit early guard for email configuration to produce an immediate
-  // and clear error in Render logs if missing.
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-    console.error("Missing email environment variables");
-    process.exit(1);
-  }
-
-  validateEnvironmentOrThrow();
-  logEnvironmentSummary();
-
-  await bootstrapDatabase();
-  dbState.ready = true;
-  dbState.lastError = null;
-  dbState.lastCheckedAt = new Date().toISOString();
-  if (shouldRunEmbeddedDispatchWorker()) {
-    await startDispatchQueueWorker();
-  } else {
-    console.log("[Dispatch Queue] Embedded worker disabled (DISPATCH_WORKER_EMBEDDED=false).");
-  }
-  startOperationsCommandCenterMonitor();
-  startTechnicianActivityMonitor();
-
   await new Promise((resolve) => {
     httpServer.listen(PORT, HOST, resolve);
   });
 
+  console.log(`Server running on ${PORT}`);
   console.log("\n========================================");
   console.log("SERVER STARTED");
   console.log(`Bind: ${HOST}:${PORT}`);
+  console.log("========================================\n");
+
+  try {
+    validateEnvironmentOrThrow();
+    logEnvironmentSummary();
+
+    try {
+      await bootstrapDatabase();
+      dbState.ready = true;
+      dbState.lastError = null;
+      dbState.lastCheckedAt = new Date().toISOString();
+
+      if (shouldRunEmbeddedDispatchWorker()) {
+        await startDispatchQueueWorker();
+      } else {
+        console.log("[Dispatch Queue] Embedded worker disabled (DISPATCH_WORKER_EMBEDDED=false).");
+      }
+      startOperationsCommandCenterMonitor();
+      startTechnicianActivityMonitor();
+    } catch (error) {
+      dbState.ready = false;
+      dbState.lastCheckedAt = new Date().toISOString();
+      dbState.lastError = error?.message || String(error);
+      console.error("[STARTUP] Database bootstrap failed. Server will continue running with readiness=false.", error?.stack || error);
+    }
+  } catch (error) {
+    dbState.ready = false;
+    dbState.lastCheckedAt = new Date().toISOString();
+    dbState.lastError = error?.message || String(error);
+    console.error("[STARTUP] Environment validation failed. Server will continue running with readiness=false.", error?.stack || error);
+  }
+
   console.log(`API Base URL: ${getApiBaseUrl()}`);
   console.log(`Frontend URL: ${getFrontendUrl()}`);
   console.log(`Backend Public URL: ${getBackendPublicUrl()}`);
   console.log(`Google Callback URL: ${getGoogleCallbackUrl()}`);
   console.log(`Allowed Origins: ${getAllowedOriginsForLogs().join(", ")}`);
-  console.log("========================================\n");
 
   // Mail connectivity should not block API startup on Render; log and continue if SMTP is unreachable.
   void verifyMailerConnection().then((mailerReady) => {

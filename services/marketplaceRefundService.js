@@ -181,6 +181,9 @@ export async function processPaymentRefund({
 
       if (technicianAdjustmentAmount > 0) {
         const wallet = await ensureTechnicianWallet(conn, paymentRow.technician_id, paymentRow.currency || "INR");
+        if (!wallet) {
+          throw new Error("Technician wallet cannot be created because the technician no longer exists.");
+        }
         const balanceBefore = roundMoney(wallet.withdrawable_balance || 0);
         const balanceAfter = roundMoney(subtractMoney(balanceBefore, technicianAdjustmentAmount));
         if (balanceAfter < 0) {

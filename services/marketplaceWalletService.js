@@ -19,7 +19,7 @@ import { addMoney, roundMoney, subtractMoney } from "../utils/money.js";
 
 export async function creditTechnicianWalletForPayment(conn, payload) {
   if (!payload?.technicianId || !payload?.paymentId || !payload?.amount) {
-    return { credited: false, walletTransactionId: null, duplicate: false };
+    return { credited: false, walletTransactionId: null, duplicate: false, skipped: true };
   }
 
   const existingWalletCredit = await getWalletCreditByPaymentIdForUpdate(conn, payload.paymentId);
@@ -33,10 +33,23 @@ export async function creditTechnicianWalletForPayment(conn, payload) {
       credited: false,
       walletTransactionId: Number(existingWalletCredit.id),
       duplicate: true,
+      skipped: false,
     };
   }
 
   const wallet = await ensureTechnicianWallet(conn, payload.technicianId, payload.currency || "INR");
+  if (!wallet) {
+    console.warn(
+      `[Marketplace Wallet] Skipping payment credit ${payload.paymentId}: technician ${payload.technicianId} was not found.`
+    );
+    return {
+      credited: false,
+      walletTransactionId: null,
+      duplicate: false,
+      skipped: true,
+    };
+  }
+
   const amount = roundMoney(payload.amount);
   const balanceBefore = roundMoney(wallet.withdrawable_balance || 0);
   const balanceAfter = addMoney(balanceBefore, amount);
@@ -75,11 +88,15 @@ export async function creditTechnicianWalletForPayment(conn, payload) {
     credited: true,
     walletTransactionId,
     duplicate: false,
+    skipped: false,
   };
 }
 
 export async function debitTechnicianWalletForPayout(conn, payload) {
   const wallet = await ensureTechnicianWallet(conn, payload.technicianId, payload.currency || "INR");
+  if (!wallet) {
+    throw new Error("Technician wallet cannot be created because the technician no longer exists.");
+  }
   const amount = roundMoney(payload.amount);
   const balanceBefore = roundMoney(wallet.withdrawable_balance || 0);
   const balanceAfter = roundMoney(subtractMoney(balanceBefore, amount));
@@ -184,23 +201,30 @@ export async function backfillMarketplaceWalletCredits(pool) {
 
   let creditsCreated = 0;
   for (const row of rows || []) {
-    await withTransaction(pool, async (conn) => {
-      const result = await creditTechnicianWalletForPayment(conn, {
-        technicianId: row.technician_id,
-        paymentId: row.payment_id,
-        serviceRequestId: row.service_request_id,
-        amount: row.base_amount,
-        currency: row.currency || "INR",
-        description: "Backfilled marketplace wallet credit from completed Razorpay payment.",
-        idempotencyKey: `payment-credit:${row.payment_id}`,
-        metadata: {
-          backfilled: true,
-        },
+    try {
+      await withTransaction(pool, async (conn) => {
+        const result = await creditTechnicianWalletForPayment(conn, {
+          technicianId: row.technician_id,
+          paymentId: row.payment_id,
+          serviceRequestId: row.service_request_id,
+          amount: row.base_amount,
+          currency: row.currency || "INR",
+          description: "Backfilled marketplace wallet credit from completed Razorpay payment.",
+          idempotencyKey: `payment-credit:${row.payment_id}`,
+          metadata: {
+            backfilled: true,
+          },
+        });
+        if (result.credited) {
+          creditsCreated += 1;
+        }
       });
-      if (result.credited) {
-        creditsCreated += 1;
-      }
-    });
+    } catch (error) {
+      console.error(
+        `[Marketplace Wallet] Backfill skipped for payment ${row.payment_id}:`,
+        error?.message || error
+      );
+    }
   }
 
   return {

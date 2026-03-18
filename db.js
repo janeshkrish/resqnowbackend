@@ -1,6 +1,149 @@
 import mysql from "mysql2/promise";
 
 let pool = null;
+const DDL_MAX_RETRIES = 3;
+const DDL_RETRY_BASE_DELAY_MS = 250;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeIdentifier(value) {
+  return String(value || "").trim().replace(/`/g, "");
+}
+
+function extractColumnName(columnDef) {
+  const match = String(columnDef || "").trim().match(/^`?([A-Za-z0-9_]+)`?/);
+  return match ? match[1] : "";
+}
+
+function normalizeColumnDefault(value) {
+  if (value == null) return null;
+  return String(value).trim().replace(/^['"]|['"]$/g, "");
+}
+
+function isTiDbRetryableDdlError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    message.includes("information schema is changed during execution") ||
+    message.includes("information schema changed during execution") ||
+    message.includes("schema is changed during execution") ||
+    message.includes("schema changed during execution")
+  );
+}
+
+async function runDdlWithRetry(poolLike, operationName, handler) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= DDL_MAX_RETRIES; attempt += 1) {
+    try {
+      return await handler();
+    } catch (error) {
+      lastError = error;
+      if (!isTiDbRetryableDdlError(error) || attempt >= DDL_MAX_RETRIES) {
+        throw error;
+      }
+
+      const delayMs = DDL_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+      console.warn(
+        `[DB DDL] Retry ${attempt}/${DDL_MAX_RETRIES} for ${operationName} after ${delayMs}ms: ${error?.message || error}`
+      );
+      await sleep(delayMs);
+    }
+  }
+
+  throw lastError;
+}
+
+async function columnExists(poolLike, tableName, columnName) {
+  const [rows] = await poolLike.query(
+    `SELECT 1
+     FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = ?
+       AND column_name = ?
+     LIMIT 1`,
+    [normalizeIdentifier(tableName), normalizeIdentifier(columnName)]
+  );
+  return rows.length > 0;
+}
+
+async function getColumnMetadata(poolLike, tableName, columnName) {
+  const [rows] = await poolLike.query(
+    `SELECT
+       data_type,
+       column_type,
+       column_default,
+       is_nullable,
+       character_maximum_length
+     FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = ?
+       AND column_name = ?
+     LIMIT 1`,
+    [normalizeIdentifier(tableName), normalizeIdentifier(columnName)]
+  );
+  return rows[0] || null;
+}
+
+async function indexExists(poolLike, tableName, indexName) {
+  const [rows] = await poolLike.query(
+    `SELECT 1
+     FROM information_schema.statistics
+     WHERE table_schema = DATABASE()
+       AND table_name = ?
+       AND index_name = ?
+     LIMIT 1`,
+    [normalizeIdentifier(tableName), normalizeIdentifier(indexName)]
+  );
+  return rows.length > 0;
+}
+
+async function ensureVarcharColumnDefinition(poolLike, tableName, columnName, length, defaultValue) {
+  const metadata = await getColumnMetadata(poolLike, tableName, columnName);
+  if (!metadata) return;
+
+  const currentLength = Number(metadata.character_maximum_length || 0);
+  const currentDefault = normalizeColumnDefault(metadata.column_default);
+  const needsAlter =
+    String(metadata.data_type || "").toLowerCase() !== "varchar" ||
+    currentLength < Number(length) ||
+    normalizeColumnDefault(defaultValue) !== currentDefault;
+
+  if (!needsAlter) return;
+
+  await runDdlWithRetry(
+    poolLike,
+    `modify ${tableName}.${columnName}`,
+    () =>
+      poolLike.query(
+        `ALTER TABLE ${normalizeIdentifier(tableName)} MODIFY COLUMN ${normalizeIdentifier(columnName)} VARCHAR(${length}) DEFAULT ?`,
+        [defaultValue]
+      )
+  );
+}
+
+async function ensureLargeReasonColumn(poolLike, tableName, columnName, minimumLength) {
+  const metadata = await getColumnMetadata(poolLike, tableName, columnName);
+  if (!metadata) return;
+
+  const dataType = String(metadata.data_type || "").toLowerCase();
+  const currentLength = Number(metadata.character_maximum_length || 0);
+  const alreadyWideEnough =
+    ["text", "mediumtext", "longtext"].includes(dataType) ||
+    (dataType === "varchar" && currentLength >= Number(minimumLength));
+
+  if (alreadyWideEnough) return;
+
+  await runDdlWithRetry(
+    poolLike,
+    `modify ${tableName}.${columnName}`,
+    () =>
+      poolLike.query(
+        `ALTER TABLE ${normalizeIdentifier(tableName)} MODIFY COLUMN ${normalizeIdentifier(columnName)} VARCHAR(${minimumLength})`
+      )
+  );
+}
 
 function isProductionLike() {
   return (
@@ -386,8 +529,19 @@ export async function ensureReviewsTable() {
 // Helper to add columns if they don't exist
 // Using try-catch as robust way to handle "Duplicate column name" error across different MySQL versions
 async function addColumnIfNotExists(pool, table, columnDef) {
+  const columnName = extractColumnName(columnDef);
+  if (!columnName) {
+    throw new Error(`Unable to resolve column name from definition: ${columnDef}`);
+  }
+
+  if (await columnExists(pool, table, columnName)) {
+    return;
+  }
+
   try {
-    await pool.query(`ALTER TABLE ${table} ADD COLUMN ${columnDef}`);
+    await runDdlWithRetry(pool, `add column ${table}.${columnName}`, () =>
+      pool.query(`ALTER TABLE ${normalizeIdentifier(table)} ADD COLUMN ${columnDef}`)
+    );
   } catch (err) {
     // Ignore duplicate column error (code 1060: Duplicate column name)
     // Also ignore if it says something like "Duplicate field name"
@@ -398,8 +552,16 @@ async function addColumnIfNotExists(pool, table, columnDef) {
 }
 
 async function addIndexIfNotExists(pool, table, indexName, columnsSql) {
+  if (await indexExists(pool, table, indexName)) {
+    return;
+  }
+
   try {
-    await pool.query(`CREATE INDEX ${indexName} ON ${table} (${columnsSql})`);
+    await runDdlWithRetry(pool, `create index ${table}.${indexName}`, () =>
+      pool.query(
+        `CREATE INDEX ${normalizeIdentifier(indexName)} ON ${normalizeIdentifier(table)} (${columnsSql})`
+      )
+    );
   } catch (err) {
     const message = String(err?.message || "");
     const isDuplicateIndex =
@@ -415,8 +577,16 @@ async function addIndexIfNotExists(pool, table, indexName, columnsSql) {
 }
 
 async function addUniqueIndexIfNotExists(pool, table, indexName, columnsSql) {
+  if (await indexExists(pool, table, indexName)) {
+    return;
+  }
+
   try {
-    await pool.query(`CREATE UNIQUE INDEX ${indexName} ON ${table} (${columnsSql})`);
+    await runDdlWithRetry(pool, `create unique index ${table}.${indexName}`, () =>
+      pool.query(
+        `CREATE UNIQUE INDEX ${normalizeIdentifier(indexName)} ON ${normalizeIdentifier(table)} (${columnsSql})`
+      )
+    );
   } catch (err) {
     const message = String(err?.message || "");
     const isDuplicateIndex =
@@ -604,7 +774,7 @@ export async function ensurePaymentsTable() {
 export async function updatePaymentsTableSchema() {
   const p = await getPool();
   try {
-    await p.query("ALTER TABLE payments MODIFY COLUMN status VARCHAR(50) DEFAULT 'pending'");
+    await ensureVarcharColumnDefinition(p, "payments", "status", 50, "pending");
   } catch (err) {
     console.log("Note: could not modify payments.status column:", err.message);
   }
@@ -979,20 +1149,20 @@ export async function updateServiceRequestsTableSchema() {
   // Ensure status column can hold longer status strings like 'payment_pending'
   try {
     // Changing to VARCHAR(50) to be flexible and avoid "Data too long" for longer status strings
-    await p.query("ALTER TABLE service_requests MODIFY COLUMN status VARCHAR(50) DEFAULT 'pending'");
+    await ensureVarcharColumnDefinition(p, "service_requests", "status", 50, "pending");
   } catch (err) {
     // Ignore if modify fails on some DB versions, but log for visibility
     console.log("Note: could not modify service_requests.status column:", err.message);
   }
 
   try {
-    await p.query("ALTER TABLE service_requests MODIFY COLUMN payment_status VARCHAR(50) DEFAULT 'pending'");
+    await ensureVarcharColumnDefinition(p, "service_requests", "payment_status", 50, "pending");
   } catch (err) {
     console.log("Note: could not modify service_requests.payment_status column:", err.message);
   }
 
   try {
-    await p.query("ALTER TABLE service_requests MODIFY COLUMN cancellation_reason VARCHAR(1024)");
+    await ensureLargeReasonColumn(p, "service_requests", "cancellation_reason", 1024);
   } catch (err) {
     console.log("Note: could not modify service_requests.cancellation_reason column:", err.message);
   }

@@ -1863,13 +1863,7 @@ router.post("/verify-subscription-payment", verifyUser, async (req, res) => {
             .update(razorpay_order_id + "|" + razorpay_payment_id)
             .digest("hex");
 
-        console.log("[Debug] Subscription Verification:", {
-            secret_exists: true,
-            secret_len: RAZORPAY_KEY_SECRET.length,
-            generated: generated_signature,
-            received: razorpay_signature,
-            input: razorpay_order_id + "|" + razorpay_payment_id
-        });
+        console.log("[Subscription Verification] Signature comparison prepared for order verification.");
 
         if (generated_signature === razorpay_signature) {
             // Payment verified

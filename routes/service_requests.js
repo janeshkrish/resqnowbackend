@@ -539,11 +539,20 @@ router.post("/:id/accept", verifyTechnician, async (req, res) => {
             return res.status(409).json({ error: result.reason || "Job already taken." });
         }
 
+        const responseJob =
+            result?.job && typeof result.job === "object"
+                ? result.job
+                : {
+                    id: String(requestId),
+                    technician_id: technicianId,
+                    status: "accepted",
+                };
+
         res.json({
             success: true,
             idempotent: !!result.idempotent,
-            request: result.job,
-            job: result.job
+            request: responseJob,
+            job: responseJob
         });
 
     } catch (err) {

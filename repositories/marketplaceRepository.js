@@ -31,23 +31,61 @@ export async function getTechnicianWalletForUpdate(conn, technicianId) {
   return rows[0] || null;
 }
 
+async function getTechnicianForUpdate(conn, technicianId) {
+  const normalizedTechnicianId = Number(technicianId);
+  if (!Number.isInteger(normalizedTechnicianId) || normalizedTechnicianId <= 0) {
+    return null;
+  }
+
+  const [rows] = await conn.query(
+    `SELECT id
+     FROM technicians
+     WHERE id = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [normalizedTechnicianId]
+  );
+  return rows[0] || null;
+}
+
 export async function ensureTechnicianWallet(conn, technicianId, currency = "INR") {
-  const existing = await getTechnicianWalletForUpdate(conn, technicianId);
+  const normalizedTechnicianId = Number(technicianId);
+  if (!Number.isInteger(normalizedTechnicianId) || normalizedTechnicianId <= 0) {
+    return null;
+  }
+
+  const existing = await getTechnicianWalletForUpdate(conn, normalizedTechnicianId);
   if (existing) return existing;
 
-  await conn.execute(
-    `INSERT INTO technician_wallets (
-      technician_id,
-      currency,
-      total_earned,
-      withdrawable_balance,
-      total_paid_out,
-      on_hold_balance
-    ) VALUES (?, ?, 0, 0, 0, 0)`,
-    [technicianId, String(currency || "INR").toUpperCase()]
-  );
+  const technician = await getTechnicianForUpdate(conn, normalizedTechnicianId);
+  if (!technician) {
+    return null;
+  }
 
-  return getTechnicianWalletForUpdate(conn, technicianId);
+  try {
+    await conn.execute(
+      `INSERT INTO technician_wallets (
+        technician_id,
+        currency,
+        total_earned,
+        withdrawable_balance,
+        total_paid_out,
+        on_hold_balance
+      ) VALUES (?, ?, 0, 0, 0, 0)`,
+      [normalizedTechnicianId, String(currency || "INR").toUpperCase()]
+    );
+  } catch (error) {
+    const isDuplicateWallet =
+      error?.code === "ER_DUP_ENTRY" ||
+      error?.errno === 1062 ||
+      String(error?.message || "").includes("Duplicate entry");
+
+    if (!isDuplicateWallet) {
+      throw error;
+    }
+  }
+
+  return getTechnicianWalletForUpdate(conn, normalizedTechnicianId);
 }
 
 export async function updateTechnicianWalletSnapshot(

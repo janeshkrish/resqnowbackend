@@ -248,7 +248,7 @@ export async function sendMail({
             replyTo,
             attachments,
         });
-        console.log(`[Mailer] Email sent to ${to} (messageId=${result.messageId || "n/a"})`);
+        console.log(`[Mailer] Email sent to ${maskEmail(to)}.`);
         return result;
     } catch (error) {
         logSmtpError("[Mailer] Error sending email", error, {
