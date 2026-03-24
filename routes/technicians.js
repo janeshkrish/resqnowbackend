@@ -22,6 +22,10 @@ import {
   getTechnicianWalletTransactionHistory,
 } from "../services/marketplaceWalletService.js";
 import {
+  createWithdrawalRequest,
+  getTechnicianWithdrawalRequests,
+} from "../services/marketplaceWithdrawalService.js";
+import {
   markTechnicianHeartbeat,
   markTechnicianLogin,
   markTechnicianLogout,
@@ -182,6 +186,7 @@ function rowToTechnician(row) {
     email: row.email,
     phone: row.phone || "",
     upi_id: row.upi_id || payment_details?.upi_id || "",
+    upi_name: row.upi_name || payment_details?.upi_name || row.proprietor_name || row.name || "",
     proprietor_name: row.proprietor_name || "",
     alternate_phone: row.alternate_phone || "",
     whatsapp_number: row.whatsapp_number || "",
@@ -476,6 +481,7 @@ router.post("/register", async (req, res) => {
     const normalizedDocuments = sanitizeTechnicianDocuments(documents);
     const normalizedResumeUrl = normalizeUploadResourcePath(resume_url);
     const upiId = String(payment_details?.upi_id || req.body?.upi_id || "").trim();
+    const upiName = String(payment_details?.upi_name || req.body?.upi_name || proprietor_name || trimmedName).trim();
 
     const specialtiesJson = JSON.stringify(normalizedSpecialties);
     const pricingJson = JSON.stringify(pricing && typeof pricing === "object" ? pricing : {});
@@ -496,7 +502,7 @@ router.post("/register", async (req, res) => {
 
     const result = await pool.execute(
       `INSERT INTO technicians (
-        name, email, phone, upi_id,
+        name, email, phone, upi_id, upi_name,
         proprietor_name, alternate_phone, whatsapp_number,
         service_type, location, status, is_active, is_available, password_hash,
         address, region, district, state, locality, google_maps_link,
@@ -504,12 +510,13 @@ router.post("/register", async (req, res) => {
         service_area_range, experience,
         specialties, pricing, working_hours, service_costs, payment_details, app_readiness, vehicle_types,
         resume_url, documents, latitude, longitude
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         trimmedName,
         normalizedEmail,
         (phone || "").trim(),
         upiId || null,
+        upiName || null,
         (proprietor_name || "").trim(),
         (alternate_phone || "").trim(),
         (whatsapp_number || "").trim(),
@@ -1671,6 +1678,7 @@ router.post("/create", verifyAdmin, async (req, res) => {
     const normalizedDocuments = sanitizeTechnicianDocuments(documents);
     const normalizedResumeUrl = normalizeUploadResourcePath(resume_url);
     const upiId = String(payment_details?.upi_id || req.body?.upi_id || "").trim();
+    const upiName = String(payment_details?.upi_name || req.body?.upi_name || proprietor_name || trimmedName).trim();
     const requestedStatus = String(status || "").toLowerCase();
     const appStatus = requestedStatus === "approved" ? "approved" : "pending";
 
@@ -1686,7 +1694,7 @@ router.post("/create", verifyAdmin, async (req, res) => {
     const pool = await db.getPool();
     const result = await pool.execute(
       `INSERT INTO technicians(
-        name, email, phone, upi_id,
+        name, email, phone, upi_id, upi_name,
         proprietor_name, alternate_phone, whatsapp_number,
         service_type, location, status, password_hash,
         address, region, district, state, locality, google_maps_link,
@@ -1694,12 +1702,13 @@ router.post("/create", verifyAdmin, async (req, res) => {
         service_area_range, experience,
         specialties, pricing, working_hours, service_costs, payment_details, app_readiness, vehicle_types,
         resume_url, documents
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         trimmedName,
         normalizedEmail,
         (phone || "").trim(),
         upiId || null,
+        upiName || null,
         (proprietor_name || "").trim(),
         (alternate_phone || "").trim(),
         (whatsapp_number || "").trim(),
@@ -1810,6 +1819,95 @@ router.get("/me/financials", verifyTechnician, async (req, res) => {
   } catch (err) {
     console.error("Fetch financials error:", err);
     res.status(500).json({ error: "Failed to fetch financials" });
+  }
+});
+
+router.get("/me/wallet", verifyTechnician, async (req, res) => {
+  try {
+    const technicianId = req.technicianId;
+    const pool = await db.getPool();
+    const snapshot = await fetchTechnicianFinancialSnapshot(pool, technicianId);
+    const withdrawals = await getTechnicianWithdrawalRequests({
+      technicianId,
+      page: 1,
+      limit: 10,
+    });
+
+    return res.json({
+      ...snapshot,
+      pending_withdrawals: roundMoney(snapshot.on_hold_balance || 0),
+      recent_withdrawals: withdrawals.data,
+    });
+  } catch (err) {
+    console.error("Fetch wallet summary error:", err);
+    return res.status(500).json({ error: "Failed to fetch wallet summary." });
+  }
+});
+
+router.get("/me/withdrawals", verifyTechnician, async (req, res) => {
+  try {
+    const technicianId = req.technicianId;
+    const page = Math.max(1, Number.parseInt(String(req.query.page || "1"), 10) || 1);
+    const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit || "20"), 10) || 20, 1), 100);
+    const result = await getTechnicianWithdrawalRequests({
+      technicianId,
+      page,
+      limit,
+    });
+    return res.json(result);
+  } catch (err) {
+    console.error("Fetch withdrawals error:", err);
+    return res.status(500).json({ error: "Failed to fetch withdrawals." });
+  }
+});
+
+router.post("/me/withdrawals", verifyTechnician, async (req, res) => {
+  try {
+    const technicianId = req.technicianId;
+    const amount =
+      req.body?.amount == null || req.body?.amount === ""
+        ? null
+        : Number(req.body.amount);
+    if (amount != null && (!Number.isFinite(amount) || amount <= 0)) {
+      return res.status(400).json({ error: "Invalid withdrawal amount." });
+    }
+
+    const result = await createWithdrawalRequest({
+      technicianId,
+      amount,
+      note: String(req.body?.note || "").trim(),
+      requestedBy: String(technicianId),
+      idempotencyKey: String(req.body?.idempotencyKey || req.headers["x-idempotency-key"] || "").trim(),
+    });
+
+    req.io?.emit?.("admin:payout_update", {
+      withdrawalRequestId: result.request?.id || null,
+      technicianId,
+      amount: result.request?.amount || 0,
+      status: result.request?.status || "pending",
+      at: new Date().toISOString(),
+    });
+    req.io?.emit?.("technician:financials_update", {
+      technicianId,
+      at: new Date().toISOString(),
+    });
+
+    return res.status(result.alreadyCreated ? 200 : 201).json(result);
+  } catch (err) {
+    console.error("Create withdrawal request error:", err);
+    const message = String(err?.message || "Failed to create withdrawal request.");
+    if (
+      message.includes("UPI ID") ||
+      message.includes("beneficiary name") ||
+      message.includes("exceeds withdrawable balance") ||
+      message.includes("greater than zero")
+    ) {
+      return res.status(409).json({ error: message });
+    }
+    if (message.includes("not found")) {
+      return res.status(404).json({ error: message });
+    }
+    return res.status(500).json({ error: "Failed to create withdrawal request." });
   }
 });
 

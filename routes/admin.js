@@ -32,6 +32,10 @@ import {
   getPayoutQueue,
   exportPayoutQueueCsv,
   markTechnicianPaymentCompleted,
+  getWithdrawalRequests,
+  startWithdrawalProcessing,
+  rejectWithdrawal,
+  markWithdrawalPaid,
   getRefundHistory,
   refundTransaction,
   getWalletBalances,
@@ -101,6 +105,10 @@ router.get("/finance", getFinanceTransactions);
 router.get("/finance/transactions", getFinanceTransactions);
 router.get("/finance/export", exportFinanceCsv);
 router.get("/finance/wallets", getWalletBalances);
+router.get("/finance/withdrawal-requests", getWithdrawalRequests);
+router.post("/finance/withdrawal-requests/:withdrawalRequestId/start", startWithdrawalProcessing);
+router.post("/finance/withdrawal-requests/:withdrawalRequestId/reject", rejectWithdrawal);
+router.post("/finance/withdrawal-requests/:withdrawalRequestId/mark-paid", markWithdrawalPaid);
 router.get("/finance/payouts", getPayoutHistory);
 router.post("/finance/payouts", triggerWalletPayout);
 router.get("/finance/payout-queue", getPayoutQueue);

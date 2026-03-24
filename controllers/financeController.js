@@ -9,6 +9,12 @@ import {
   settlePaymentToTechnician,
 } from "../services/marketplacePayoutService.js";
 import { refundMarketplacePayment } from "../services/marketplaceRefundService.js";
+import {
+  getAdminWithdrawalRequests as getMarketplaceWithdrawalRequests,
+  markWithdrawalRequestPaid,
+  rejectWithdrawalRequest,
+  startWithdrawalRequestProcessing,
+} from "../services/marketplaceWithdrawalService.js";
 
 const PAYMENT_TO_TECHNICIAN_STATUS = Object.freeze({
   pending: "pending",
@@ -416,6 +422,146 @@ export async function getWalletBalances(req, res) {
   } catch (error) {
     console.error("[admin.finance.walletBalances] failed:", error?.message || error);
     return res.status(500).json({ error: "Failed to fetch technician wallet balances." });
+  }
+}
+
+export async function getWithdrawalRequests(req, res) {
+  try {
+    const { page, limit } = buildPagination(req.query);
+    const status = String(req.query?.status || "").trim().toLowerCase();
+    const search = String(req.query?.search || "").trim();
+    const result = await getMarketplaceWithdrawalRequests({
+      page,
+      limit,
+      status,
+      search,
+    });
+    return res.json(result);
+  } catch (error) {
+    console.error("[admin.finance.withdrawalRequests] failed:", error?.message || error);
+    return res.status(500).json({ error: "Failed to fetch withdrawal requests." });
+  }
+}
+
+export async function startWithdrawalProcessing(req, res) {
+  try {
+    const withdrawalRequestId = Number.parseInt(String(req.params?.withdrawalRequestId || req.params?.id || ""), 10);
+    if (!Number.isInteger(withdrawalRequestId) || withdrawalRequestId <= 0) {
+      return res.status(400).json({ error: "Invalid withdrawal request id." });
+    }
+
+    const result = await startWithdrawalRequestProcessing({
+      withdrawalRequestId,
+      adminId: String(req.adminEmail || req.admin?.email || "admin"),
+      payoutMethod: String(req.body?.payoutMethod || "").trim() || undefined,
+      notes: String(req.body?.notes || "").trim(),
+    });
+
+    req.io?.emit?.("admin:payout_update", {
+      withdrawalRequestId,
+      payoutId: result.request?.payoutId || null,
+      status: result.request?.status || "processing",
+      at: new Date().toISOString(),
+    });
+
+    return res.status(result.alreadyProcessed ? 200 : 201).json(result);
+  } catch (error) {
+    console.error("[admin.finance.withdrawalStart] failed:", error?.message || error);
+    const message = String(error?.message || "Failed to start withdrawal processing.");
+    if (message.includes("not found")) {
+      return res.status(404).json({ error: message });
+    }
+    if (message.includes("Only pending")) {
+      return res.status(409).json({ error: message });
+    }
+    return res.status(500).json({ error: "Failed to start withdrawal processing." });
+  }
+}
+
+export async function rejectWithdrawal(req, res) {
+  try {
+    const withdrawalRequestId = Number.parseInt(String(req.params?.withdrawalRequestId || req.params?.id || ""), 10);
+    if (!Number.isInteger(withdrawalRequestId) || withdrawalRequestId <= 0) {
+      return res.status(400).json({ error: "Invalid withdrawal request id." });
+    }
+
+    const result = await rejectWithdrawalRequest({
+      withdrawalRequestId,
+      adminId: String(req.adminEmail || req.admin?.email || "admin"),
+      reason: String(req.body?.reason || "").trim(),
+      notes: String(req.body?.notes || "").trim(),
+    });
+
+    req.io?.emit?.("admin:payout_update", {
+      withdrawalRequestId,
+      payoutId: result.request?.payoutId || null,
+      status: result.request?.status || "rejected",
+      at: new Date().toISOString(),
+    });
+    req.io?.emit?.("admin:payment_update", {
+      technicianId: result.request?.technicianId || null,
+      at: new Date().toISOString(),
+    });
+
+    return res.json(result);
+  } catch (error) {
+    console.error("[admin.finance.withdrawalReject] failed:", error?.message || error);
+    const message = String(error?.message || "Failed to reject withdrawal request.");
+    if (message.includes("not found")) {
+      return res.status(404).json({ error: message });
+    }
+    if (message.includes("cannot be rejected")) {
+      return res.status(409).json({ error: message });
+    }
+    return res.status(500).json({ error: "Failed to reject withdrawal request." });
+  }
+}
+
+export async function markWithdrawalPaid(req, res) {
+  try {
+    const withdrawalRequestId = Number.parseInt(String(req.params?.withdrawalRequestId || req.params?.id || ""), 10);
+    if (!Number.isInteger(withdrawalRequestId) || withdrawalRequestId <= 0) {
+      return res.status(400).json({ error: "Invalid withdrawal request id." });
+    }
+
+    const result = await markWithdrawalRequestPaid({
+      withdrawalRequestId,
+      adminId: String(req.adminEmail || req.admin?.email || "admin"),
+      payoutMethod: String(req.body?.payoutMethod || "").trim() || undefined,
+      externalReference: String(req.body?.externalReference || "").trim(),
+      notes: String(req.body?.notes || "").trim(),
+    });
+
+    req.io?.emit?.("admin:payout_update", {
+      withdrawalRequestId,
+      payoutId: result.request?.payoutId || null,
+      status: result.request?.status || "paid",
+      at: new Date().toISOString(),
+    });
+    req.io?.emit?.("admin:payment_update", {
+      technicianId: result.request?.technicianId || null,
+      at: new Date().toISOString(),
+    });
+    req.io?.emit?.("technician:financials_update", {
+      technicianId: result.request?.technicianId || null,
+      at: new Date().toISOString(),
+    });
+
+    return res.status(result.alreadyProcessed ? 200 : 201).json(result);
+  } catch (error) {
+    console.error("[admin.finance.withdrawalPaid] failed:", error?.message || error);
+    const message = String(error?.message || "Failed to mark withdrawal as paid.");
+    if (message.includes("not found")) {
+      return res.status(404).json({ error: message });
+    }
+    if (
+      message.includes("Only pending or processing") ||
+      message.includes("Not enough wallet credits") ||
+      message.includes("cannot be paid")
+    ) {
+      return res.status(409).json({ error: message });
+    }
+    return res.status(500).json({ error: "Failed to mark withdrawal as paid." });
   }
 }
 

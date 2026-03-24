@@ -7,8 +7,8 @@ import {
   getTechnicianWalletSnapshot,
   getWalletCreditByPaymentIdForUpdate,
   listTechnicianWalletTransactions,
+  recalculateTechnicianWalletSnapshot,
   updatePaymentLedgerSnapshot,
-  updateTechnicianWalletSnapshot,
   withTransaction,
 } from "../repositories/marketplaceRepository.js";
 import {
@@ -53,7 +53,6 @@ export async function creditTechnicianWalletForPayment(conn, payload) {
   const amount = roundMoney(payload.amount);
   const balanceBefore = roundMoney(wallet.withdrawable_balance || 0);
   const balanceAfter = addMoney(balanceBefore, amount);
-  const totalEarned = addMoney(wallet.total_earned || 0, amount);
 
   const walletTransactionId = await appendWalletCreditEntry(conn, {
     walletId: wallet.id,
@@ -70,13 +69,7 @@ export async function creditTechnicianWalletForPayment(conn, payload) {
     metadata: payload.metadata || null,
   });
 
-  await updateTechnicianWalletSnapshot(conn, wallet.id, {
-    totalEarned,
-    withdrawableBalance: balanceAfter,
-    totalPaidOut: roundMoney(wallet.total_paid_out || 0),
-    onHoldBalance: roundMoney(wallet.on_hold_balance || 0),
-    lastTransactionAt: new Date(),
-  });
+  await recalculateTechnicianWalletSnapshot(conn, payload.technicianId, payload.currency || "INR");
 
   await updatePaymentLedgerSnapshot(conn, payload.paymentId, {
     ledgerStatus: PAYMENT_LEDGER_STATUS.posted,
@@ -104,8 +97,6 @@ export async function debitTechnicianWalletForPayout(conn, payload) {
     throw new Error("Withdrawable balance is insufficient for this payout.");
   }
 
-  const totalPaidOut = addMoney(wallet.total_paid_out || 0, amount);
-
   const walletTransactionId = await appendWalletDebitEntry(conn, {
     walletId: wallet.id,
     technicianId: payload.technicianId,
@@ -120,13 +111,7 @@ export async function debitTechnicianWalletForPayout(conn, payload) {
     metadata: payload.metadata || null,
   });
 
-  await updateTechnicianWalletSnapshot(conn, wallet.id, {
-    totalEarned: roundMoney(wallet.total_earned || 0),
-    withdrawableBalance: balanceAfter,
-    totalPaidOut,
-    onHoldBalance: roundMoney(wallet.on_hold_balance || 0),
-    lastTransactionAt: new Date(),
-  });
+  await recalculateTechnicianWalletSnapshot(conn, payload.technicianId, payload.currency || "INR");
 
   return {
     walletId: wallet.id,

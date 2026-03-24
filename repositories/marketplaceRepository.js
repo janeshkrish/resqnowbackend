@@ -1,5 +1,7 @@
 import { roundMoney } from "../utils/money.js";
 
+const ACTIVE_WITHDRAWAL_REQUEST_STATUSES = ["pending", "processing"];
+
 export async function withTransaction(pool, handler) {
   const conn = await pool.getConnection();
   try {
@@ -111,6 +113,74 @@ export async function updateTechnicianWalletSnapshot(
       walletId,
     ]
   );
+}
+
+function maxDateValue(left, right) {
+  if (!left) return right || null;
+  if (!right) return left || null;
+  return new Date(left).getTime() >= new Date(right).getTime() ? left : right;
+}
+
+export async function recalculateTechnicianWalletSnapshot(conn, technicianId, currency = "INR") {
+  const wallet = await ensureTechnicianWallet(conn, technicianId, currency);
+  if (!wallet) {
+    return null;
+  }
+
+  const [ledgerRows] = await conn.query(
+    `SELECT
+       COALESCE(
+         SUM(
+           CASE
+             WHEN entry_type IN ('payment_credit', 'adjustment_credit') THEN amount
+             WHEN entry_type = 'adjustment_debit' THEN -amount
+             ELSE 0
+           END
+         ),
+         0
+       ) AS total_earned,
+       COALESCE(SUM(CASE WHEN entry_type = 'payout_debit' THEN amount ELSE 0 END), 0) AS total_paid_out,
+       MAX(created_at) AS last_transaction_at
+     FROM wallet_transactions
+     WHERE technician_id = ?`,
+    [technicianId]
+  );
+
+  const [withdrawalRows] = await conn.query(
+    `SELECT
+       COALESCE(SUM(amount), 0) AS pending_withdrawals,
+       MAX(updated_at) AS last_request_at
+     FROM withdrawal_requests
+     WHERE technician_id = ?
+       AND status IN ('pending', 'processing')`,
+    [technicianId]
+  );
+
+  const totalEarned = roundMoney(ledgerRows?.[0]?.total_earned || 0);
+  const totalPaidOut = roundMoney(ledgerRows?.[0]?.total_paid_out || 0);
+  const onHoldBalance = roundMoney(withdrawalRows?.[0]?.pending_withdrawals || 0);
+  const withdrawableBalance = Math.max(0, roundMoney(totalEarned - totalPaidOut - onHoldBalance));
+  const lastTransactionAt = maxDateValue(
+    ledgerRows?.[0]?.last_transaction_at || null,
+    withdrawalRows?.[0]?.last_request_at || null
+  );
+
+  await updateTechnicianWalletSnapshot(conn, wallet.id, {
+    totalEarned,
+    withdrawableBalance,
+    totalPaidOut,
+    onHoldBalance,
+    lastTransactionAt,
+  });
+
+  return {
+    ...wallet,
+    total_earned: totalEarned,
+    withdrawable_balance: withdrawableBalance,
+    total_paid_out: totalPaidOut,
+    on_hold_balance: onHoldBalance,
+    last_transaction_at: lastTransactionAt,
+  };
 }
 
 export async function createWalletTransaction(conn, payload) {
@@ -256,6 +326,7 @@ export async function createPayoutRecord(conn, payload) {
     `INSERT INTO payouts (
       payout_reference,
       idempotency_key,
+      withdrawal_request_id,
       technician_id,
       wallet_id,
       amount,
@@ -263,15 +334,17 @@ export async function createPayoutRecord(conn, payload) {
       status,
       payout_method,
       destination_reference,
+      destination_name,
       external_reference,
       notes,
       created_by,
       processed_by,
       processed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       payload.payoutReference,
       payload.idempotencyKey || null,
+      payload.withdrawalRequestId || null,
       payload.technicianId,
       payload.walletId,
       roundMoney(payload.amount),
@@ -279,6 +352,7 @@ export async function createPayoutRecord(conn, payload) {
       payload.status,
       payload.payoutMethod || null,
       payload.destinationReference || null,
+      payload.destinationName || null,
       payload.externalReference || null,
       payload.notes || null,
       payload.createdBy || null,
@@ -300,6 +374,48 @@ export async function findPayoutByIdempotencyKey(conn, idempotencyKey) {
     [idempotencyKey]
   );
   return rows[0] || null;
+}
+
+export async function findPayoutByWithdrawalRequestIdForUpdate(conn, withdrawalRequestId) {
+  if (!withdrawalRequestId) return null;
+  const [rows] = await conn.query(
+    `SELECT *
+     FROM payouts
+     WHERE withdrawal_request_id = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [withdrawalRequestId]
+  );
+  return rows[0] || null;
+}
+
+export async function updatePayoutRecord(conn, payoutId, payload = {}) {
+  await conn.execute(
+    `UPDATE payouts
+     SET withdrawal_request_id = COALESCE(?, withdrawal_request_id),
+         status = COALESCE(?, status),
+         payout_method = COALESCE(?, payout_method),
+         destination_reference = COALESCE(?, destination_reference),
+         destination_name = COALESCE(?, destination_name),
+         external_reference = COALESCE(?, external_reference),
+         notes = COALESCE(?, notes),
+         processed_by = COALESCE(?, processed_by),
+         processed_at = COALESCE(?, processed_at),
+         updated_at = NOW()
+     WHERE id = ?`,
+    [
+      payload.withdrawalRequestId || null,
+      payload.status || null,
+      payload.payoutMethod || null,
+      payload.destinationReference || null,
+      payload.destinationName || null,
+      payload.externalReference || null,
+      payload.notes || null,
+      payload.processedBy || null,
+      payload.processedAt || null,
+      payoutId,
+    ]
+  );
 }
 
 export async function findPaymentRefundByIdempotencyKey(conn, idempotencyKey) {
@@ -333,6 +449,192 @@ export async function createPayoutAllocation(conn, payload) {
     ]
   );
   return Number(result.insertId);
+}
+
+export async function getTechnicianPayoutProfileForUpdate(conn, technicianId) {
+  const [rows] = await conn.query(
+    `SELECT
+       id,
+       name,
+       email,
+       proprietor_name,
+       COALESCE(NULLIF(TRIM(upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(payment_details, '$.upi_id'))), '')) AS upi_id,
+       COALESCE(
+         NULLIF(TRIM(upi_name), ''),
+         NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(payment_details, '$.upi_name'))), ''),
+         NULLIF(TRIM(proprietor_name), ''),
+         NULLIF(TRIM(name), '')
+       ) AS upi_name
+     FROM technicians
+     WHERE id = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [technicianId]
+  );
+  return rows[0] || null;
+}
+
+export async function createWithdrawalRequestRecord(conn, payload) {
+  const [result] = await conn.execute(
+    `INSERT INTO withdrawal_requests (
+      withdrawal_reference,
+      idempotency_key,
+      technician_id,
+      wallet_id,
+      amount,
+      currency,
+      status,
+      upi_id,
+      beneficiary_name,
+      note,
+      rejection_reason,
+      external_reference,
+      requested_by,
+      reviewed_by,
+      processed_by,
+      processing_started_at,
+      paid_at,
+      rejected_at,
+      cancelled_at,
+      metadata
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      payload.withdrawalReference,
+      payload.idempotencyKey || null,
+      payload.technicianId,
+      payload.walletId,
+      roundMoney(payload.amount),
+      String(payload.currency || "INR").toUpperCase(),
+      payload.status,
+      payload.upiId || null,
+      payload.beneficiaryName || null,
+      payload.note || null,
+      payload.rejectionReason || null,
+      payload.externalReference || null,
+      payload.requestedBy || null,
+      payload.reviewedBy || null,
+      payload.processedBy || null,
+      payload.processingStartedAt || null,
+      payload.paidAt || null,
+      payload.rejectedAt || null,
+      payload.cancelledAt || null,
+      payload.metadata ? JSON.stringify(payload.metadata) : null,
+    ]
+  );
+  return Number(result.insertId);
+}
+
+export async function findWithdrawalRequestByIdempotencyKey(conn, idempotencyKey) {
+  if (!idempotencyKey) return null;
+  const [rows] = await conn.query(
+    `SELECT *
+     FROM withdrawal_requests
+     WHERE idempotency_key = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [idempotencyKey]
+  );
+  return rows[0] || null;
+}
+
+export async function findRecentMatchingActiveWithdrawalRequest(
+  conn,
+  { technicianId, amount, lookbackMinutes = 5 }
+) {
+  const [rows] = await conn.query(
+    `SELECT *
+     FROM withdrawal_requests
+     WHERE technician_id = ?
+       AND status IN ('pending', 'processing')
+       AND ABS(amount - ?) < 0.01
+       AND created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+     ORDER BY id DESC
+     LIMIT 1
+     FOR UPDATE`,
+    [technicianId, roundMoney(amount), lookbackMinutes]
+  );
+  return rows[0] || null;
+}
+
+export async function getWithdrawalRequestByIdForUpdate(conn, withdrawalRequestId) {
+  const [rows] = await conn.query(
+    `SELECT *
+     FROM withdrawal_requests
+     WHERE id = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [withdrawalRequestId]
+  );
+  return rows[0] || null;
+}
+
+export async function updateWithdrawalRequestRecord(conn, withdrawalRequestId, payload = {}) {
+  await conn.execute(
+    `UPDATE withdrawal_requests
+     SET status = COALESCE(?, status),
+         upi_id = COALESCE(?, upi_id),
+         beneficiary_name = COALESCE(?, beneficiary_name),
+         note = COALESCE(?, note),
+         rejection_reason = COALESCE(?, rejection_reason),
+         external_reference = COALESCE(?, external_reference),
+         reviewed_by = COALESCE(?, reviewed_by),
+         processed_by = COALESCE(?, processed_by),
+         processing_started_at = COALESCE(?, processing_started_at),
+         paid_at = COALESCE(?, paid_at),
+         rejected_at = COALESCE(?, rejected_at),
+         cancelled_at = COALESCE(?, cancelled_at),
+         metadata = COALESCE(?, metadata),
+         updated_at = NOW()
+     WHERE id = ?`,
+    [
+      payload.status || null,
+      payload.upiId || null,
+      payload.beneficiaryName || null,
+      payload.note || null,
+      payload.rejectionReason || null,
+      payload.externalReference || null,
+      payload.reviewedBy || null,
+      payload.processedBy || null,
+      payload.processingStartedAt || null,
+      payload.paidAt || null,
+      payload.rejectedAt || null,
+      payload.cancelledAt || null,
+      payload.metadata ? JSON.stringify(payload.metadata) : null,
+      withdrawalRequestId,
+    ]
+  );
+}
+
+export async function listTechnicianWithdrawalRequests(pool, technicianId, { limit = 20, offset = 0 } = {}) {
+  const [rows] = await pool.query(
+    `SELECT
+       wr.*,
+       po.id AS payout_id,
+       po.payout_reference,
+       po.status AS payout_status,
+       po.payout_method,
+       po.destination_reference,
+       po.destination_name,
+       po.external_reference AS payout_external_reference,
+       po.processed_at AS payout_processed_at
+     FROM withdrawal_requests wr
+     LEFT JOIN payouts po ON po.withdrawal_request_id = wr.id
+     WHERE wr.technician_id = ?
+     ORDER BY wr.created_at DESC, wr.id DESC
+     LIMIT ? OFFSET ?`,
+    [technicianId, limit, offset]
+  );
+  return rows || [];
+}
+
+export async function countTechnicianWithdrawalRequests(pool, technicianId) {
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS total
+     FROM withdrawal_requests
+     WHERE technician_id = ?`,
+    [technicianId]
+  );
+  return Number(rows?.[0]?.total || 0);
 }
 
 export async function getTechnicianWalletSnapshot(pool, technicianId) {
@@ -382,7 +684,13 @@ export async function listEligibleWallets(pool, { minBalance = 0.01, limit = 500
        tw.last_transaction_at,
        t.name AS technician_name,
        t.email AS technician_email,
-       COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), '')) AS upi_id
+       COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), '')) AS upi_id,
+       COALESCE(
+         NULLIF(TRIM(t.upi_name), ''),
+         NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_name'))), ''),
+         NULLIF(TRIM(t.proprietor_name), ''),
+         NULLIF(TRIM(t.name), '')
+       ) AS upi_name
      FROM technician_wallets tw
      JOIN technicians t ON t.id = tw.technician_id
      WHERE tw.withdrawable_balance >= ?
@@ -403,9 +711,10 @@ function buildWalletSearchSql(search) {
       LOWER(COALESCE(t.name, '')) LIKE ?
       OR LOWER(COALESCE(t.email, '')) LIKE ?
       OR LOWER(COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), ''))) LIKE ?
+      OR LOWER(COALESCE(NULLIF(TRIM(t.upi_name), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_name'))), ''), NULLIF(TRIM(t.proprietor_name), ''), NULLIF(TRIM(t.name), ''))) LIKE ?
       OR CAST(t.id AS CHAR) LIKE ?
     )`,
-    values: [like, like, like, like],
+    values: [like, like, like, like, like],
   };
 }
 
@@ -421,6 +730,12 @@ export async function listTechnicianWalletBalances(
        t.name AS technician_name,
        t.email AS technician_email,
        COALESCE(NULLIF(TRIM(t.upi_id), ''), NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_id'))), '')) AS upi_id,
+       COALESCE(
+         NULLIF(TRIM(t.upi_name), ''),
+         NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(t.payment_details, '$.upi_name'))), ''),
+         NULLIF(TRIM(t.proprietor_name), ''),
+         NULLIF(TRIM(t.name), '')
+       ) AS upi_name,
        COALESCE(tw.id, 0) AS wallet_id,
        COALESCE(tw.currency, 'INR') AS currency,
        COALESCE(tw.total_earned, 0) AS total_earned,
@@ -453,5 +768,87 @@ export async function countTechnicianWalletBalances(pool, { search = "", onlyPos
        ${clause}`,
     values
   );
+  return Number(rows?.[0]?.total || 0);
+}
+
+function buildWithdrawalSearchSql(search) {
+  if (!search) {
+    return { clause: "", values: [] };
+  }
+
+  const like = `%${String(search).trim().toLowerCase()}%`;
+  return {
+    clause: `AND (
+      LOWER(COALESCE(t.name, '')) LIKE ?
+      OR LOWER(COALESCE(t.email, '')) LIKE ?
+      OR LOWER(COALESCE(wr.upi_id, '')) LIKE ?
+      OR LOWER(COALESCE(wr.beneficiary_name, '')) LIKE ?
+      OR LOWER(COALESCE(wr.withdrawal_reference, '')) LIKE ?
+      OR CAST(wr.technician_id AS CHAR) LIKE ?
+    )`,
+    values: [like, like, like, like, like, like],
+  };
+}
+
+export async function listAdminWithdrawalRequests(
+  pool,
+  { status = "", search = "", limit = 20, offset = 0 } = {}
+) {
+  const { clause, values } = buildWithdrawalSearchSql(search);
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  const statusClause = normalizedStatus && normalizedStatus !== "all" ? "AND LOWER(wr.status) = ?" : "";
+  const params = normalizedStatus && normalizedStatus !== "all" ? [...values, normalizedStatus] : values;
+
+  const [rows] = await pool.query(
+    `SELECT
+       wr.*,
+       t.name AS technician_name,
+       t.email AS technician_email,
+       po.id AS payout_id,
+       po.payout_reference,
+       po.status AS payout_status,
+       po.payout_method,
+       po.destination_reference,
+       po.destination_name,
+       po.external_reference AS payout_external_reference,
+       po.processed_at AS payout_processed_at,
+       po.created_at AS payout_created_at
+     FROM withdrawal_requests wr
+     JOIN technicians t ON t.id = wr.technician_id
+     LEFT JOIN payouts po ON po.withdrawal_request_id = wr.id
+     WHERE 1 = 1
+       ${statusClause}
+       ${clause}
+     ORDER BY
+       CASE
+         WHEN LOWER(wr.status) = 'processing' THEN 0
+         WHEN LOWER(wr.status) = 'pending' THEN 1
+         ELSE 2
+       END,
+       wr.created_at DESC,
+       wr.id DESC
+     LIMIT ? OFFSET ?`,
+    [...params, limit, offset]
+  );
+
+  return rows || [];
+}
+
+export async function countAdminWithdrawalRequests(pool, { status = "", search = "" } = {}) {
+  const { clause, values } = buildWithdrawalSearchSql(search);
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  const statusClause = normalizedStatus && normalizedStatus !== "all" ? "AND LOWER(wr.status) = ?" : "";
+  const params = normalizedStatus && normalizedStatus !== "all" ? [...values, normalizedStatus] : values;
+
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS total
+     FROM withdrawal_requests wr
+     JOIN technicians t ON t.id = wr.technician_id
+     WHERE 1 = 1
+       ${statusClause}
+       ${clause}`,
+    params
+  );
+
   return Number(rows?.[0]?.total || 0);
 }

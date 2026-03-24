@@ -36,3 +36,11 @@ export const PAYOUT_METHOD = Object.freeze({
   manualBankTransfer: "manual_bank_transfer",
   other: "other",
 });
+
+export const WITHDRAWAL_REQUEST_STATUS = Object.freeze({
+  pending: "pending",
+  processing: "processing",
+  paid: "paid",
+  rejected: "rejected",
+  cancelled: "cancelled",
+});

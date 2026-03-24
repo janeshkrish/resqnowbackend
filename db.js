@@ -225,6 +225,7 @@ CREATE TABLE IF NOT EXISTS technicians (
   email VARCHAR(255) UNIQUE NOT NULL,
   phone VARCHAR(50),
   upi_id VARCHAR(120),
+  upi_name VARCHAR(255),
   service_type VARCHAR(100),
   location VARCHAR(255),
   status ENUM('pending','approved','rejected') DEFAULT 'pending',
@@ -622,6 +623,7 @@ export async function updateTechniciansTableSchema() {
   await addColumnIfNotExists(p, 'technicians', 'resume_url VARCHAR(1024)');
   await addColumnIfNotExists(p, 'technicians', 'documents JSON');
   await addColumnIfNotExists(p, 'technicians', 'upi_id VARCHAR(120)');
+  await addColumnIfNotExists(p, 'technicians', 'upi_name VARCHAR(255)');
   try {
     await p.query(
       `UPDATE technicians
@@ -633,6 +635,19 @@ export async function updateTechniciansTableSchema() {
     );
   } catch (err) {
     console.log("Note: could not backfill technicians.upi_id from payment_details:", err.message);
+  }
+  try {
+    await p.query(
+      `UPDATE technicians
+       SET upi_name = COALESCE(
+         NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(payment_details, '$.upi_name'))), ''),
+         NULLIF(TRIM(proprietor_name), ''),
+         NULLIF(TRIM(name), '')
+       )
+       WHERE upi_name IS NULL OR TRIM(upi_name) = ''`
+    );
+  } catch (err) {
+    console.log("Note: could not backfill technicians.upi_name:", err.message);
   }
   await addColumnIfNotExists(p, 'technicians', 'proprietor_name VARCHAR(255)');
   await addColumnIfNotExists(p, 'technicians', 'alternate_phone VARCHAR(50)');
@@ -911,6 +926,7 @@ CREATE TABLE IF NOT EXISTS payouts (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   payout_reference VARCHAR(64) NOT NULL UNIQUE,
   idempotency_key VARCHAR(128) NULL,
+  withdrawal_request_id BIGINT NULL,
   technician_id INT NOT NULL,
   wallet_id BIGINT NOT NULL,
   amount DECIMAL(12, 2) NOT NULL,
@@ -918,6 +934,7 @@ CREATE TABLE IF NOT EXISTS payouts (
   status VARCHAR(20) NOT NULL DEFAULT 'draft',
   payout_method VARCHAR(40) NULL,
   destination_reference VARCHAR(255) NULL,
+  destination_name VARCHAR(255) NULL,
   external_reference VARCHAR(255) NULL,
   notes TEXT NULL,
   created_by VARCHAR(255) NULL,
@@ -934,10 +951,12 @@ export async function ensurePayoutsTable() {
   const p = await getPool();
   await p.execute(PAYOUTS_TABLE_SQL);
   await addColumnIfNotExists(p, 'payouts', 'idempotency_key VARCHAR(128) NULL');
+  await addColumnIfNotExists(p, 'payouts', 'withdrawal_request_id BIGINT NULL');
   await addColumnIfNotExists(p, 'payouts', 'currency VARCHAR(10) NOT NULL DEFAULT "INR"');
   await addColumnIfNotExists(p, 'payouts', 'status VARCHAR(20) NOT NULL DEFAULT "draft"');
   await addColumnIfNotExists(p, 'payouts', 'payout_method VARCHAR(40) NULL');
   await addColumnIfNotExists(p, 'payouts', 'destination_reference VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'payouts', 'destination_name VARCHAR(255) NULL');
   await addColumnIfNotExists(p, 'payouts', 'external_reference VARCHAR(255) NULL');
   await addColumnIfNotExists(p, 'payouts', 'notes TEXT NULL');
   await addColumnIfNotExists(p, 'payouts', 'created_by VARCHAR(255) NULL');
@@ -945,7 +964,62 @@ export async function ensurePayoutsTable() {
   await addColumnIfNotExists(p, 'payouts', 'processed_at DATETIME NULL');
   await addIndexIfNotExists(p, 'payouts', 'idx_payouts_technician_status', 'technician_id, status');
   await addIndexIfNotExists(p, 'payouts', 'idx_payouts_processed_at', 'processed_at');
+  await addUniqueIndexIfNotExists(p, 'payouts', 'uniq_payouts_withdrawal_request', 'withdrawal_request_id');
   await addUniqueIndexIfNotExists(p, 'payouts', 'uniq_payouts_idempotency_key', 'idempotency_key');
+}
+
+const WITHDRAWAL_REQUESTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS withdrawal_requests (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  withdrawal_reference VARCHAR(64) NOT NULL UNIQUE,
+  idempotency_key VARCHAR(128) NULL,
+  technician_id INT NOT NULL,
+  wallet_id BIGINT NOT NULL,
+  amount DECIMAL(12, 2) NOT NULL,
+  currency VARCHAR(10) NOT NULL DEFAULT 'INR',
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  upi_id VARCHAR(120) NULL,
+  beneficiary_name VARCHAR(255) NULL,
+  note TEXT NULL,
+  rejection_reason VARCHAR(255) NULL,
+  external_reference VARCHAR(255) NULL,
+  requested_by VARCHAR(255) NULL,
+  reviewed_by VARCHAR(255) NULL,
+  processed_by VARCHAR(255) NULL,
+  processing_started_at DATETIME NULL,
+  paid_at DATETIME NULL,
+  rejected_at DATETIME NULL,
+  cancelled_at DATETIME NULL,
+  metadata JSON NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (technician_id) REFERENCES technicians(id),
+  FOREIGN KEY (wallet_id) REFERENCES technician_wallets(id)
+)
+`.trim();
+
+export async function ensureWithdrawalRequestsTable() {
+  const p = await getPool();
+  await p.execute(WITHDRAWAL_REQUESTS_TABLE_SQL);
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'idempotency_key VARCHAR(128) NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'currency VARCHAR(10) NOT NULL DEFAULT "INR"');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'status VARCHAR(20) NOT NULL DEFAULT "pending"');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'upi_id VARCHAR(120) NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'beneficiary_name VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'note TEXT NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'rejection_reason VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'external_reference VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'requested_by VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'reviewed_by VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'processed_by VARCHAR(255) NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'processing_started_at DATETIME NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'paid_at DATETIME NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'rejected_at DATETIME NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'cancelled_at DATETIME NULL');
+  await addColumnIfNotExists(p, 'withdrawal_requests', 'metadata JSON NULL');
+  await addIndexIfNotExists(p, 'withdrawal_requests', 'idx_withdrawal_requests_technician_status', 'technician_id, status');
+  await addIndexIfNotExists(p, 'withdrawal_requests', 'idx_withdrawal_requests_status_created', 'status, created_at');
+  await addUniqueIndexIfNotExists(p, 'withdrawal_requests', 'uniq_withdrawal_requests_idempotency_key', 'idempotency_key');
 }
 
 const PAYOUT_ALLOCATIONS_TABLE_SQL = `
