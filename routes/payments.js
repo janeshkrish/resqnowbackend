@@ -724,6 +724,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
             requestId,
             userId: request.user_id,
             technicianId: request.technician_id || null,
+            amount: breakdown.baseAmount,
             invoiceId,
             invoiceStatus,
             customerEmail: request.customer_email || null,
@@ -775,7 +776,8 @@ async function processFinalizedServicePaymentNotifications(finalized, { paymentM
     if (finalized.technicianId) {
         socketService.notifyTechnician(finalized.technicianId, "job:status_update", {
             requestId: finalized.requestId,
-            status: "completed"
+            status: "completed",
+            amount: finalized.amount ?? null,
         });
         socketService.notifyTechnician(finalized.technicianId, "job:list_update", {
             requestId: finalized.requestId,
@@ -1599,7 +1601,11 @@ router.post('/cash', verifyUser, async (req, res) => {
             });
 
             if (technicianId) {
-                socketService.notifyTechnician(technicianId, 'job:status_update', { requestId, status: 'completed' });
+                socketService.notifyTechnician(technicianId, 'job:status_update', {
+                    requestId,
+                    status: 'completed',
+                    amount: techAmount,
+                });
                 socketService.notifyTechnician(technicianId, 'job:list_update', { requestId, action: 'updated' });
             }
             socketService.notifyUser(userId, 'payment_completed', { requestId, status: 'completed' });
