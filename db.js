@@ -349,6 +349,11 @@ CREATE TABLE IF NOT EXISTS technician_services (
   price_2w_max DECIMAL(10, 2) NULL,
   price_4w_min DECIMAL(10, 2) NULL,
   price_4w_max DECIMAL(10, 2) NULL,
+  base_price DECIMAL(10, 2) NULL,
+  free_km DECIMAL(10, 2) NULL,
+  per_km_price DECIMAL(10, 2) NULL,
+  night_charge DECIMAL(10, 2) NULL,
+  night_type VARCHAR(16) NULL,
   metadata JSON,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -372,6 +377,11 @@ export async function ensureTechnicianServicesTable() {
   await addColumnIfNotExists(p, "technician_services", "price_2w_max DECIMAL(10, 2) NULL");
   await addColumnIfNotExists(p, "technician_services", "price_4w_min DECIMAL(10, 2) NULL");
   await addColumnIfNotExists(p, "technician_services", "price_4w_max DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "base_price DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "free_km DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "per_km_price DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "night_charge DECIMAL(10, 2) NULL");
+  await addColumnIfNotExists(p, "technician_services", "night_type VARCHAR(16) NULL");
   await addColumnIfNotExists(p, "technician_services", "metadata JSON");
 }
 
@@ -1133,6 +1143,7 @@ CREATE TABLE IF NOT EXISTS platform_pricing_config (
   currency VARCHAR(10) NOT NULL DEFAULT 'INR',
   platform_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000,
   payment_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.020000,
+  customer_price_rounding_increment INT NOT NULL DEFAULT 5,
   welcome_coupon_code VARCHAR(64) NOT NULL DEFAULT 'RESQ10',
   welcome_coupon_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000,
   welcome_coupon_max_uses_per_user INT NOT NULL DEFAULT 2,
@@ -1155,6 +1166,7 @@ export async function ensurePlatformPricingConfigTable() {
   await addColumnIfNotExists(p, 'platform_pricing_config', 'currency VARCHAR(10) NOT NULL DEFAULT "INR"');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'platform_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'payment_fee_percent DECIMAL(8,6) NOT NULL DEFAULT 0.020000');
+  await addColumnIfNotExists(p, 'platform_pricing_config', 'customer_price_rounding_increment INT NOT NULL DEFAULT 5');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_code VARCHAR(64) NOT NULL DEFAULT "RESQ10"');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.100000');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'welcome_coupon_max_uses_per_user INT NOT NULL DEFAULT 2');
@@ -1257,3 +1269,7 @@ export async function updateUsersTableSchema() {
   await addColumnIfNotExists(p, 'users', 'gender VARCHAR(20)');
   await addColumnIfNotExists(p, 'users', 'settings JSON');
 }
+
+
+
+

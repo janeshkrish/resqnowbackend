@@ -153,6 +153,7 @@ export const DEFAULT_PLATFORM_PRICING_CONFIG = Object.freeze({
   currency: "INR",
   platform_fee_percent: 0.1,
   payment_fee_percent: 0.02,
+  customer_price_rounding_increment: 5,
   welcome_coupon_code: "RESQ10",
   welcome_coupon_discount_percent: 0.1,
   welcome_coupon_max_uses_per_user: 2,
@@ -186,6 +187,11 @@ function normalizeServiceBasePrices(rawPrices) {
   });
 
   return matrix;
+}
+
+function normalizeCustomerPriceRoundingIncrement(value, fallback) {
+  const parsed = toPositiveInteger(value, fallback);
+  return [5, 10].includes(parsed) ? parsed : fallback;
 }
 
 function normalizeSubscriptionPlan(plan, index, defaultPlan = null) {
@@ -243,6 +249,10 @@ function normalizeConfigRow(row) {
     currency: String(row?.currency || fallback.currency).trim().toUpperCase() || fallback.currency,
     platform_fee_percent: toPercent(row?.platform_fee_percent, fallback.platform_fee_percent),
     payment_fee_percent: toPercent(row?.payment_fee_percent, fallback.payment_fee_percent),
+    customer_price_rounding_increment: normalizeCustomerPriceRoundingIncrement(
+      row?.customer_price_rounding_increment,
+      fallback.customer_price_rounding_increment
+    ),
     welcome_coupon_code: String(row?.welcome_coupon_code || fallback.welcome_coupon_code).trim().toUpperCase(),
     welcome_coupon_discount_percent: toPercent(
       row?.welcome_coupon_discount_percent,
@@ -273,6 +283,7 @@ async function seedDefaultConfig(pool) {
         currency,
         platform_fee_percent,
         payment_fee_percent,
+        customer_price_rounding_increment,
         welcome_coupon_code,
         welcome_coupon_discount_percent,
         welcome_coupon_max_uses_per_user,
@@ -285,11 +296,12 @@ async function seedDefaultConfig(pool) {
         subscription_plans,
         is_active
       )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
     [
       DEFAULT_PLATFORM_PRICING_CONFIG.currency,
       DEFAULT_PLATFORM_PRICING_CONFIG.platform_fee_percent,
       DEFAULT_PLATFORM_PRICING_CONFIG.payment_fee_percent,
+      DEFAULT_PLATFORM_PRICING_CONFIG.customer_price_rounding_increment,
       DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_code,
       DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_discount_percent,
       DEFAULT_PLATFORM_PRICING_CONFIG.welcome_coupon_max_uses_per_user,
@@ -425,3 +437,5 @@ export function getSubscriptionPlanById(planId, pricingConfig = null) {
   const plans = listSubscriptionPlans(pricingConfig, { includeInactive: true });
   return plans.find((plan) => String(plan.id).toLowerCase() === id) || null;
 }
+
+

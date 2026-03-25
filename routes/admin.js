@@ -7,6 +7,8 @@ import { addClient } from "../sse.js";
 import { getAdminCredentials, signAdminToken, verifyAdmin } from "../middleware/auth.js";
 import { getFrontendUrl } from "../config/network.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../services/serviceNormalization.js";
+import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
+import { replaceTechnicianPricingRows } from "../services/technicianPricingStore.js";
 import { runDispatchMatrixAudit } from "../services/dispatchMatrixAudit.js";
 import { getDashboard, getAdminAuditLogs } from "../controllers/adminController.js";
 import {
@@ -638,102 +640,10 @@ const normalizeStringArray = (value) => {
   return [];
 };
 
-const normalizeServiceCostEntries = (value) => {
-  const parsed = safeJsonParse(value, value);
-  const rows = [];
-
-  if (Array.isArray(parsed)) {
-    rows.push(...parsed);
-  } else if (parsed && typeof parsed === "object") {
-    Object.entries(parsed).forEach(([serviceName, config]) => {
-      if (config && typeof config === "object") {
-        rows.push({ service_name: serviceName, ...config });
-      } else {
-        rows.push({ service_name: serviceName, service_charge: config });
-      }
-    });
-  }
-
-  return rows
-    .map((entry) => {
-      const row = entry && typeof entry === "object" ? entry : {};
-      const serviceDomain = canonicalizeServiceDomain(
-        row.service_domain ||
-        row.service_name ||
-        row.serviceType ||
-        row.service ||
-        row.domain
-      );
-      if (!serviceDomain) return null;
-
-      const vehicleType =
-        canonicalizeVehicleFamily(
-          row.vehicle_type_pricing ||
-          row.vehicle_type ||
-          row.vehicleType ||
-          row.vehicle
-        ) || "";
-
-      return {
-        service_domain: serviceDomain,
-        vehicle_type: vehicleType,
-        visit_charge: toNonNegativeMoney(row.visit_charge ?? row.visitCharge ?? row.base_charge ?? row.baseCharge),
-        service_charge: toNonNegativeMoney(row.service_charge ?? row.serviceCharge ?? row.amount ?? row.price),
-        extra_km_charge: toNonNegativeMoney(row.extra_km_charge ?? row.extraKmCharge),
-        labour_min: toNonNegativeMoney(row.labour_min ?? row.labourMin),
-        labour_max: toNonNegativeMoney(row.labour_max ?? row.labourMax),
-        delivery_charge: toNonNegativeMoney(row.delivery_charge ?? row.deliveryCharge),
-        price_2w_min: toNonNegativeMoney(row.price_2w_min ?? row.price2wmin ?? row.price_2w),
-        price_2w_max: toNonNegativeMoney(row.price_2w_max ?? row.price2wmax),
-        price_4w_min: toNonNegativeMoney(row.price_4w_min ?? row.price4wmin ?? row.price_4w),
-        price_4w_max: toNonNegativeMoney(row.price_4w_max ?? row.price4wmax),
-        metadata: row,
-      };
-    })
-    .filter(Boolean);
-};
+const normalizeServiceCostEntries = (value) => normalizeTechnicianPricingEntries(value);
 
 async function replaceTechnicianServicePricingRows(conn, technicianId, entries) {
-  await conn.execute("DELETE FROM technician_services WHERE technician_id = ?", [technicianId]);
-  if (!Array.isArray(entries) || entries.length === 0) return;
-
-  const values = entries.map((entry) => ([
-    technicianId,
-    entry.service_domain,
-    entry.vehicle_type || "",
-    entry.visit_charge,
-    entry.service_charge,
-    entry.extra_km_charge,
-    entry.labour_min,
-    entry.labour_max,
-    entry.delivery_charge,
-    entry.price_2w_min,
-    entry.price_2w_max,
-    entry.price_4w_min,
-    entry.price_4w_max,
-    JSON.stringify(entry.metadata || {})
-  ]));
-
-  const query = conn.format(
-    `INSERT INTO technician_services (
-      technician_id,
-      service_domain,
-      vehicle_type,
-      visit_charge,
-      service_charge,
-      extra_km_charge,
-      labour_min,
-      labour_max,
-      delivery_charge,
-      price_2w_min,
-      price_2w_max,
-      price_4w_min,
-      price_4w_max,
-      metadata
-    ) VALUES ?`,
-    [values]
-  );
-  await conn.query(query);
+  return replaceTechnicianPricingRows(conn, technicianId, entries);
 }
 
 router.put("/technician/:id/pricing", async (req, res) => {
@@ -1074,3 +984,5 @@ router.delete("/users/:id", async (req, res) => {
 });
 
 export default router;
+
+
