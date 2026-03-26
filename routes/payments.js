@@ -8,7 +8,6 @@ import { socketService } from "../services/socket.js";
 import { generateInvoicePDF } from "../services/invoiceService.js";
 import { sendInvoiceEmail } from "../services/mailer.js";
 import {
-    computePaymentAmounts,
     getPlatformPricingConfig,
     getSubscriptionPlanById,
     listSubscriptionPlans
@@ -17,6 +16,9 @@ import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/p
 import { releaseTechnicianAvailability } from "../services/technicianStateService.js";
 import { buildMarketplacePricingSnapshot, findReusablePendingOrder } from "../services/marketplacePaymentService.js";
 import { creditTechnicianWalletForPayment } from "../services/marketplaceWalletService.js";
+import {
+    computeServiceRequestPaymentAmounts,
+} from "../services/serviceRequestPaymentService.js";
 import {
     PAYMENT_LEDGER_STATUS,
     PAYMENT_TO_TECHNICIAN_STATUS,
@@ -203,6 +205,7 @@ async function buildServiceRequestPaymentQuote({
     pricingConfig,
     couponCode = "",
     preserveExistingApplied = false,
+    paymentMode = "cash",
 }) {
     const userId = Number(requestRow?.user_id);
     const baseAmount = await resolveRequestBaseAmount(requestRow, pricingConfig);
@@ -215,7 +218,9 @@ async function buildServiceRequestPaymentQuote({
         preserveExistingApplied,
     });
 
-    const breakdown = computePaymentAmounts(baseAmount, pricingConfig, {
+    const breakdown = computeServiceRequestPaymentAmounts(baseAmount, {
+        currency: pricingConfig?.currency,
+        paymentMode,
         platformFeeDiscountPercent: coupon.isApplied ? coupon.discountPercent : 0,
     });
 
@@ -563,11 +568,11 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
         const request = requestRows[0];
         const pricingConfig = await getPlatformPricingConfig();
         const baseAmount = await resolveRequestBaseAmount(request, pricingConfig);
-        const breakdown = computePaymentAmounts(
-            baseAmount,
-            pricingConfig,
-            getStoredDiscountOptions(request)
-        );
+        const breakdown = computeServiceRequestPaymentAmounts(baseAmount, {
+            currency: pricingConfig?.currency,
+            paymentMode: "upi",
+            ...getStoredDiscountOptions(request),
+        });
 
         const requestWasPaid = (
             ["paid", "completed"].includes(String(request.status || "").toLowerCase()) ||
@@ -861,11 +866,11 @@ export async function razorpayWebhookHandler(req, res) {
 
                 if (reqRows.length > 0) {
                     const baseAmount = await resolveRequestBaseAmount(reqRows[0], pricingConfig);
-                    const breakdown = computePaymentAmounts(
-                        baseAmount,
-                        pricingConfig,
-                        getStoredDiscountOptions(reqRows[0])
-                    );
+                    const breakdown = computeServiceRequestPaymentAmounts(baseAmount, {
+                        currency: pricingConfig?.currency,
+                        paymentMode: "upi",
+                        ...getStoredDiscountOptions(reqRows[0]),
+                    });
                     await upsertPendingRazorpayPayment({
                         pool,
                         userId: userIdFromNotes,
@@ -1036,7 +1041,7 @@ router.get("/config", async (_req, res) => {
 // Compute payment quote for a specific service request with optional coupon
 router.post('/quote', verifyUser, async (req, res) => {
     try {
-        const { requestId, couponCode, preserveExistingApplied } = req.body || {};
+        const { requestId, couponCode, preserveExistingApplied, paymentMode } = req.body || {};
         const userId = req.user.userId;
         if (!requestId) return res.status(400).json({ error: 'requestId is required' });
 
@@ -1063,6 +1068,7 @@ router.post('/quote', verifyUser, async (req, res) => {
             pricingConfig,
             couponCode,
             preserveExistingApplied: preserveExistingApplied !== false,
+            paymentMode,
         });
 
         res.json({
@@ -1070,6 +1076,7 @@ router.post('/quote', verifyUser, async (req, res) => {
             request_id: Number(requestId),
             breakdown: {
                 currency: breakdown.currency,
+                payment_mode: breakdown.paymentMode,
                 base_amount: breakdown.baseAmount,
                 platform_fee_percent: breakdown.platformFeePercent,
                 original_platform_fee: breakdown.originalPlatformFee,
@@ -1077,8 +1084,13 @@ router.post('/quote', verifyUser, async (req, res) => {
                 platform_fee: breakdown.platformFee,
                 payment_fee_percent: breakdown.paymentFeePercent,
                 payment_fee: breakdown.paymentFee,
+                razorpay_fee: breakdown.razorpayFee,
                 total_amount: breakdown.totalAmount,
+                final_amount: breakdown.finalAmount,
             },
+            paymentMode: breakdown.paymentMode,
+            razorpayFee: breakdown.razorpayFee,
+            finalAmount: breakdown.finalAmount,
             coupon: {
                 active: coupon.active,
                 configured_code: coupon.configuredCode,
@@ -1129,6 +1141,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
             pricingConfig,
             couponCode,
             preserveExistingApplied: false,
+            paymentMode: "upi",
         });
 
         if (coupon.providedCode && !coupon.isApplied) {
@@ -1186,13 +1199,19 @@ router.post('/create-order', verifyUser, async (req, res) => {
                 receipt: `receipt_${requestId}_reused`,
                 status: String(reusablePayment.status || "pending").toLowerCase(),
                 base_amount: breakdown.baseAmount,
+                payment_mode: breakdown.paymentMode,
                 original_platform_fee: breakdown.originalPlatformFee,
                 discount_amount: breakdown.discountAmount,
                 platform_fee: breakdown.platformFee,
                 payment_fee_percent: breakdown.paymentFeePercent,
                 payment_fee: breakdown.paymentFee,
+                razorpay_fee: breakdown.razorpayFee,
                 platform_fee_percent: breakdown.platformFeePercent,
                 total_amount: breakdown.totalAmount,
+                final_amount: breakdown.finalAmount,
+                paymentMode: breakdown.paymentMode,
+                razorpayFee: breakdown.razorpayFee,
+                finalAmount: breakdown.finalAmount,
                 coupon: {
                     applied_coupon_code: coupon.appliedCode,
                     is_applied: coupon.isApplied,
@@ -1263,13 +1282,19 @@ router.post('/create-order', verifyUser, async (req, res) => {
         res.json({
             ...order,
             base_amount: breakdown.baseAmount,
+            payment_mode: breakdown.paymentMode,
             original_platform_fee: breakdown.originalPlatformFee,
             discount_amount: breakdown.discountAmount,
             platform_fee: breakdown.platformFee,
             payment_fee_percent: breakdown.paymentFeePercent,
             payment_fee: breakdown.paymentFee,
+            razorpay_fee: breakdown.razorpayFee,
             platform_fee_percent: breakdown.platformFeePercent,
             total_amount: breakdown.totalAmount,
+            final_amount: breakdown.finalAmount,
+            paymentMode: breakdown.paymentMode,
+            razorpayFee: breakdown.razorpayFee,
+            finalAmount: breakdown.finalAmount,
             coupon: {
                 applied_coupon_code: coupon.appliedCode,
                 is_applied: coupon.isApplied,
@@ -1326,11 +1351,11 @@ router.post('/confirm', verifyUser, async (req, res) => {
         }
 
         const baseAmount = await resolveRequestBaseAmount(requestRow, pricingConfig);
-        const breakdown = computePaymentAmounts(
-            baseAmount,
-            pricingConfig,
-            getStoredDiscountOptions(requestRow)
-        );
+        const breakdown = computeServiceRequestPaymentAmounts(baseAmount, {
+            currency: pricingConfig?.currency,
+            paymentMode: "upi",
+            ...getStoredDiscountOptions(requestRow),
+        });
 
         await markClientSideVerification({
             pool,
@@ -1453,6 +1478,7 @@ router.post('/cash', verifyUser, async (req, res) => {
             pricingConfig,
             couponCode,
             preserveExistingApplied: false,
+            paymentMode: "cash",
         });
 
         if (coupon.providedCode && !coupon.isApplied) {
@@ -1601,12 +1627,27 @@ router.post('/cash', verifyUser, async (req, res) => {
             });
 
             if (technicianId) {
+                const [pendingDueRows] = await pool.query(
+                    `SELECT IFNULL(SUM(COALESCE(p.platform_fee, 0)), 0) AS total
+                     FROM payments p
+                     JOIN service_requests sr ON sr.id = p.service_request_id
+                     WHERE sr.technician_id = ?
+                       AND LOWER(COALESCE(p.payment_method, '')) = 'cash'
+                       AND LOWER(COALESCE(p.status, '')) = 'completed'
+                       AND COALESCE(p.is_settled, FALSE) = FALSE`,
+                    [technicianId]
+                );
+                const pendingDues = Number(pendingDueRows?.[0]?.total || 0);
                 socketService.notifyTechnician(technicianId, 'job:status_update', {
                     requestId,
                     status: 'completed',
                     amount: techAmount,
                 });
                 socketService.notifyTechnician(technicianId, 'job:list_update', { requestId, action: 'updated' });
+                socketService.notifyTechnician(technicianId, 'technician:financials_update', {
+                    pending_dues: Number.isFinite(pendingDues) ? pendingDues : 0,
+                    at: new Date().toISOString(),
+                });
             }
             socketService.notifyUser(userId, 'payment_completed', { requestId, status: 'completed' });
             socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'completed' });

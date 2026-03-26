@@ -25,6 +25,7 @@ import {
   createWithdrawalRequest,
   getTechnicianWithdrawalRequests,
 } from "../services/marketplaceWithdrawalService.js";
+import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPaymentService.js";
 import {
   markTechnicianHeartbeat,
   markTechnicianLogin,
@@ -247,12 +248,37 @@ const roundMoney = (value) => {
 
 async function fetchTechnicianFinancialSnapshot(pool, technicianId) {
   const wallet = await getTechnicianWalletSummary(pool, technicianId);
+  const [paymentDueRows] = await pool.query(
+    `
+    SELECT IFNULL(SUM(COALESCE(p.platform_fee, 0)), 0) AS total
+    FROM payments p
+    JOIN service_requests sr ON sr.id = p.service_request_id
+    WHERE sr.technician_id = ?
+      AND LOWER(COALESCE(p.payment_method, '')) = 'cash'
+      AND LOWER(COALESCE(p.status, '')) = 'completed'
+      AND COALESCE(p.is_settled, FALSE) = FALSE
+    `,
+    [technicianId]
+  );
+  const [legacyDueRows] = await pool.query(
+    `
+    SELECT IFNULL(SUM(COALESCE(amount, 0)), 0) AS total
+    FROM technician_dues
+    WHERE technician_id = ?
+      AND LOWER(COALESCE(status, '')) = 'pending'
+    `,
+    [technicianId]
+  );
+  const computedPendingDues = roundMoney(paymentDueRows?.[0]?.total || 0);
+  const legacyPendingDues = roundMoney(legacyDueRows?.[0]?.total || 0);
+  const pendingDues = computedPendingDues > 0 ? computedPendingDues : legacyPendingDues;
+
   return {
     total_earnings: roundMoney(wallet.total_earned || 0),
     withdrawable_balance: roundMoney(wallet.withdrawable_balance || 0),
     total_paid_out: roundMoney(wallet.total_paid_out || 0),
     on_hold_balance: roundMoney(wallet.on_hold_balance || 0),
-    pending_dues: 0,
+    pending_dues: pendingDues,
     currency: wallet.currency || "INR",
   };
 }
@@ -304,7 +330,7 @@ const toOptionalPhone = (value) => {
   return compact || null;
 };
 
-function buildActiveJobResponse(jobRow, resolvedAmount) {
+function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
   if (!jobRow) return null;
 
   const id = String(jobRow.id ?? "");
@@ -321,7 +347,12 @@ function buildActiveJobResponse(jobRow, resolvedAmount) {
   const address = toOptionalString(jobRow.address);
   const status = toOptionalString(jobRow.status);
   const description = toOptionalString(jobRow.description);
-  const amount = toPositiveMoney(resolvedAmount);
+  const paymentDetails = buildServiceRequestPaymentDetails({
+    requestRow: jobRow,
+    paymentRow,
+    baseAmount: resolvedAmount,
+  });
+  const amount = toPositiveMoney(paymentDetails.baseAmount);
 
   return {
     id,
@@ -336,6 +367,7 @@ function buildActiveJobResponse(jobRow, resolvedAmount) {
     destinationLongitude,
     jobStatus: status,
     amount,
+    ...paymentDetails,
     address,
     description,
     status,
@@ -391,9 +423,17 @@ async function fetchActiveTechnicianJob(technicianId) {
     "SELECT pricing, service_costs FROM technicians WHERE id = ? LIMIT 1",
     [normalizedTechnicianId]
   );
+  const [paymentRows] = await pool.query(
+    `SELECT payment_method, amount, base_amount, platform_fee, payment_fee, is_settled, status, currency
+     FROM payments
+     WHERE service_request_id = ?
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [job.id]
+  );
   const pricingConfig = await getPlatformPricingConfig();
   const resolvedAmount = await resolveTechnicianJobAmount(job, techRows?.[0] || null, pricingConfig);
-  return buildActiveJobResponse(job, resolvedAmount);
+  return buildActiveJobResponse(job, resolvedAmount, paymentRows[0] || null);
 }
 
 // Get technician's service requests

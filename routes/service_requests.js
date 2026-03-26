@@ -16,6 +16,7 @@ import {
 import { estimateRequestAmount, estimateRequestAmountAsync, estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 import { computePaymentAmounts, getPlatformPricingConfig } from "../services/platformPricing.js";
 import { buildMarketplacePricingSnapshot } from "../services/marketplacePaymentService.js";
+import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPaymentService.js";
 import {
     PAYMENT_LEDGER_STATUS,
     PAYMENT_TO_TECHNICIAN_STATUS,
@@ -1102,6 +1103,20 @@ router.get("/:id", verifyUser, async (req, res) => {
         const row = rows[0];
         const pricingConfig = await getPlatformPricingConfig();
         const resolvedAmount = await resolveRequestBaseAmount(row, pricingConfig);
+        const [paymentRows] = await pool.query(
+            `SELECT payment_method, amount, base_amount, platform_fee, payment_fee, is_settled, status, currency
+             FROM payments
+             WHERE service_request_id = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1`,
+            [requestId]
+        );
+        const paymentDetails = buildServiceRequestPaymentDetails({
+            requestRow: row,
+            paymentRow: paymentRows[0] || null,
+            baseAmount: resolvedAmount,
+            currency: pricingConfig?.currency || "INR",
+        });
         const request = {
             ...row,
             _id: String(row.id),
@@ -1118,7 +1133,8 @@ router.get("/:id", verifyUser, async (req, res) => {
                     lng: Number.isFinite(Number(row.technician_lng)) ? Number(row.technician_lng) : null
                 }
             } : null,
-            amount: resolvedAmount
+            amount: paymentDetails.baseAmount,
+            ...paymentDetails,
         };
 
         res.json(request);

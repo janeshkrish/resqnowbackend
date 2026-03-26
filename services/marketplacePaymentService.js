@@ -4,6 +4,7 @@ export function buildMarketplacePricingSnapshot({ breakdown, coupon = null } = {
   if (!breakdown) return null;
   return {
     currency: String(breakdown.currency || "INR").toUpperCase(),
+    payment_mode: breakdown.paymentMode || breakdown.payment_mode || null,
     base_amount: roundMoney(breakdown.baseAmount || 0),
     platform_fee_percent: Number(breakdown.platformFeePercent || 0),
     original_platform_fee: roundMoney(breakdown.originalPlatformFee || 0),
@@ -11,7 +12,13 @@ export function buildMarketplacePricingSnapshot({ breakdown, coupon = null } = {
     platform_fee: roundMoney(breakdown.platformFee || 0),
     payment_fee_percent: Number(breakdown.paymentFeePercent || 0),
     payment_fee: roundMoney(breakdown.paymentFee || 0),
+    razorpay_fee: roundMoney(
+      breakdown.razorpayFee ?? breakdown.paymentFee ?? 0
+    ),
     total_amount: roundMoney(breakdown.totalAmount || 0),
+    final_amount: roundMoney(
+      breakdown.finalAmount ?? breakdown.totalAmount ?? 0
+    ),
     coupon: coupon
       ? {
           applied_coupon_code: coupon.appliedCode || null,
