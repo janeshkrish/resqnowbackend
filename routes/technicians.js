@@ -283,6 +283,103 @@ async function fetchTechnicianFinancialSnapshot(pool, technicianId) {
   };
 }
 
+const TECHNICIAN_CATEGORY_ALIASES = new Map([
+  ["towing", "towing"],
+  ["tow", "towing"],
+  ["towing assistance", "towing"],
+  ["towing services", "towing"],
+  ["battery", "battery_jumpstart"],
+  ["battery jumpstart", "battery_jumpstart"],
+  ["battery jump start", "battery_jumpstart"],
+  ["battery_jumpstart", "battery_jumpstart"],
+  ["fuel", "fuel_delivery"],
+  ["fuel delivery", "fuel_delivery"],
+  ["fuel_delivery", "fuel_delivery"],
+  ["lockout", "lockout_assistance"],
+  ["lockout assistance", "lockout_assistance"],
+  ["lockout_assistance", "lockout_assistance"],
+  ["tire change", "tire_change"],
+  ["tyre change", "tire_change"],
+  ["tire_change", "tire_change"],
+  ["tyre_change", "tire_change"],
+  ["flat tire", "tire_change"],
+  ["flat tyre", "tire_change"],
+  ["flat-tire", "tire_change"],
+  ["flat_tire", "tire_change"],
+  ["puncture", "tire_change"],
+  ["puncture repair", "tire_change"],
+  ["tyre puncture repair", "tire_change"],
+  ["tyre / puncture repair", "tire_change"],
+]);
+
+function normalizeTechnicianFilterToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function resolveTechnicianCategory(value) {
+  const normalized = normalizeTechnicianFilterToken(value);
+  if (!normalized) return "";
+  return TECHNICIAN_CATEGORY_ALIASES.get(normalized) || normalized.replace(/\s+/g, "_");
+}
+
+function parseTechnicianCategoryList(rawValue) {
+  const input = Array.isArray(rawValue) ? rawValue.join(",") : String(rawValue || "");
+  return Array.from(
+    new Set(
+      input
+        .split(",")
+        .map((item) => resolveTechnicianCategory(item))
+        .filter(Boolean)
+    )
+  );
+}
+
+function parseTechnicianSpecialties(rawValue) {
+  if (Array.isArray(rawValue)) {
+    return rawValue;
+  }
+
+  if (typeof rawValue === "string") {
+    const trimmed = rawValue.trim();
+    if (!trimmed) return [];
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      return Array.isArray(parsed) ? parsed : [trimmed];
+    } catch {
+      return trimmed.split(",").map((item) => item.trim()).filter(Boolean);
+    }
+  }
+
+  return [];
+}
+
+function resolveBroadcastTechnicianCategories(row) {
+  const values = [row?.service_type, ...parseTechnicianSpecialties(row?.specialties)];
+  return Array.from(new Set(values.map((value) => resolveTechnicianCategory(value)).filter(Boolean)));
+}
+
+function resolveBroadcastTechnicianStatus(row) {
+  const approvalStatus = String(row?.status || "").trim().toLowerCase();
+  const isActive = Boolean(row?.is_active);
+  const isAvailable = Boolean(row?.is_available);
+
+  if (approvalStatus !== "approved") {
+    return approvalStatus || "offline";
+  }
+  if (isActive && isAvailable) {
+    return "online";
+  }
+  if (isActive && !isAvailable) {
+    return "busy";
+  }
+  return "offline";
+}
+
 async function resolveTechnicianJobAmount(jobRow, technicianProfile, _pricingConfig = null) {
   const techAmount = await estimateTechnicianPayoutAsync(
     { service_type: jobRow?.service_type, vehicle_type: jobRow?.vehicle_type },
@@ -435,6 +532,78 @@ async function fetchActiveTechnicianJob(technicianId) {
   const resolvedAmount = await resolveTechnicianJobAmount(job, techRows?.[0] || null, pricingConfig);
   return buildActiveJobResponse(job, resolvedAmount, paymentRows[0] || null);
 }
+
+router.get("/", verifyAdmin, async (req, res) => {
+  try {
+    const categories = parseTechnicianCategoryList(req.query.category ?? req.query.categories);
+    const region = String(req.query.region || "").trim().toLowerCase();
+    const status = String(req.query.status || "").trim().toLowerCase();
+
+    const whereClauses = [];
+    const params = [];
+
+    if (region) {
+      whereClauses.push("LOWER(COALESCE(region, '')) = ?");
+      params.push(region);
+    }
+
+    if (status === "online") {
+      whereClauses.push("LOWER(COALESCE(status, '')) = 'approved'");
+      whereClauses.push("COALESCE(is_active, 0) = 1");
+      whereClauses.push("COALESCE(is_available, 0) = 1");
+    } else if (status === "busy") {
+      whereClauses.push("LOWER(COALESCE(status, '')) = 'approved'");
+      whereClauses.push("COALESCE(is_active, 0) = 1");
+      whereClauses.push("COALESCE(is_available, 0) = 0");
+    } else if (status === "offline") {
+      whereClauses.push("(LOWER(COALESCE(status, '')) <> 'approved' OR COALESCE(is_active, 0) = 0)");
+    } else if (status) {
+      whereClauses.push("LOWER(COALESCE(status, '')) = ?");
+      params.push(status);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const pool = await db.getPool();
+    const [rows] = await pool.query(
+      `SELECT
+         id,
+         name,
+         service_type,
+         specialties,
+         region,
+         status,
+         is_active,
+         is_available,
+         created_at
+       FROM technicians
+       ${whereSql}
+       ORDER BY created_at DESC, id DESC`,
+      params
+    );
+
+    const filteredRows =
+      categories.length > 0
+        ? rows.filter((row) => {
+            const rowCategories = resolveBroadcastTechnicianCategories(row);
+            return categories.some((category) => rowCategories.includes(category));
+          })
+        : rows;
+
+    return res.json(
+      filteredRows.map((row) => ({
+        id: Number(row.id),
+        name: row.name,
+        category: resolveBroadcastTechnicianCategories(row)[0] || "",
+        categories: resolveBroadcastTechnicianCategories(row),
+        region: String(row.region || "").trim(),
+        status: resolveBroadcastTechnicianStatus(row),
+      }))
+    );
+  } catch (err) {
+    console.error("[Technicians root list]", err);
+    return res.status(500).json({ error: "Failed to fetch technicians" });
+  }
+});
 
 // Get technician's service requests
 router.get("/requests", verifyTechnician, async (req, res) => {

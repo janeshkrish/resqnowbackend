@@ -193,6 +193,11 @@ function createApp() {
     next();
   });
 
+  app.use("/api", (req, _res, next) => {
+    console.log("API HIT:", req.method, req.originalUrl);
+    next();
+  });
+
   // Route mounts
   app.use("/api/technicians", techniciansRouter);
   app.use("/api/technician", techniciansRouter);

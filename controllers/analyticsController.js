@@ -39,15 +39,13 @@ function buildDailySeries(rows, daysBack) {
   return result;
 }
 
-function buildLastSixMonthsSeries(rows) {
-  const monthMap = new Map();
-  rows.forEach((row) => {
-    monthMap.set(row.year_month, {
-      name: row.month_label,
-      requests: Number(row.request_count || 0),
-      technicians: Number(row.technician_count || 0),
-    });
-  });
+function buildLastSixMonthsSeries(requestRows, technicianRows) {
+  const requestMap = new Map(
+    (requestRows || []).map((row) => [row.year_month, Number(row.request_count || 0)])
+  );
+  const technicianMap = new Map(
+    (technicianRows || []).map((row) => [row.year_month, Number(row.technician_count || 0)])
+  );
 
   const output = [];
   const now = new Date();
@@ -55,11 +53,24 @@ function buildLastSixMonthsSeries(rows) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const yearMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
     const label = d.toLocaleString("en-US", { month: "short" });
-    const row = monthMap.get(yearMonth) || { name: label, requests: 0, technicians: 0 };
-    output.push({ name: row.name || label, requests: row.requests || 0, technicians: row.technicians || 0 });
+    output.push({
+      name: label,
+      requests: requestMap.get(yearMonth) || 0,
+      technicians: technicianMap.get(yearMonth) || 0,
+    });
   }
 
   return output;
+}
+
+async function safeQuery(pool, label, sql, params = []) {
+  try {
+    const [rows] = await pool.query(sql, params);
+    return rows || [];
+  } catch (error) {
+    console.error(`[admin.analytics] ${label} failed:`, error?.message || error);
+    return [];
+  }
 }
 
 export async function getAnalytics(req, res) {
@@ -69,14 +80,22 @@ export async function getAnalytics(req, res) {
 
     const pool = await getPool();
     const [
-      [requestsOverTimeRows],
-      [peakHoursRows],
-      [serviceDistributionRows],
-      [utilizationRows],
-      [totalsRows],
-      [monthlyRows],
+      requestsOverTimeRows,
+      peakHoursRows,
+      serviceDistributionRows,
+      utilizationRows,
+      usersRows,
+      techniciansRows,
+      totalRequestsRows,
+      completedRequestsRows,
+      activeUsersRows,
+      revenueRows,
+      monthlyRequestRows,
+      monthlyTechnicianRows,
     ] = await Promise.all([
-      pool.query(
+      safeQuery(
+        pool,
+        "requestsOverTime",
         `SELECT DATE(created_at) AS day, COUNT(*) AS request_count
          FROM service_requests
          WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
@@ -84,7 +103,9 @@ export async function getAnalytics(req, res) {
          ORDER BY DATE(created_at) ASC`,
         [daysBack - 1]
       ),
-      pool.query(
+      safeQuery(
+        pool,
+        "peakHours",
         `SELECT HOUR(created_at) AS hour_of_day, COUNT(*) AS request_count
          FROM service_requests
          GROUP BY HOUR(created_at)
@@ -92,13 +113,17 @@ export async function getAnalytics(req, res) {
          LIMIT ?`,
         [peakLimit]
       ),
-      pool.query(
+      safeQuery(
+        pool,
+        "serviceDistribution",
         `SELECT COALESCE(service_type, 'unknown') AS issue_category, COUNT(*) AS request_count
          FROM service_requests
          GROUP BY service_type
          ORDER BY request_count DESC`
       ),
-      pool.query(
+      safeQuery(
+        pool,
+        "technicianUtilization",
         `SELECT
            t.id AS technician_id,
            t.name AS technician_name,
@@ -109,44 +134,49 @@ export async function getAnalytics(req, res) {
          GROUP BY t.id, t.name
          ORDER BY total_assigned DESC, active_requests DESC`
       ),
-      pool.query(
-        `SELECT
-           (SELECT COUNT(*) FROM technicians) AS total_technicians,
-           (SELECT COUNT(*) FROM users) AS total_users,
-           (SELECT COUNT(DISTINCT user_id) FROM service_requests WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)) AS active_users,
-           (SELECT COUNT(*) FROM service_requests) AS total_service_requests,
-           (
-             SELECT IFNULL(SUM(p.amount), 0)
-             FROM payments p
-             LEFT JOIN service_requests sr ON sr.id = p.service_request_id
-             WHERE LOWER(COALESCE(p.status, '')) = 'completed'
-               AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')
-           ) AS total_revenue`
+      safeQuery(pool, "totalUsers", "SELECT COUNT(*) AS total FROM users"),
+      safeQuery(pool, "totalTechnicians", "SELECT COUNT(*) AS total FROM technicians"),
+      safeQuery(pool, "totalRequests", "SELECT COUNT(*) AS total FROM service_requests"),
+      safeQuery(
+        pool,
+        "completedRequests",
+        `SELECT COUNT(*) AS total
+         FROM service_requests
+         WHERE LOWER(COALESCE(status, '')) IN ('completed', 'paid')`
       ),
-      pool.query(
-        `SELECT
-           DATE_FORMAT(m.month_start, '%Y-%m') AS year_month,
-           DATE_FORMAT(m.month_start, '%b') AS month_label,
-           COALESCE(sr.request_count, 0) AS request_count,
-           COALESCE(t.technician_count, 0) AS technician_count
-         FROM (
-           SELECT DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL seq MONTH), '%Y-%m-01') AS month_start
-           FROM (
-             SELECT 0 AS seq UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
-           ) month_seq
-         ) m
-         LEFT JOIN (
-           SELECT DATE_FORMAT(created_at, '%Y-%m') AS ym, COUNT(*) AS request_count
-           FROM service_requests
-           WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
-           GROUP BY DATE_FORMAT(created_at, '%Y-%m')
-         ) sr ON sr.ym = DATE_FORMAT(m.month_start, '%Y-%m')
-         LEFT JOIN (
-           SELECT DATE_FORMAT(created_at, '%Y-%m') AS ym, COUNT(*) AS technician_count
-           FROM technicians
-           WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
-           GROUP BY DATE_FORMAT(created_at, '%Y-%m')
-         ) t ON t.ym = DATE_FORMAT(m.month_start, '%Y-%m')
+      safeQuery(
+        pool,
+        "activeUsers",
+        `SELECT COUNT(DISTINCT user_id) AS total
+         FROM service_requests
+         WHERE user_id IS NOT NULL
+           AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`
+      ),
+      safeQuery(
+        pool,
+        "totalRevenue",
+        `SELECT IFNULL(SUM(p.amount), 0) AS total
+         FROM payments p
+         LEFT JOIN service_requests sr ON sr.id = p.service_request_id
+         WHERE LOWER(COALESCE(p.status, '')) = 'completed'
+           AND (sr.id IS NULL OR LOWER(COALESCE(sr.status, '')) <> 'cancelled')`
+      ),
+      safeQuery(
+        pool,
+        "monthlyRequests",
+        `SELECT DATE_FORMAT(created_at, '%Y-%m') AS year_month, COUNT(*) AS request_count
+         FROM service_requests
+         WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+         GROUP BY DATE_FORMAT(created_at, '%Y-%m')
+         ORDER BY year_month ASC`
+      ),
+      safeQuery(
+        pool,
+        "monthlyTechnicians",
+        `SELECT DATE_FORMAT(created_at, '%Y-%m') AS year_month, COUNT(*) AS technician_count
+         FROM technicians
+         WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+         GROUP BY DATE_FORMAT(created_at, '%Y-%m')
          ORDER BY year_month ASC`
       ),
     ]);
@@ -177,23 +207,24 @@ export async function getAnalytics(req, res) {
       };
     });
 
-    const totals = totalsRows?.[0] || {};
-    const monthlyData = buildLastSixMonthsSeries(monthlyRows || []);
+    const monthlyData = buildLastSixMonthsSeries(monthlyRequestRows, monthlyTechnicianRows);
     const serviceDistribution = issueCategoryBreakdown.map((item, index) => ({
       name: item.issueCategory,
       value: item.requestCount,
       color: DISTRIBUTION_COLORS[index % DISTRIBUTION_COLORS.length],
     }));
 
-    const totalTechnicians = Number(totals.total_technicians || 0);
-    const totalUsers = Number(totals.total_users || 0);
-    const activeUsers = Number(totals.active_users || 0);
-    const totalRequests = Number(totals.total_service_requests || 0);
-    const revenue = Number(totals.total_revenue || 0);
+    const totalTechnicians = Number(techniciansRows?.[0]?.total || 0);
+    const totalUsers = Number(usersRows?.[0]?.total || 0);
+    const activeUsers = Number(activeUsersRows?.[0]?.total || 0);
+    const totalRequests = Number(totalRequestsRows?.[0]?.total || 0);
+    const completedRequests = Number(completedRequestsRows?.[0]?.total || 0);
+    const revenue = Number(revenueRows?.[0]?.total || 0);
 
     return res.json({
       totalTechnicians,
       totalRequests,
+      completedRequests,
       activeUsers,
       revenue,
       requestsOverTime,
