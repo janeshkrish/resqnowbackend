@@ -327,18 +327,18 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
         html: `Hello ${trimmedName},<br><br>Your OTP for verification is: <b>${otp}</b><br><br>It expires in ${OTP_TTL_MINUTES} minutes.<br><br>Regards,<br>ResQNow Team`,
       });
     } catch (sendError) {
-      const smtpError = mail.getSmtpErrorDetails(sendError);
-      console.error("[OTP] SMTP send failed", {
+      const emailError = mail.getEmailErrorDetails(sendError);
+      console.error("[OTP] Email send failed", {
         requestId,
         clientIp,
         email: maskEmail(normalizedEmail),
         otpRequestId,
-        smtpError,
+        emailError,
       });
       try {
         await pool.execute("DELETE FROM otp_requests WHERE id = ? LIMIT 1", [otpRequestId]);
       } catch (cleanupError) {
-        console.error("[OTP] Failed to cleanup OTP row after SMTP failure", {
+        console.error("[OTP] Failed to cleanup OTP row after email failure", {
           requestId,
           otpRequestId,
           cleanupError: cleanupError?.stack || cleanupError?.message || cleanupError,

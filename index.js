@@ -342,7 +342,7 @@ async function startServer() {
   console.log(`Google Callback URL: ${getGoogleCallbackUrl()}`);
   console.log(`Allowed Origins: ${getAllowedOriginsForLogs().join(", ")}`);
 
-  // Mail connectivity should not block API startup on Render; log and continue if SMTP is unreachable.
+  // Email configuration should not block API startup; log and continue if the provider is unavailable.
   void verifyMailerConnection().then((mailerReady) => {
     if (!mailerReady) {
       console.error("[Mailer] Connectivity check failed after startup. API is running, but email sending may fail.");

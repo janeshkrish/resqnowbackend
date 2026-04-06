@@ -48,9 +48,7 @@ npm install
 - `JWT_SECRET`
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
-- `EMAIL_USER` *(Gmail address; for other providers supply the full sender address)*
-- `EMAIL_PASS` *(use an app-specific password for Gmail/Google Workspace accounts)*
-- `SMTP_HOST` and `SMTP_PORT` *(optional – both must be set together; if omitted the code falls back to the Gmail service)*
+- `RESEND_API_KEY`
 - `RAZORPAY_KEY_ID`
 - `RAZORPAY_KEY_SECRET`
 - `GOOGLE_CLIENT_ID`
@@ -61,13 +59,11 @@ npm install
 
 > Example email block for `.env`:
 > ```
-> EMAIL_USER=youremail@gmail.com
-> EMAIL_PASS=my-app-password
-> # optional custom SMTP
-> SMTP_HOST=smtp.gmail.com
-> SMTP_PORT=587
+> RESEND_API_KEY=re_xxxxxxxxx
+> EMAIL_FROM=ResQNow <onboarding@resend.dev>
+> CONTACT_RECEIVER_EMAIL=support@example.com
 > ```
-> Never store your normal login password; create an app password in Google Security settings.
+> Use a verified sender in `EMAIL_FROM` for production domains. `CONTACT_RECEIVER_EMAIL` is recommended for the public contact form.
 
 ### Production (Render + Vercel)
 
@@ -76,7 +72,7 @@ npm install
 - `FRONTEND_URL=https://resqnow.org`
 - `FRONTEND_PUBLIC_URL=https://resqnow.org`
 
-> **Google OAuth setup:** make sure the _full_ callback URI is configured in Google Cloud (not just the domain).
+> **Google OAuth setup:** make sure the full callback URI is configured in Google Cloud (not just the domain).
 > Example authorized redirect URI in Cloud Console:
 > `https://resqnowbackend.onrender.com/auth/google/callback`
 > and match the value of `GOOGLE_CALLBACK_URL` below.
@@ -186,6 +182,7 @@ Runtime smoke checks:
 
 ```bash
 npm start
+npm run email:test
 # then verify /health and /ready
 ```
 

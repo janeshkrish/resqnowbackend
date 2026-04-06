@@ -11,8 +11,7 @@ const REQUIRED_ENV_KEYS = [
   "ADMIN_PASSWORD",
   "RAZORPAY_KEY_ID",
   "RAZORPAY_KEY_SECRET",
-  "EMAIL_USER",
-  "EMAIL_PASS",
+  "RESEND_API_KEY",
   "GOOGLE_CLIENT_ID",
   "GOOGLE_CLIENT_SECRET",
   "GOOGLE_CALLBACK_URL",
@@ -24,7 +23,7 @@ const SECRET_KEYS = new Set([
   "JWT_SECRET",
   "ADMIN_PASSWORD",
   "RAZORPAY_KEY_SECRET",
-  "EMAIL_PASS",
+  "RESEND_API_KEY",
   "GOOGLE_CLIENT_SECRET",
 ]);
 
@@ -88,13 +87,6 @@ export function validateEnvironmentOrThrow() {
   const frontendUrl = normalizeUrl(getFrontendUrl());
   const backendPublicUrl = normalizeUrl(getBackendPublicUrl());
   const googleCallbackUrl = normalizeUrl(getGoogleCallbackUrl());
-
-  // if custom SMTP settings are partially provided, that's a configuration error
-  const smtpHost = String(process.env.SMTP_HOST || "").trim();
-  const smtpPort = String(process.env.SMTP_PORT || "").trim();
-  if ((smtpHost && !smtpPort) || (smtpPort && !smtpHost)) {
-    throw new Error("Both SMTP_HOST and SMTP_PORT must be set together or omitted.");
-  }
 
   const frontend = parseUrlOrThrow("FRONTEND_URL", frontendUrl);
   const backend = parseUrlOrThrow("BACKEND_URL/BACKEND_PUBLIC_URL", backendPublicUrl);

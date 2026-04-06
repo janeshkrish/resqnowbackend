@@ -12,6 +12,22 @@ const BACKEND_ROOT = path.resolve(ROUTES_DIR, "..");
 const DEFAULT_ANDROID_APK_FILE_NAME = "resqnow.apk";
 const DEFAULT_ANDROID_APK_RELATIVE_PATH = path.join("public", "downloads", DEFAULT_ANDROID_APK_FILE_NAME);
 
+function extractEmailAddress(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    const match = raw.match(/<([^>]+)>/);
+    const candidate = String(match?.[1] || raw).trim();
+    return candidate.includes("@") ? candidate : "";
+}
+
+function getContactReceiverEmail() {
+    return (
+        String(process.env.CONTACT_RECEIVER_EMAIL || "").trim() ||
+        String(process.env.ADMIN_EMAIL || "").trim() ||
+        extractEmailAddress(process.env.EMAIL_FROM)
+    );
+}
+
 function getFileStatSafe(filePath) {
     try {
         if (!filePath || !fs.existsSync(filePath)) return null;
@@ -171,11 +187,7 @@ router.post("/contact", async (req, res) => {
     }
 
     try {
-        const contactReceiver = String(
-            process.env.CONTACT_RECEIVER_EMAIL ||
-            process.env.EMAIL_USER ||
-            ""
-        ).trim();
+        const contactReceiver = getContactReceiverEmail();
         if (!contactReceiver) {
             return res.status(503).json({ error: "Contact email receiver is not configured." });
         }
