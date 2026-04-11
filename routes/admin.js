@@ -978,7 +978,7 @@ router.delete("/users/:id", async (req, res) => {
   let conn;
   try {
     const id = req.params.id;
-    console.log("[Admin delete user] Delete request:", id);
+    console.log("Deleting user:", id);
 
     const numericId = Number(id);
     if (!Number.isInteger(numericId) || numericId <= 0) {
@@ -989,11 +989,12 @@ router.delete("/users/:id", async (req, res) => {
     conn = await pool.getConnection();
     await conn.beginTransaction();
 
-    const [userRows] = await conn.query("SELECT id FROM users WHERE id = ? LIMIT 1", [numericId]);
+    const [userRows] = await conn.query("SELECT id, email FROM users WHERE id = ? LIMIT 1", [numericId]);
     if (userRows.length === 0) {
       await conn.rollback();
       return res.status(404).json({ error: "User not found." });
     }
+    const userEmail = String(userRows[0]?.email || "").trim().toLowerCase();
 
     const [requestRows] = await conn.query(
       "SELECT id FROM service_requests WHERE user_id = ?",
@@ -1074,6 +1075,10 @@ router.delete("/users/:id", async (req, res) => {
         requestIds
       );
       await conn.execute(
+        `DELETE FROM payments WHERE user_id = ?`,
+        [numericId]
+      );
+      await conn.execute(
         `DELETE FROM service_requests WHERE user_id = ?`,
         [numericId]
       );
@@ -1097,13 +1102,18 @@ router.delete("/users/:id", async (req, res) => {
       );
     }
 
+    if (userEmail) {
+      await conn.execute("DELETE FROM otp_requests WHERE email = ?", [userEmail]);
+      await conn.execute("DELETE FROM otp_rate_limits WHERE email = ?", [userEmail]);
+    }
+
     const [result] = await conn.execute("DELETE FROM users WHERE id = ?", [numericId]);
     await conn.commit();
 
     if (Number(result?.affectedRows || 0) === 0) {
       return res.status(404).json({ error: "User not found." });
     }
-    return res.status(200).json({ success: true, message: "User deleted." });
+    return res.status(200).json({ success: true, message: "User deleted successfully" });
   } catch (err) {
     if (conn) {
       try {
@@ -1115,7 +1125,7 @@ router.delete("/users/:id", async (req, res) => {
     console.error("[Admin delete user]", err);
     return res.status(500).json({
       success: false,
-      error: "Failed to delete user.",
+      error: "Delete failed",
       details: err?.message || String(err),
     });
   } finally {

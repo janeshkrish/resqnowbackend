@@ -1,9 +1,11 @@
 import { Resend } from "resend";
 
 const DEFAULT_FROM_ADDRESS = "ResQNow <onboarding@resend.dev>";
+const RESEND_API_KEY = String(process.env.RESEND_API_KEY || "").trim();
 
-let resendClient = null;
-let resendKeyLogged = false;
+console.log("Resend initialized with key:", process.env.RESEND_API_KEY);
+
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 function isProductionLike() {
   return (
@@ -13,8 +15,11 @@ function isProductionLike() {
   );
 }
 
-function getApiKey() {
-  return String(process.env.RESEND_API_KEY || "").trim();
+function maskApiKey(value) {
+  const key = String(value || "").trim();
+  if (!key) return "";
+  if (key.length <= 8) return `${key[0] || "*"}***`;
+  return `${key.slice(0, 4)}***${key.slice(-4)}`;
 }
 
 export function maskEmail(value) {
@@ -24,13 +29,6 @@ export function maskEmail(value) {
   if (!name || !domain) return "";
   if (name.length <= 2) return `${name[0] || "*"}***@${domain}`;
   return `${name.slice(0, 2)}***@${domain}`;
-}
-
-function maskApiKey(value) {
-  const key = String(value || "").trim();
-  if (!key) return "";
-  if (key.length <= 8) return `${key[0] || "*"}***`;
-  return `${key.slice(0, 4)}***${key.slice(-4)}`;
 }
 
 export function extractEmailAddress(value) {
@@ -56,14 +54,12 @@ function shouldUseFallbackFromAddress(value) {
 
 export function getDefaultFromAddress() {
   const configuredFrom = String(process.env.EMAIL_FROM || "").trim();
+
   if (!configuredFrom) {
     return DEFAULT_FROM_ADDRESS;
   }
 
   if (shouldUseFallbackFromAddress(configuredFrom)) {
-    console.warn(
-      `[EmailService] EMAIL_FROM='${configuredFrom}' is a placeholder or invalid sender. Falling back to ${DEFAULT_FROM_ADDRESS}.`
-    );
     return DEFAULT_FROM_ADDRESS;
   }
 
@@ -71,12 +67,10 @@ export function getDefaultFromAddress() {
 }
 
 export function getEmailServiceConfigSnapshot() {
-  const apiKey = getApiKey();
-
   return {
-    configured: !!apiKey,
+    configured: !!RESEND_API_KEY,
     provider: "resend",
-    transportVerified: !!apiKey,
+    transportVerified: !!RESEND_API_KEY,
     productionLike: isProductionLike(),
     host: null,
     port: null,
@@ -88,9 +82,58 @@ export function getEmailServiceConfigSnapshot() {
     emailPassSet: false,
     emailUserMasked: "",
     emailFrom: getDefaultFromAddress(),
-    resendApiKeySet: !!apiKey,
-    resendApiKeyMasked: maskApiKey(apiKey),
+    resendApiKeySet: !!RESEND_API_KEY,
+    resendApiKeyMasked: maskApiKey(RESEND_API_KEY),
   };
+}
+
+function normalizeRecipients(value) {
+  if (Array.isArray(value)) {
+    return value
+      .filter(Boolean)
+      .map((entry) => String(entry).trim())
+      .filter(Boolean);
+  }
+
+  const normalized = String(value || "").trim();
+  return normalized ? [normalized] : [];
+}
+
+function normalizeAttachments(attachments = []) {
+  if (!Array.isArray(attachments) || attachments.length === 0) {
+    return undefined;
+  }
+
+  const normalizedAttachments = attachments
+    .filter(Boolean)
+    .map((attachment) => {
+      const normalized = {};
+
+      if (attachment.filename) {
+        normalized.filename = attachment.filename;
+      }
+
+      if (attachment.content != null) {
+        normalized.content = attachment.content;
+      }
+
+      if (attachment.path) {
+        normalized.path = attachment.path;
+      }
+
+      if (attachment.contentType) {
+        normalized.contentType = attachment.contentType;
+      }
+
+      if (attachment.contentId || attachment.cid) {
+        normalized.contentId = attachment.contentId || attachment.cid;
+      }
+
+      return normalized;
+    })
+    .filter((attachment) => attachment.filename && (attachment.content != null || attachment.path));
+
+  return normalizedAttachments.length > 0 ? normalizedAttachments : undefined;
 }
 
 function normalizeError(error) {
@@ -101,6 +144,7 @@ function normalizeError(error) {
     error?.error ||
     error?.name ||
     "Unknown email service error";
+
   const normalized = new Error(String(message));
   if (error && typeof error === "object") {
     Object.assign(normalized, error);
@@ -122,67 +166,6 @@ export function getEmailErrorDetails(error) {
   };
 }
 
-function getResendClient() {
-  if (resendClient) return resendClient;
-
-  const apiKey = getApiKey();
-  if (!resendKeyLogged) {
-    console.log("RESEND KEY:", process.env.RESEND_API_KEY);
-    resendKeyLogged = true;
-  }
-  if (!apiKey) {
-    const message = "Email is not configured. Set RESEND_API_KEY.";
-    if (isProductionLike()) {
-      throw new Error(message);
-    }
-    console.warn(`[EmailService] ${message}`);
-    return null;
-  }
-
-  resendClient = new Resend(apiKey);
-  return resendClient;
-}
-
-function normalizeRecipients(value) {
-  if (Array.isArray(value)) {
-    return value.filter(Boolean).map((entry) => String(entry).trim()).filter(Boolean);
-  }
-
-  const normalized = String(value || "").trim();
-  return normalized ? [normalized] : [];
-}
-
-function normalizeAttachments(attachments = []) {
-  if (!Array.isArray(attachments) || attachments.length === 0) {
-    return undefined;
-  }
-
-  return attachments
-    .filter(Boolean)
-    .map((attachment) => {
-      const normalized = {};
-
-      if (attachment.filename) {
-        normalized.filename = attachment.filename;
-      }
-
-      if (attachment.content != null) {
-        normalized.content = attachment.content;
-      }
-
-      if (attachment.path) {
-        normalized.path = attachment.path;
-      }
-
-      if (attachment.contentId || attachment.cid) {
-        normalized.contentId = attachment.contentId || attachment.cid;
-      }
-
-      return normalized;
-    })
-    .filter((attachment) => attachment.filename && (attachment.content != null || attachment.path));
-}
-
 export async function sendEmail({
   to,
   subject,
@@ -192,40 +175,53 @@ export async function sendEmail({
   from,
   replyTo,
 }) {
-  const resend = getResendClient();
-  if (!resend) {
-    console.log(`[Mock Mail] To: ${to}, Subject: ${subject}`);
-    return null;
-  }
-
-  const payload = {
-    from: from || getDefaultFromAddress(),
-    to: normalizeRecipients(to),
-    subject,
-    html,
-    text,
-    replyTo,
-    attachments: normalizeAttachments(attachments),
-  };
-
   try {
-    console.log("[EmailService] Sending email:", {
-      to: payload.to,
+    if (!resend) {
+      const configError = new Error("Email is not configured. Set RESEND_API_KEY.");
+      console.error("EMAIL ERROR FULL:", getEmailErrorDetails(configError));
+      if (isProductionLike()) {
+        throw configError;
+      }
+      return null;
+    }
+
+    const recipients = normalizeRecipients(to);
+
+    console.log("Sending email to:", recipients);
+
+    const payload = {
+      from: from || getDefaultFromAddress() || DEFAULT_FROM_ADDRESS,
+      to: recipients,
       subject,
-      from: payload.from,
-    });
+      html,
+    };
+
+    if (text != null) {
+      payload.text = text;
+    }
+
+    if (replyTo) {
+      payload.replyTo = replyTo;
+    }
+
+    const normalizedAttachments = normalizeAttachments(attachments);
+    if (normalizedAttachments) {
+      payload.attachments = normalizedAttachments;
+    }
 
     const response = await resend.emails.send(payload);
 
-    console.log("[EmailService] Resend response:", response);
+    console.log("Resend response:", response);
 
     if (!response || response.error) {
-      throw normalizeError(response?.error || new Error("Email failed"));
+      console.error("Resend error:", response?.error || null);
+      throw new Error(response?.error?.message || "Email failed");
     }
 
-    return response?.data || response || null;
-  } catch (error) {
-    console.error("[EmailService] Email send error:", getEmailErrorDetails(error));
-    throw normalizeError(error);
+    console.log("Email sent:", response.data || response);
+    return response.data || response;
+  } catch (err) {
+    console.error("EMAIL ERROR FULL:", getEmailErrorDetails(err));
+    throw normalizeError(err);
   }
 }

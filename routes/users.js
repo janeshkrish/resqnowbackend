@@ -308,6 +308,7 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
       return res.status(500).json({
         success: false,
         error: "Unable to send OTP email right now. Please try again shortly.",
+        message: "EMAIL_SEND_FAILED",
         details:
           String(mailerCheck?.error?.message || "").trim() ||
           (mailerCheck.reason === "not_configured"
@@ -317,6 +318,7 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log("OTP:", otp);
     const otpHash = await bcrypt.hash(otp, 10);
     const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
 
@@ -353,6 +355,7 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
       return res.status(500).json({
         success: false,
         error: "Unable to deliver OTP email at the moment. Please try again.",
+        message: "EMAIL_SEND_FAILED",
         details: emailError.message,
       });
     }
@@ -388,6 +391,8 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
     const responsePayload = {
       success: false,
       error: "Internal server error while processing OTP request.",
+      message: "EMAIL_SEND_FAILED",
+      details: error?.message || String(error),
     };
     if (debug) {
       responsePayload.debug = {

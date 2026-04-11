@@ -17,3 +17,6 @@ for (const envPath of candidateEnvPaths) {
   dotenv.config({ path: envPath });
   break;
 }
+
+console.log("RESEND KEY:", process.env.RESEND_API_KEY);
+console.log("EMAIL FROM:", process.env.EMAIL_FROM);
