@@ -975,17 +975,153 @@ router.put("/users/:id", async (req, res) => {
 });
 
 router.delete("/users/:id", async (req, res) => {
+  let conn;
   try {
     const id = req.params.id;
+    console.log("[Admin delete user] Delete request:", id);
+
+    const numericId = Number(id);
+    if (!Number.isInteger(numericId) || numericId <= 0) {
+      return res.status(400).json({ error: "Invalid user id." });
+    }
+
     const pool = await db.getPool();
-    const [result] = await pool.execute("DELETE FROM users WHERE id = ?", [id]);
-    if (result.affectedRows === 0) {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const [userRows] = await conn.query("SELECT id FROM users WHERE id = ? LIMIT 1", [numericId]);
+    if (userRows.length === 0) {
+      await conn.rollback();
       return res.status(404).json({ error: "User not found." });
     }
-    return res.status(200).json({ message: "User deleted." });
+
+    const [requestRows] = await conn.query(
+      "SELECT id FROM service_requests WHERE user_id = ?",
+      [numericId]
+    );
+    const requestIds = requestRows.map((row) => Number(row.id)).filter((value) => Number.isInteger(value) && value > 0);
+
+    const [paymentRows] = await conn.query(
+      "SELECT id FROM payments WHERE user_id = ?",
+      [numericId]
+    );
+    const paymentIds = paymentRows.map((row) => Number(row.id)).filter((value) => Number.isInteger(value) && value > 0);
+
+    await conn.execute("DELETE FROM device_tokens WHERE user_id = ? AND user_type = 'user'", [numericId]);
+    await conn.execute("DELETE FROM user_vehicles WHERE user_id = ?", [numericId]);
+    await conn.execute("DELETE FROM reviews WHERE user_id = ?", [numericId]);
+    await conn.execute("DELETE FROM invoices WHERE user_id = ?", [numericId]);
+
+    if (requestIds.length > 0) {
+      const requestPlaceholders = requestIds.map(() => "?").join(", ");
+
+      await conn.execute(
+        `DELETE FROM reviews WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+      await conn.execute(
+        `DELETE FROM dispatch_offers WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+      await conn.execute(
+        `DELETE FROM technician_dues WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+      await conn.execute(
+        `DELETE FROM technician_location_history WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+      await conn.execute(
+        `DELETE FROM job_monitoring_alerts WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+      await conn.execute(
+        `DELETE FROM invoices WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+
+      if (paymentIds.length > 0) {
+        const paymentPlaceholders = paymentIds.map(() => "?").join(", ");
+
+        await conn.execute(
+          `DELETE FROM payment_refunds WHERE payment_id IN (${paymentPlaceholders})`,
+          paymentIds
+        );
+        await conn.execute(
+          `DELETE FROM payout_allocations WHERE payment_id IN (${paymentPlaceholders})`,
+          paymentIds
+        );
+        await conn.execute(
+          `DELETE FROM wallet_transactions WHERE payment_id IN (${paymentPlaceholders})`,
+          paymentIds
+        );
+      }
+
+      await conn.execute(
+        `DELETE FROM payment_refunds WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+      await conn.execute(
+        `DELETE FROM payout_allocations WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+      await conn.execute(
+        `DELETE FROM wallet_transactions WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+      await conn.execute(
+        `DELETE FROM payments WHERE service_request_id IN (${requestPlaceholders})`,
+        requestIds
+      );
+      await conn.execute(
+        `DELETE FROM service_requests WHERE user_id = ?`,
+        [numericId]
+      );
+    } else if (paymentIds.length > 0) {
+      const paymentPlaceholders = paymentIds.map(() => "?").join(", ");
+      await conn.execute(
+        `DELETE FROM payment_refunds WHERE payment_id IN (${paymentPlaceholders})`,
+        paymentIds
+      );
+      await conn.execute(
+        `DELETE FROM payout_allocations WHERE payment_id IN (${paymentPlaceholders})`,
+        paymentIds
+      );
+      await conn.execute(
+        `DELETE FROM wallet_transactions WHERE payment_id IN (${paymentPlaceholders})`,
+        paymentIds
+      );
+      await conn.execute(
+        `DELETE FROM payments WHERE user_id = ?`,
+        [numericId]
+      );
+    }
+
+    const [result] = await conn.execute("DELETE FROM users WHERE id = ?", [numericId]);
+    await conn.commit();
+
+    if (Number(result?.affectedRows || 0) === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    return res.status(200).json({ success: true, message: "User deleted." });
   } catch (err) {
+    if (conn) {
+      try {
+        await conn.rollback();
+      } catch {
+        // ignore rollback failures
+      }
+    }
     console.error("[Admin delete user]", err);
-    return res.status(500).json({ error: "Failed to delete user." });
+    return res.status(500).json({
+      success: false,
+      error: "Failed to delete user.",
+      details: err?.message || String(err),
+    });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
   }
 });
 

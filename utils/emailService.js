@@ -3,6 +3,7 @@ import { Resend } from "resend";
 const DEFAULT_FROM_ADDRESS = "ResQNow <onboarding@resend.dev>";
 
 let resendClient = null;
+let resendKeyLogged = false;
 
 function isProductionLike() {
   return (
@@ -125,6 +126,10 @@ function getResendClient() {
   if (resendClient) return resendClient;
 
   const apiKey = getApiKey();
+  if (!resendKeyLogged) {
+    console.log("RESEND KEY:", process.env.RESEND_API_KEY);
+    resendKeyLogged = true;
+  }
   if (!apiKey) {
     const message = "Email is not configured. Set RESEND_API_KEY.";
     if (isProductionLike()) {
@@ -136,6 +141,15 @@ function getResendClient() {
 
   resendClient = new Resend(apiKey);
   return resendClient;
+}
+
+function normalizeRecipients(value) {
+  if (Array.isArray(value)) {
+    return value.filter(Boolean).map((entry) => String(entry).trim()).filter(Boolean);
+  }
+
+  const normalized = String(value || "").trim();
+  return normalized ? [normalized] : [];
 }
 
 function normalizeAttachments(attachments = []) {
@@ -186,7 +200,7 @@ export async function sendEmail({
 
   const payload = {
     from: from || getDefaultFromAddress(),
-    to,
+    to: normalizeRecipients(to),
     subject,
     html,
     text,
@@ -196,7 +210,7 @@ export async function sendEmail({
 
   try {
     console.log("[EmailService] Sending email:", {
-      to,
+      to: payload.to,
       subject,
       from: payload.from,
     });
