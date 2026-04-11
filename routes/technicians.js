@@ -31,6 +31,7 @@ import {
   markTechnicianLogin,
   markTechnicianLogout,
 } from "../services/technicianActivityService.js";
+import { sendEventEmail } from "../utils/eventEmail.js";
 
 const router = Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -776,15 +777,19 @@ router.post("/register", async (req, res) => {
       socketService.broadcast("admin:notification", { title, message, created_at: new Date() });
     } catch { }
 
-    // Send Confirmation Email
-    try {
-      await mail.sendMail({
-        to: normalizedEmail,
-        subject: "Application Received â€“ ResQNow",
-        html: `Hello ${trimmedName},<br><br>We have received your technician application. You will get a confirmation email once an admin reviews it.<br><br>Regards,<br>ResQNow Team`,
+    await sendEventEmail("TECHNICIAN_APPLICATION_SUBMITTED", {
+      name: trimmedName,
+      email: normalizedEmail,
+      applicantEmail: normalizedEmail,
+    });
+
+    const adminNotificationEmail = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+    if (adminNotificationEmail) {
+      await sendEventEmail("ADMIN_NEW_TECHNICIAN_APPLICATION", {
+        email: adminNotificationEmail,
+        name: trimmedName,
+        applicantEmail: normalizedEmail,
       });
-    } catch (mailErr) {
-      console.error("[Registration confirmation email failed]", mailErr?.message || mailErr);
     }
 
     const id = result[0].insertId;
@@ -1950,6 +1955,10 @@ router.post("/create", verifyAdmin, async (req, res) => {
       ]
     );
     const id = result[0].insertId;
+    await sendEventEmail("TECHNICIAN_REGISTER", {
+      name: trimmedName,
+      email: normalizedEmail,
+    });
     return res.status(201).json({ id: String(id), message: "Technician added successfully." });
   } catch (err) {
     if (err.code === "ER_DUP_ENTRY" || err.message?.includes("Duplicate")) {
@@ -2303,15 +2312,11 @@ router.patch("/:id/approve", verifyAdmin, async (req, res) => {
     const techRows = await db.query("SELECT name, email FROM technicians WHERE id = ?", [id]);
     const tech = techRows[0];
     if (tech?.email) {
-      try {
-        await mail.sendMail({
-          to: tech.email,
-          subject: "Application Approved â€“ ResQNow",
-          html: `Hello ${tech.name || "there"}, <br><br>Your technician application has been approved.<br>You can now log in to the ResQNow Technician Portal.<br><br>Regards,<br>ResQNow Team`,
-        });
-      } catch (mailErr) {
-        console.error("[Approval email failed]", mailErr?.message || mailErr);
-      }
+      await sendEventEmail("TECHNICIAN_APPLICATION_APPROVED", {
+        name: tech.name || "there",
+        email: tech.email,
+        status: "approved",
+      });
     }
     socketService.broadcast("admin:technician_audit_update", {
       technicianId: id,
@@ -2331,7 +2336,7 @@ router.patch("/:id/reject", verifyAdmin, async (req, res) => {
     const id = req.params.id;
     const reason = String(req.body?.reason || "").trim();
     const pool = await db.getPool();
-    const [existing] = await pool.query("SELECT id, status FROM technicians WHERE id = ? LIMIT 1", [id]);
+    const [existing] = await pool.query("SELECT id, name, email, status FROM technicians WHERE id = ? LIMIT 1", [id]);
     if (existing.length === 0) {
       return res.status(404).json({ error: "Technician not found." });
     }
@@ -2353,6 +2358,13 @@ router.patch("/:id/reject", verifyAdmin, async (req, res) => {
       reason: reason || "Rejected by admin",
       createdAt: new Date().toISOString()
     });
+    if (existing[0]?.email) {
+      await sendEventEmail("TECHNICIAN_APPLICATION_REJECTED", {
+        name: existing[0].name || "there",
+        email: existing[0].email,
+        status: "rejected",
+      });
+    }
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Failed to reject." });

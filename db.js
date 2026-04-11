@@ -1,4 +1,5 @@
 import mysql from "mysql2/promise";
+import { EMAIL_TEMPLATE_DEFAULTS } from "./utils/emailTemplateDefaults.js";
 
 let pool = null;
 const DDL_MAX_RETRIES = 3;
@@ -515,6 +516,37 @@ CREATE TABLE IF NOT EXISTS notifications (
 export async function ensureNotificationsTable() {
   const p = await getPool();
   await p.execute(NOTIFICATIONS_TABLE_SQL);
+}
+
+const EMAIL_TEMPLATES_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS email_templates (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  event_type VARCHAR(100) NOT NULL UNIQUE,
+  subject VARCHAR(255) NOT NULL,
+  content MEDIUMTEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+)
+`.trim();
+
+async function seedDefaultEmailTemplates(poolLike) {
+  for (const template of EMAIL_TEMPLATE_DEFAULTS) {
+    await poolLike.execute(
+      `INSERT INTO email_templates (event_type, subject, content)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE event_type = event_type`,
+      [template.eventType, template.subject, template.content]
+    );
+  }
+}
+
+export async function ensureEmailTemplatesTable() {
+  const p = await getPool();
+  await p.execute(EMAIL_TEMPLATES_TABLE_SQL);
+  await addColumnIfNotExists(p, "email_templates", "subject VARCHAR(255) NOT NULL DEFAULT ''");
+  await addColumnIfNotExists(p, "email_templates", "content MEDIUMTEXT NOT NULL");
+  await addIndexIfNotExists(p, "email_templates", "idx_email_templates_event_type", "event_type");
+  await seedDefaultEmailTemplates(p);
 }
 
 const REVIEWS_TABLE_SQL = `

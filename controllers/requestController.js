@@ -2,6 +2,7 @@ import { getPool } from "../db.js";
 import { buildPagination, likeFilter, resolveAdminId, toPositiveInt } from "./utils.js";
 import { socketService } from "../services/socket.js";
 import { closeRequestWithFinanceSync } from "../services/requestClosureService.js";
+import { sendEventEmail } from "../utils/eventEmail.js";
 
 const ACTIVE_REQUEST_STATES = [
   "assigned",
@@ -248,6 +249,28 @@ export async function assignRequest(req, res) {
        WHERE id = ?`,
       [technicianId, requestId]
     );
+
+    const adminNotificationEmail = String(req.adminEmail || process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+    if (adminNotificationEmail) {
+      const [detailRows] = await pool.query(
+        `SELECT
+           COALESCE(sr.contact_name, u.full_name, CONCAT('User #', sr.user_id)) AS user_name,
+           COALESCE(t.name, CONCAT('Technician #', sr.technician_id)) AS technician_name
+         FROM service_requests sr
+         LEFT JOIN users u ON u.id = sr.user_id
+         LEFT JOIN technicians t ON t.id = sr.technician_id
+         WHERE sr.id = ?
+         LIMIT 1`,
+        [requestId]
+      );
+      const detail = detailRows?.[0] || {};
+      void sendEventEmail("ADMIN_TECHNICIAN_ASSIGNED", {
+        email: adminNotificationEmail,
+        requestId,
+        name: detail.user_name || "Customer",
+        technicianName: detail.technician_name || technicianRows[0]?.name || `Technician #${technicianId}`,
+      });
+    }
 
     await logAction({
       pool,

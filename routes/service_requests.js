@@ -28,6 +28,7 @@ import {
     markTechnicianReserved,
     releaseTechnicianAvailability
 } from "../services/technicianStateService.js";
+import { sendEventEmail } from "../utils/eventEmail.js";
 
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
 const RAZORPAY_KEY_SECRET = String(process.env.RAZORPAY_KEY_SECRET || "");
@@ -309,7 +310,7 @@ router.post("/", verifyUser, async (req, res) => {
             }
 
             const [techRows] = await pool.query(
-                "SELECT id, status, is_active, is_available, current_job_id, latitude, longitude, service_area_range, service_type, specialties, pricing, service_costs, vehicle_types FROM technicians WHERE id = ? LIMIT 1",
+                "SELECT id, name, email, status, is_active, is_available, current_job_id, latitude, longitude, service_area_range, service_type, specialties, pricing, service_costs, vehicle_types FROM technicians WHERE id = ? LIMIT 1",
                 [directTechnicianId]
             );
             const tech = techRows?.[0];
@@ -395,9 +396,39 @@ router.post("/", verifyUser, async (req, res) => {
         const newRequestId = result.insertId;
         console.log(`[Create Job] Created Request #${newRequestId}`);
 
+        const [userRows] = await pool.query(
+            "SELECT full_name, email FROM users WHERE id = ? LIMIT 1",
+            [userId]
+        );
+        const requestUser = userRows?.[0] || {};
+        const requestUserName = String(
+            req.body.contact_name ||
+            requestUser.full_name ||
+            `User #${userId}`
+        ).trim();
+        const adminNotificationEmail = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+
+        if (adminNotificationEmail) {
+            void sendEventEmail("ADMIN_NEW_USER_REQUEST", {
+                email: adminNotificationEmail,
+                requestId: String(newRequestId),
+                serviceType: canonicalServiceType,
+                name: requestUserName,
+                userEmail: String(req.body.contact_email || requestUser.email || "").trim(),
+            });
+        }
+
         if (hasDirectTechnician && directTechnicianId) {
             await markTechnicianReserved(pool, directTechnicianId, newRequestId);
             console.log(`[Create Job] Reserved technician ${directTechnicianId} for direct request #${newRequestId}.`);
+            if (adminNotificationEmail) {
+                void sendEventEmail("ADMIN_TECHNICIAN_ASSIGNED", {
+                    email: adminNotificationEmail,
+                    requestId: String(newRequestId),
+                    name: requestUserName,
+                    technicianName: selectedTechnician?.name || `Technician #${directTechnicianId}`,
+                });
+            }
         }
 
         // 3. Trigger Direct Notify or queue-driven dispatch (async)
@@ -548,6 +579,28 @@ router.post("/:id/accept", verifyTechnician, async (req, res) => {
                     technician_id: technicianId,
                     status: "accepted",
                 };
+
+        if (!result?.idempotent) {
+            const adminNotificationEmail = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+            if (adminNotificationEmail) {
+                let assignedUserName = String(result?.job?.contact_name || "").trim();
+                if (!assignedUserName && result?.job?.user_id) {
+                    const pool = await getPool();
+                    const [userRows] = await pool.query(
+                        "SELECT full_name FROM users WHERE id = ? LIMIT 1",
+                        [result.job.user_id]
+                    );
+                    assignedUserName = String(userRows?.[0]?.full_name || "Customer").trim();
+                }
+
+                void sendEventEmail("ADMIN_TECHNICIAN_ASSIGNED", {
+                    email: adminNotificationEmail,
+                    requestId: String(responseJob.id || requestId),
+                    name: assignedUserName || "Customer",
+                    technicianName: result?.technician?.name || `Technician #${technicianId}`,
+                });
+            }
+        }
 
         res.json({
             success: true,

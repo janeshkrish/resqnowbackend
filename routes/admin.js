@@ -57,6 +57,10 @@ import {
   adminExtendedTechnicianBroadcast,
 } from "../services/adminExtendedNotifier.js";
 import {
+  getTemplates as getEmailTemplates,
+  updateTemplate as updateEmailTemplate,
+} from "../controllers/emailTemplateController.js";
+import {
   ADMIN_NOTIFICATION_TYPES,
   ADMIN_NOTIFICATION_TYPE_FILTER_VALUES,
   normalizeAdminNotificationType,
@@ -122,6 +126,8 @@ router.post("/finance/refund/:transactionId", refundTransaction);
 router.get("/finance/refunds/:transactionId", getRefundHistory);
 
 router.get("/analytics", getAnalytics);
+router.get("/email-templates", getEmailTemplates);
+router.put("/email-templates/:eventType", updateEmailTemplate);
 
 router.post("/complaints", createComplaint);
 router.get("/complaints", getComplaints);

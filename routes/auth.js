@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import * as db from "../db.js";
 import { verifyUser } from "../middleware/auth.js";
 import { getFrontendUrl, getGoogleCallbackUrl } from "../config/network.js";
+import { sendEventEmail } from "../utils/eventEmail.js";
 
 const router = express.Router();
 
@@ -132,6 +133,10 @@ router.get("/google/callback", async (req, res) => {
             );
             userId = result.insertId;
             userRow = { id: userId, full_name: name, email, role: "user" };
+            void sendEventEmail("USER_REGISTER", {
+                name,
+                email,
+            });
         }
 
         // Generate JWT

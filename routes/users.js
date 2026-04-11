@@ -6,6 +6,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { getAdminCredentials, signAdminToken, verifyUser } from "../middleware/auth.js";
+import { sendEventEmail } from "../utils/eventEmail.js";
 
 const router = Router();
 
@@ -307,6 +308,11 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
       return res.status(500).json({
         success: false,
         error: "Unable to send OTP email right now. Please try again shortly.",
+        details:
+          String(mailerCheck?.error?.message || "").trim() ||
+          (mailerCheck.reason === "not_configured"
+            ? "RESEND_API_KEY is missing or the backend was not restarted after the .env change."
+            : String(mailerCheck.reason || "mailer_unavailable")),
       });
     }
 
@@ -347,6 +353,7 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
       return res.status(500).json({
         success: false,
         error: "Unable to deliver OTP email at the moment. Please try again.",
+        details: emailError.message,
       });
     }
 
@@ -461,6 +468,11 @@ router.post("/verify-otp", async (req, res) => {
     // Cleanup OTPs
     await pool.execute("DELETE FROM otp_requests WHERE email = ?", [normalizedEmail]);
 
+    void sendEventEmail("USER_REGISTER", {
+      name,
+      email: normalizedEmail,
+    });
+
     console.log(`[AUTH OTP-VERIFY] ✅ Success - User created for ${normalizedEmail} from ${clientIp}`);
 
     res.status(201).json({
@@ -475,7 +487,10 @@ router.post("/verify-otp", async (req, res) => {
 
   } catch (err) {
     console.error("[Verify OTP Error]", err);
-    res.status(500).json({ error: "Verification failed." });
+    res.status(500).json({
+      error: "Verification failed.",
+      details: err?.message || String(err),
+    });
   }
 });
 
