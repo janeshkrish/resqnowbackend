@@ -169,10 +169,16 @@ function createApp() {
   const otpLimiter = rateLimit({
     windowMs: 5 * 60 * 1000,
     max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      success: false,
+      message: "Too many OTP requests. Try again later",
+    },
     handler: (req, res) => {
       return res.status(429).json({
         success: false,
-        message: "Too many OTP requests. Try again later."
+        message: "Too many OTP requests. Try again later"
       });
     },
   });
@@ -318,7 +324,7 @@ async function startServer() {
     httpServer.listen(PORT, HOST, resolve);
   });
 
-  console.log(`Server running on ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
   console.log("\n========================================");
   console.log("SERVER STARTED");
   console.log(`Bind: ${HOST}:${PORT}`);
