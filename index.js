@@ -1,6 +1,7 @@
 import "./loadEnv.js";
 import express from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import { createServer } from "http";
 import path from "path";
 
@@ -153,7 +154,7 @@ async function bootstrapDatabase() {
 
 function createApp() {
   const app = express();
-  app.set("trust proxy", true);
+  app.set("trust proxy", 1);
 
   const corsOptions = buildCorsOptions();
   app.use(cors(corsOptions));
@@ -164,6 +165,21 @@ function createApp() {
 
   app.use(express.json({ limit: "2mb" }));
   app.use(express.urlencoded({ extended: true }));
+
+  const otpLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000,
+    max: 5,
+    handler: (req, res) => {
+      return res.status(429).json({
+        success: false,
+        message: "Too many OTP requests. Try again later."
+      });
+    },
+  });
+
+  app.use("/api/users/send-otp", otpLimiter);
+  app.use("/api/users/send-otp-debug", otpLimiter);
+
   app.use((err, _req, res, next) => {
     if (err && err.type === "entity.parse.failed") {
       return res.status(400).json({ error: "Invalid JSON payload." });

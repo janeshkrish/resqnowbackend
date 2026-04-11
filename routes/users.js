@@ -140,6 +140,7 @@ const OTP_COOLDOWN_SECONDS = 60;
 const OTP_HOUR_WINDOW_SECONDS = 60 * 60;
 const OTP_DEBUG_ROUTE_ENABLED = String(process.env.OTP_DEBUG_ROUTE_ENABLED || "").toLowerCase() === "true";
 const OTP_DEBUG_TOKEN = String(process.env.OTP_DEBUG_TOKEN || "").trim();
+const otpRequestMap = new Map();
 
 function toEpochMs(value) {
   if (!value) return null;
@@ -278,6 +279,24 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
       return res.status(400).json({ error: "Invalid email format." });
     }
 
+    const nowMs = Date.now();
+    const lastMailRequestMs = otpRequestMap.get(normalizedEmail);
+    if (lastMailRequestMs && nowMs - lastMailRequestMs < OTP_COOLDOWN_SECONDS * 1000) {
+      const retryAfterSeconds = Math.ceil((OTP_COOLDOWN_SECONDS * 1000 - (nowMs - lastMailRequestMs)) / 1000);
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      return res.status(429).json({
+        success: false,
+        error: `Please wait ${retryAfterSeconds} seconds before requesting another OTP.`,
+      });
+    }
+
+    otpRequestMap.set(normalizedEmail, nowMs);
+    setTimeout(() => {
+      if (otpRequestMap.get(normalizedEmail) === nowMs) {
+        otpRequestMap.delete(normalizedEmail);
+      }
+    }, OTP_COOLDOWN_SECONDS * 1000);
+
     const existingUser = await db.query("SELECT id FROM users WHERE email = ? LIMIT 1", [normalizedEmail]);
     if (existingUser.length > 0) {
       return res.status(409).json({ error: "This email is already registered. Please log in." });
@@ -330,9 +349,11 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
 
     try {
       await mail.sendMail({
+        from: process.env.EMAIL_FROM || undefined,
         to: normalizedEmail,
         subject: "Your OTP for ResQNow",
         html: `Hello ${trimmedName},<br><br>Your OTP for verification is: <b>${otp}</b><br><br>It expires in ${OTP_TTL_MINUTES} minutes.<br><br>Regards,<br>ResQNow Team`,
+        text: `Hello ${trimmedName},\n\nYour OTP for verification is: ${otp}\n\nIt expires in ${OTP_TTL_MINUTES} minutes.\n\nRegards,\nResQNow Team`,
       });
     } catch (sendError) {
       const emailError = mail.getEmailErrorDetails(sendError);
