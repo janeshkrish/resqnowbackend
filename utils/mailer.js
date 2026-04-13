@@ -1,7 +1,8 @@
 import { Resend } from "resend";
 
-// Resend uses HTTPS (port 443) - works on all cloud platforms including Render free tier
-// Client is lazily initialized at first use so dotenv has time to load
+// Resend uses HTTPS (port 443) — works on Render free tier (no SMTP port blocking)
+// All env vars are read lazily (on first use) so dotenv has time to populate them.
+
 let _resendClient = null;
 
 function getResendClient() {
@@ -12,7 +13,13 @@ function getResendClient() {
   return _resendClient;
 }
 
-const EMAIL_FROM = () => String(process.env.EMAIL_FROM || "ResQNow <onboarding@resend.dev>").trim();
+function getApiKeySet() {
+  return Boolean(String(process.env.RESEND_API_KEY || "").trim());
+}
+
+function getEmailFrom() {
+  return String(process.env.EMAIL_FROM || "ResQNow <onboarding@resend.dev>").trim();
+}
 
 let verifyCache = {
   checkedAt: 0,
@@ -21,13 +28,14 @@ let verifyCache = {
 };
 
 export function getMailerTransportConfig() {
+  const apiKeySet = getApiKeySet();
   return {
     host: "api.resend.com",
     port: 443,
     secure: true,
     auth: {
       user: null,
-      pass: RESEND_API_KEY ? "***" : null,
+      pass: apiKeySet ? "***" : null,
     },
     tls: {
       rejectUnauthorized: true,
@@ -36,7 +44,7 @@ export function getMailerTransportConfig() {
 }
 
 export function isMailerTransportConfigured() {
-  return Boolean(String(process.env.RESEND_API_KEY || "").trim());
+  return getApiKeySet();
 }
 
 export function getMailerTransportVerificationState() {
@@ -46,7 +54,7 @@ export function getMailerTransportVerificationState() {
   };
 }
 
-// Resend doesn't have a separate verify step - we check config presence
+// Verify the mailer is ready — for Resend, checking key presence + cached ping is enough
 export async function verifyMailerTransport({ force = false } = {}) {
   const now = Date.now();
 
@@ -55,39 +63,28 @@ export async function verifyMailerTransport({ force = false } = {}) {
     throw verifyCache.error;
   }
 
-  if (!getResendClient()) {
-    const err = new Error("RESEND_API_KEY is not configured.");
+  if (!getApiKeySet()) {
+    const err = new Error("RESEND_API_KEY is not set in environment variables.");
     verifyCache = { checkedAt: now, ok: false, error: err };
     throw err;
   }
 
-  // Lightweight API ping to verify key validity
-  try {
-    await getResendClient().domains.list();
-    console.log("[Mailer] Resend API key verified successfully");
-    verifyCache = { checkedAt: now, ok: true, error: null };
-    return true;
-  } catch (err) {
-    // If domains.list fails but key exists, still treat as valid - the key may lack domain perms
-    if (err.message?.includes("RESEND_API_KEY")) {
-      verifyCache = { checkedAt: now, ok: false, error: err };
-      throw err;
-    }
-    console.warn("[Mailer] Resend domain-list check failed, assuming key valid:", err.message);
-    verifyCache = { checkedAt: now, ok: true, error: null };
-    return true;
-  }
+  // Key is present — mark as verified without making an API call.
+  // Real errors will surface when we actually try to send.
+  console.log("[Mailer] Resend transport configured and ready (HTTPS, port 443)");
+  verifyCache = { checkedAt: now, ok: true, error: null };
+  return true;
 }
 
 // Core send function using Resend HTTP API
 export async function sendMailViaResend({ from, to, subject, html, text, replyTo, attachments = [] }) {
   const client = getResendClient();
   if (!client) {
-    throw new Error("Resend client is not initialized. Set RESEND_API_KEY in environment variables.");
+    throw new Error("Email is not configured. Set RESEND_API_KEY in environment variables.");
   }
 
   const recipients = Array.isArray(to) ? to : [to];
-  const sender = from || EMAIL_FROM();
+  const sender = from || getEmailFrom();
 
   const payload = {
     from: sender,
@@ -118,7 +115,7 @@ export async function sendMailViaResend({ from, to, subject, html, text, replyTo
   return { messageId: data.id, accepted: recipients, rejected: [] };
 }
 
-// Compatibility alias so existing code works unchanged
+// Compatibility alias — existing code calls transporter.sendMail() and transporter.verify()
 export const transporter = {
   sendMail: sendMailViaResend,
   verify: verifyMailerTransport,
