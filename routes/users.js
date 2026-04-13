@@ -327,7 +327,7 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
       return res.status(500).json({
         success: false,
         error: "Unable to send OTP email right now. Please try again shortly.",
-        message: "EMAIL_SEND_FAILED",
+        message: "Failed to send OTP",
         details:
           String(mailerCheck?.error?.message || "").trim() ||
           (mailerCheck.reason === "not_configured"
@@ -375,7 +375,7 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
       return res.status(500).json({
         success: false,
         error: "Unable to deliver OTP email at the moment. Please try again.",
-        message: "EMAIL_SEND_FAILED",
+        message: "Failed to send OTP",
         details: emailError.message,
       });
     }
@@ -411,7 +411,7 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
     const responsePayload = {
       success: false,
       error: "Internal server error while processing OTP request.",
-      message: "EMAIL_SEND_FAILED",
+      message: "Failed to send OTP",
       details: error?.message || String(error),
     };
     if (debug) {
