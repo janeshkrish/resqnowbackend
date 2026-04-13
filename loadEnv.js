@@ -18,7 +18,5 @@ for (const envPath of candidateEnvPaths) {
   break;
 }
 
-console.log("[ENV] SMTP host:", process.env.SMTP_HOST || "missing");
-console.log("[ENV] SMTP port:", process.env.SMTP_PORT || "missing");
-console.log("[ENV] Email user set:", Boolean(String(process.env.EMAIL_USER || "").trim()));
+console.log("[ENV] RESEND_API_KEY set:", Boolean(String(process.env.RESEND_API_KEY || "").trim()));
 console.log("[ENV] Email from:", process.env.EMAIL_FROM || "not set");

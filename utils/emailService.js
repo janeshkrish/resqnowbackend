@@ -185,7 +185,7 @@ export async function sendEmail({
   try {
     if (!transporter) {
       throw new Error(
-        "Email is not configured. Set SMTP_HOST, SMTP_PORT, EMAIL_USER, and EMAIL_PASS."
+        "Email is not configured. Set RESEND_API_KEY in environment variables."
       );
     }
 
@@ -214,7 +214,7 @@ export async function sendEmail({
     }
 
     if (replyTo) {
-      payload.replyTo = replyTo;
+      payload.reply_to = replyTo;
     }
 
     const normalizedAttachments = normalizeAttachments(attachments);
@@ -235,7 +235,7 @@ export async function sendEmail({
       throw rejectionError;
     }
 
-    console.log("[Email] SMTP send succeeded:", {
+    console.log("[Email] Resend send succeeded:", {
       to: recipients.map((recipient) => maskEmail(recipient)),
       messageId: response?.messageId || null,
       acceptedCount: Array.isArray(response?.accepted) ? response.accepted.length : 0,
