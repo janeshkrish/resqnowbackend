@@ -4,6 +4,7 @@ import {
   getEmailServiceConfigSnapshot,
   maskEmail,
   sendEmail,
+  verifyEmailTransport,
 } from "./emailService.js";
 
 // Simple duplicate-prevention cache to avoid sending the exact same email multiple times in a short window.
@@ -50,12 +51,23 @@ export async function verifyMailerConnectionDetailed(context = {}) {
     };
   }
 
-  return {
-    ok: true,
-    reason: "configured",
-    requestId,
-    snapshot,
-  };
+  try {
+    await verifyEmailTransport();
+    return {
+      ok: true,
+      reason: "verified",
+      requestId,
+      snapshot: getMailerConfigSnapshot(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "verify_failed",
+      requestId,
+      snapshot: getMailerConfigSnapshot(),
+      error: buildEmailErrorDetails(error),
+    };
+  }
 }
 
 export async function sendMail({

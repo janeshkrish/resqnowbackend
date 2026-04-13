@@ -24,7 +24,8 @@ function getContactReceiverEmail() {
     return (
         String(process.env.CONTACT_RECEIVER_EMAIL || "").trim() ||
         String(process.env.ADMIN_EMAIL || "").trim() ||
-        extractEmailAddress(process.env.EMAIL_FROM)
+        extractEmailAddress(process.env.EMAIL_FROM) ||
+        String(process.env.EMAIL_USER || "").trim()
     );
 }
 

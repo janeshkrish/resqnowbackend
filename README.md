@@ -48,7 +48,11 @@ npm install
 - `JWT_SECRET`
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
-- `RESEND_API_KEY`
+- `EMAIL_USER`
+- `EMAIL_PASS`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_TLS_REJECT_UNAUTHORIZED`
 - `RAZORPAY_KEY_ID`
 - `RAZORPAY_KEY_SECRET`
 - `GOOGLE_CLIENT_ID`
@@ -59,11 +63,15 @@ npm install
 
 > Example email block for `.env`:
 > ```
-> RESEND_API_KEY=re_xxxxxxxxx
-> EMAIL_FROM=ResQNow <onboarding@resend.dev>
+> SMTP_HOST=smtp.your-provider.com
+> SMTP_PORT=587
+> SMTP_TLS_REJECT_UNAUTHORIZED=true
+> EMAIL_USER=no-reply@yourdomain.com
+> EMAIL_PASS=replace-with-smtp-password
+> EMAIL_FROM=ResQNow <no-reply@yourdomain.com>
 > CONTACT_RECEIVER_EMAIL=support@example.com
 > ```
-> Use a verified sender in `EMAIL_FROM` for production domains. `CONTACT_RECEIVER_EMAIL` is recommended for the public contact form.
+> `EMAIL_FROM` is optional; when omitted, the backend sends mail as `ResQNow <EMAIL_USER>`. `CONTACT_RECEIVER_EMAIL` is recommended for the public contact form.
 
 ### Production (Render + Vercel)
 

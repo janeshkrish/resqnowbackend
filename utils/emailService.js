@@ -1,11 +1,12 @@
-import { Resend } from "resend";
+import {
+  getMailerTransportConfig,
+  getMailerTransportVerificationState,
+  isMailerTransportConfigured,
+  transporter,
+  verifyMailerTransport,
+} from "./mailer.js";
 
-const DEFAULT_FROM_ADDRESS = "ResQNow <onboarding@resend.dev>";
-const RESEND_API_KEY = String(process.env.RESEND_API_KEY || "").trim();
-
-console.log("Resend initialized with key:", process.env.RESEND_API_KEY);
-
-const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
+const DEFAULT_FROM_NAME = "ResQNow";
 
 function isProductionLike() {
   return (
@@ -13,13 +14,6 @@ function isProductionLike() {
     String(process.env.RENDER || "").toLowerCase() === "true" ||
     Boolean(process.env.RENDER_EXTERNAL_URL)
   );
-}
-
-function maskApiKey(value) {
-  const key = String(value || "").trim();
-  if (!key) return "";
-  if (key.length <= 8) return `${key[0] || "*"}***`;
-  return `${key.slice(0, 4)}***${key.slice(-4)}`;
 }
 
 export function maskEmail(value) {
@@ -42,10 +36,12 @@ export function extractEmailAddress(value) {
 
 function shouldUseFallbackFromAddress(value) {
   const email = extractEmailAddress(value);
+  const smtpUser = String(process.env.EMAIL_USER || "").trim().toLowerCase();
   if (!email) return true;
 
   const normalized = email.toLowerCase();
   return (
+    (smtpUser && normalized !== smtpUser) ||
     normalized.endsWith("@example.com") ||
     normalized.endsWith("@example.org") ||
     normalized.endsWith("@example.net")
@@ -54,36 +50,39 @@ function shouldUseFallbackFromAddress(value) {
 
 export function getDefaultFromAddress() {
   const configuredFrom = String(process.env.EMAIL_FROM || "").trim();
+  const smtpUser = String(process.env.EMAIL_USER || "").trim();
 
-  if (!configuredFrom) {
-    return DEFAULT_FROM_ADDRESS;
+  if (configuredFrom && !shouldUseFallbackFromAddress(configuredFrom)) {
+    return configuredFrom;
   }
 
-  if (shouldUseFallbackFromAddress(configuredFrom)) {
-    return DEFAULT_FROM_ADDRESS;
+  if (!smtpUser) {
+    return "";
   }
 
-  return configuredFrom;
+  return `"${DEFAULT_FROM_NAME}" <${smtpUser}>`;
 }
 
 export function getEmailServiceConfigSnapshot() {
+  const transportConfig = getMailerTransportConfig();
+  const verificationState = getMailerTransportVerificationState();
+
   return {
-    configured: !!RESEND_API_KEY,
-    provider: "resend",
-    transportVerified: !!RESEND_API_KEY,
+    configured: isMailerTransportConfigured(),
+    provider: "smtp",
+    transportVerified: verificationState.ok,
     productionLike: isProductionLike(),
-    host: null,
-    port: null,
-    secure: null,
+    host: transportConfig.host,
+    port: transportConfig.port,
+    secure: transportConfig.secure,
     requireTLS: null,
-    tlsRejectUnauthorized: null,
+    tlsRejectUnauthorized: transportConfig.tls.rejectUnauthorized,
     smtpDebugEnabled: false,
-    emailUserSet: false,
-    emailPassSet: false,
-    emailUserMasked: "",
+    emailUserSet: Boolean(transportConfig.auth.user),
+    emailPassSet: Boolean(transportConfig.auth.pass),
+    emailUserMasked: maskEmail(transportConfig.auth.user),
     emailFrom: getDefaultFromAddress(),
-    resendApiKeySet: !!RESEND_API_KEY,
-    resendApiKeyMasked: maskApiKey(RESEND_API_KEY),
+    lastVerifiedAt: verificationState.checkedAt,
   };
 }
 
@@ -126,7 +125,7 @@ function normalizeAttachments(attachments = []) {
       }
 
       if (attachment.contentId || attachment.cid) {
-        normalized.contentId = attachment.contentId || attachment.cid;
+        normalized.cid = attachment.contentId || attachment.cid;
       }
 
       return normalized;
@@ -159,11 +158,19 @@ export function getEmailErrorDetails(error) {
     message: err.message || String(err),
     code: err.code || null,
     statusCode: err.statusCode || err.status || null,
+    responseCode: err.responseCode || null,
     type: err.type || null,
+    command: err.command || null,
     response: err.response || err.body || null,
+    accepted: err.accepted || null,
+    rejected: err.rejected || null,
     cause: err.cause || null,
     stack: err.stack || null,
   };
+}
+
+export async function verifyEmailTransport(options = {}) {
+  return verifyMailerTransport(options);
 }
 
 export async function sendEmail({
@@ -176,25 +183,31 @@ export async function sendEmail({
   replyTo,
 }) {
   try {
-    if (!resend) {
-      const configError = new Error("Email is not configured. Set RESEND_API_KEY.");
-      console.error("EMAIL ERROR FULL:", getEmailErrorDetails(configError));
-      if (isProductionLike()) {
-        throw configError;
-      }
-      return null;
+    if (!transporter) {
+      throw new Error(
+        "Email is not configured. Set SMTP_HOST, SMTP_PORT, EMAIL_USER, and EMAIL_PASS."
+      );
     }
 
     const recipients = normalizeRecipients(to);
+    if (recipients.length === 0) {
+      throw new Error("Email recipient is required.");
+    }
 
-    console.log("Sending email to:", recipients);
+    const sender = from || getDefaultFromAddress();
+    if (!sender) {
+      throw new Error("Email sender is not configured. Set EMAIL_USER or EMAIL_FROM.");
+    }
 
     const payload = {
-      from: from || getDefaultFromAddress() || DEFAULT_FROM_ADDRESS,
+      from: sender,
       to: recipients,
       subject,
-      html,
     };
+
+    if (html != null) {
+      payload.html = html;
+    }
 
     if (text != null) {
       payload.text = text;
@@ -209,17 +222,26 @@ export async function sendEmail({
       payload.attachments = normalizedAttachments;
     }
 
-    const response = await resend.emails.send(payload);
+    const response = await transporter.sendMail(payload);
 
-    console.log("Resend response:", response);
-
-    if (!response || response.error) {
-      console.error("Resend error:", response?.error || null);
-      throw new Error(response?.error?.message || "Email failed");
+    if (
+      Array.isArray(response?.rejected) &&
+      response.rejected.length > 0 &&
+      (!Array.isArray(response.accepted) || response.accepted.length === 0)
+    ) {
+      const rejectionError = new Error("SMTP server rejected all recipients.");
+      rejectionError.rejected = response.rejected;
+      rejectionError.response = response.response || null;
+      throw rejectionError;
     }
 
-    console.log("Email sent:", response.data || response);
-    return response.data || response;
+    console.log("[Email] SMTP send succeeded:", {
+      to: recipients.map((recipient) => maskEmail(recipient)),
+      messageId: response?.messageId || null,
+      acceptedCount: Array.isArray(response?.accepted) ? response.accepted.length : 0,
+      rejectedCount: Array.isArray(response?.rejected) ? response.rejected.length : 0,
+    });
+    return response;
   } catch (err) {
     console.error("EMAIL ERROR FULL:", getEmailErrorDetails(err));
     throw normalizeError(err);

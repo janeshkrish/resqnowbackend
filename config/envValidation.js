@@ -11,7 +11,11 @@ const REQUIRED_ENV_KEYS = [
   "ADMIN_PASSWORD",
   "RAZORPAY_KEY_ID",
   "RAZORPAY_KEY_SECRET",
-  "RESEND_API_KEY",
+  "EMAIL_USER",
+  "EMAIL_PASS",
+  "SMTP_HOST",
+  "SMTP_PORT",
+  "SMTP_TLS_REJECT_UNAUTHORIZED",
   "GOOGLE_CLIENT_ID",
   "GOOGLE_CLIENT_SECRET",
   "GOOGLE_CALLBACK_URL",
@@ -23,7 +27,7 @@ const SECRET_KEYS = new Set([
   "JWT_SECRET",
   "ADMIN_PASSWORD",
   "RAZORPAY_KEY_SECRET",
-  "RESEND_API_KEY",
+  "EMAIL_PASS",
   "GOOGLE_CLIENT_SECRET",
 ]);
 
@@ -79,6 +83,22 @@ export function validateEnvironmentOrThrow() {
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
   }
+
+  const smtpPort = Number.parseInt(String(process.env.SMTP_PORT || "").trim(), 10);
+  if (!Number.isInteger(smtpPort) || smtpPort <= 0) {
+    throw new Error(`Invalid SMTP_PORT: ${process.env.SMTP_PORT}`);
+  }
+
+  const tlsRejectUnauthorized = String(process.env.SMTP_TLS_REJECT_UNAUTHORIZED || "").trim().toLowerCase();
+  if (!["true", "false"].includes(tlsRejectUnauthorized)) {
+    throw new Error("SMTP_TLS_REJECT_UNAUTHORIZED must be either 'true' or 'false'.");
+  }
+
+  const emailUser = String(process.env.EMAIL_USER || "").trim();
+  if (!emailUser.includes("@")) {
+    throw new Error(`Invalid EMAIL_USER: ${emailUser}`);
+  }
+
   const redisUrl = String(process.env.REDIS_URL || "").trim();
   if (isProductionLike() && !redisUrl) {
     throw new Error("Missing required REDIS_URL for queue-based dispatch in production.");

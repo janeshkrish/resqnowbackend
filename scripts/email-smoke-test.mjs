@@ -1,3 +1,4 @@
+import "../loadEnv.js";
 import { getEmailServiceConfigSnapshot, sendEmail } from "../services/emailService.js";
 
 const snapshot = getEmailServiceConfigSnapshot();
@@ -9,7 +10,7 @@ const recipient = String(
 ).trim();
 
 if (!snapshot.configured) {
-  console.error("[EMAIL-SMOKE] Missing RESEND_API_KEY.");
+  console.error("[EMAIL-SMOKE] Missing SMTP email configuration.");
   process.exit(1);
 }
 
@@ -31,7 +32,7 @@ try {
   console.log("[EMAIL-SMOKE] SENT", {
     to: recipient,
     from: snapshot.emailFrom,
-    emailId: result?.id || null,
+    messageId: result?.messageId || null,
   });
 } catch (error) {
   console.error("[EMAIL-SMOKE] FAILED", {

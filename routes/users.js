@@ -331,7 +331,7 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
         details:
           String(mailerCheck?.error?.message || "").trim() ||
           (mailerCheck.reason === "not_configured"
-            ? "RESEND_API_KEY is missing or the backend was not restarted after the .env change."
+            ? "SMTP email settings are missing or the backend was not restarted after the .env change."
             : String(mailerCheck.reason || "mailer_unavailable")),
       });
     }
@@ -349,7 +349,6 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
 
     try {
       await mail.sendMail({
-        from: process.env.EMAIL_FROM || undefined,
         to: normalizedEmail,
         subject: "Your OTP for ResQNow",
         html: `Hello ${trimmedName},<br><br>Your OTP for verification is: <b>${otp}</b><br><br>It expires in ${OTP_TTL_MINUTES} minutes.<br><br>Regards,<br>ResQNow Team`,
