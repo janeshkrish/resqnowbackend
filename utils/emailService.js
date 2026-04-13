@@ -36,12 +36,10 @@ export function extractEmailAddress(value) {
 
 function shouldUseFallbackFromAddress(value) {
   const email = extractEmailAddress(value);
-  const smtpUser = String(process.env.EMAIL_USER || "").trim().toLowerCase();
   if (!email) return true;
 
   const normalized = email.toLowerCase();
   return (
-    (smtpUser && normalized !== smtpUser) ||
     normalized.endsWith("@example.com") ||
     normalized.endsWith("@example.org") ||
     normalized.endsWith("@example.net")
