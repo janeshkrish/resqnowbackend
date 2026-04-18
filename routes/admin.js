@@ -163,8 +163,93 @@ function normalizeTechnicianIds(value) {
     new Set(
       value
         .map((id) => Number(String(id || "").replace(/#/g, "").trim()))
-        .filter((id) => Number.isInteger(id) && id > 0)
+      .filter((id) => Number.isInteger(id) && id > 0)
     )
+  );
+}
+
+function normalizePositiveInteger(value) {
+  const numericValue = Number(String(value ?? "").trim());
+  return Number.isInteger(numericValue) && numericValue > 0 ? numericValue : null;
+}
+
+function toPositiveIntegerList(rows, key = "id") {
+  if (!Array.isArray(rows)) return [];
+  return Array.from(
+    new Set(
+      rows
+        .map((row) => Number(row?.[key]))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    )
+  );
+}
+
+function createTableInspector(connection) {
+  const knownTables = new Map();
+
+  return async function hasTable(tableName) {
+    const normalizedTableName = String(tableName || "").trim();
+    if (!normalizedTableName) return false;
+    if (knownTables.has(normalizedTableName)) {
+      return knownTables.get(normalizedTableName);
+    }
+
+    const [rows] = await connection.query(
+      `SELECT 1
+         FROM information_schema.tables
+        WHERE table_schema = DATABASE()
+          AND table_name = ?
+        LIMIT 1`,
+      [normalizedTableName]
+    );
+    const exists = Array.isArray(rows) && rows.length > 0;
+    knownTables.set(normalizedTableName, exists);
+    if (!exists) {
+      console.warn(`[Admin delete] Skipping missing table: ${normalizedTableName}`);
+    }
+    return exists;
+  };
+}
+
+async function queryRowsIfTableExists(connection, hasTable, tableName, sql, params = []) {
+  if (!(await hasTable(tableName))) {
+    return [];
+  }
+
+  const [rows] = await connection.query(sql, params);
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function executeIfTableExists(connection, hasTable, tableName, sql, params = []) {
+  if (!(await hasTable(tableName))) {
+    return null;
+  }
+
+  const [result] = await connection.execute(sql, params);
+  return result;
+}
+
+async function deleteByIdsIfTableExists(connection, hasTable, tableName, columnName, ids = []) {
+  if (!Array.isArray(ids) || ids.length === 0) return null;
+  const placeholders = ids.map(() => "?").join(", ");
+  return executeIfTableExists(
+    connection,
+    hasTable,
+    tableName,
+    `DELETE FROM ${tableName} WHERE ${columnName} IN (${placeholders})`,
+    ids
+  );
+}
+
+async function clearNullableReferenceByIdsIfTableExists(connection, hasTable, tableName, columnName, ids = []) {
+  if (!Array.isArray(ids) || ids.length === 0) return null;
+  const placeholders = ids.map(() => "?").join(", ");
+  return executeIfTableExists(
+    connection,
+    hasTable,
+    tableName,
+    `UPDATE ${tableName} SET ${columnName} = NULL WHERE ${columnName} IN (${placeholders})`,
+    ids
   );
 }
 
@@ -850,17 +935,270 @@ router.put("/technicians/:id", async (req, res) => {
 });
 
 router.delete("/technicians/:id", async (req, res) => {
+  let conn;
+  let technicianId = null;
   try {
-    const id = req.params.id;
-    const pool = await db.getPool();
-    const [result] = await pool.execute("DELETE FROM technicians WHERE id = ?", [id]);
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Technician not found." });
+    technicianId = normalizePositiveInteger(req.params.id);
+    if (!technicianId) {
+      return res.status(400).json({ message: "Invalid technician id." });
     }
-    return res.json({ message: "Technician deleted successfully." });
+
+    const pool = await db.getPool();
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const hasTable = createTableInspector(conn);
+
+    const [technicianRows] = await conn.query(
+      "SELECT id FROM technicians WHERE id = ? LIMIT 1",
+      [technicianId]
+    );
+    if (technicianRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: "Technician not found" });
+    }
+
+    const activeRequestRows = await queryRowsIfTableExists(
+      conn,
+      hasTable,
+      "service_requests",
+      `SELECT id
+         FROM service_requests
+        WHERE technician_id = ?
+          AND LOWER(COALESCE(status, '')) NOT IN ('completed', 'cancelled', 'paid')
+        LIMIT 5`,
+      [technicianId]
+    );
+    if (activeRequestRows.length > 0) {
+      await conn.rollback();
+      return res.status(409).json({
+        message: "Cannot delete technician with active service requests",
+      });
+    }
+
+    const walletIds = toPositiveIntegerList(
+      await queryRowsIfTableExists(
+        conn,
+        hasTable,
+        "technician_wallets",
+        "SELECT id FROM technician_wallets WHERE technician_id = ?",
+        [technicianId]
+      )
+    );
+    const walletTransactionIds = toPositiveIntegerList(
+      await queryRowsIfTableExists(
+        conn,
+        hasTable,
+        "wallet_transactions",
+        "SELECT id FROM wallet_transactions WHERE technician_id = ?",
+        [technicianId]
+      )
+    );
+    const payoutIds = toPositiveIntegerList(
+      await queryRowsIfTableExists(
+        conn,
+        hasTable,
+        "payouts",
+        "SELECT id FROM payouts WHERE technician_id = ?",
+        [technicianId]
+      )
+    );
+    const withdrawalRequestIds = toPositiveIntegerList(
+      await queryRowsIfTableExists(
+        conn,
+        hasTable,
+        "withdrawal_requests",
+        "SELECT id FROM withdrawal_requests WHERE technician_id = ?",
+        [technicianId]
+      )
+    );
+
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "device_tokens",
+      "DELETE FROM device_tokens WHERE user_id = ? AND user_type = 'technician'",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "dispatch_offers",
+      "DELETE FROM dispatch_offers WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "technician_location_history",
+      "DELETE FROM technician_location_history WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "technician_login_sessions",
+      "DELETE FROM technician_login_sessions WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "technician_activity_alerts",
+      "DELETE FROM technician_activity_alerts WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "technician_dues",
+      "DELETE FROM technician_dues WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "reviews",
+      "DELETE FROM reviews WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "technician_services",
+      "DELETE FROM technician_services WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "technician_approval_audit",
+      "DELETE FROM technician_approval_audit WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "technician_admin_notes",
+      "DELETE FROM technician_admin_notes WHERE technician_id = ?",
+      [technicianId]
+    );
+
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "payment_refunds",
+      "UPDATE payment_refunds SET technician_id = NULL WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "job_monitoring_alerts",
+      "UPDATE job_monitoring_alerts SET technician_id = NULL WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "invoices",
+      "UPDATE invoices SET technician_id = NULL WHERE technician_id = ?",
+      [technicianId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "service_requests",
+      "UPDATE service_requests SET technician_id = NULL, updated_at = NOW() WHERE technician_id = ?",
+      [technicianId]
+    );
+
+    await clearNullableReferenceByIdsIfTableExists(
+      conn,
+      hasTable,
+      "payments",
+      "wallet_transaction_id",
+      walletTransactionIds
+    );
+    await clearNullableReferenceByIdsIfTableExists(
+      conn,
+      hasTable,
+      "payment_refunds",
+      "wallet_transaction_id",
+      walletTransactionIds
+    );
+
+    await deleteByIdsIfTableExists(
+      conn,
+      hasTable,
+      "payout_allocations",
+      "wallet_transaction_id",
+      walletTransactionIds
+    );
+    await deleteByIdsIfTableExists(
+      conn,
+      hasTable,
+      "payout_allocations",
+      "payout_id",
+      payoutIds
+    );
+    await deleteByIdsIfTableExists(
+      conn,
+      hasTable,
+      "payouts",
+      "id",
+      payoutIds
+    );
+    await deleteByIdsIfTableExists(
+      conn,
+      hasTable,
+      "withdrawal_requests",
+      "id",
+      withdrawalRequestIds
+    );
+    await deleteByIdsIfTableExists(
+      conn,
+      hasTable,
+      "wallet_transactions",
+      "id",
+      walletTransactionIds
+    );
+    await deleteByIdsIfTableExists(
+      conn,
+      hasTable,
+      "technician_wallets",
+      "id",
+      walletIds
+    );
+
+    const [result] = await conn.execute("DELETE FROM technicians WHERE id = ?", [technicianId]);
+    await conn.commit();
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Technician not found" });
+    }
+
+    return res.status(200).json({ message: "Deleted successfully" });
   } catch (err) {
-    console.error("[Admin delete technician]", err);
-    return res.status(500).json({ error: "Failed to delete technician." });
+    if (conn) {
+      try {
+        await conn.rollback();
+      } catch {
+        // ignore rollback failures
+      }
+    }
+    console.error("[Admin delete technician]", {
+      technicianId,
+      code: err?.code,
+      errno: err?.errno,
+      message: err?.message,
+      stack: err?.stack,
+    });
+    return res.status(500).json({ message: "Failed to delete technician" });
+  } finally {
+    if (conn) {
+      conn.release();
+    }
   }
 });
 
@@ -976,144 +1314,273 @@ router.put("/users/:id", async (req, res) => {
 
 router.delete("/users/:id", async (req, res) => {
   let conn;
+  let userId = null;
   try {
-    const id = req.params.id;
-    console.log("Deleting user:", id);
-
-    const numericId = Number(id);
-    if (!Number.isInteger(numericId) || numericId <= 0) {
-      return res.status(400).json({ error: "Invalid user id." });
+    userId = normalizePositiveInteger(req.params.id);
+    if (!userId) {
+      return res.status(400).json({ message: "Invalid user id." });
     }
 
     const pool = await db.getPool();
     conn = await pool.getConnection();
     await conn.beginTransaction();
+    const hasTable = createTableInspector(conn);
 
-    const [userRows] = await conn.query("SELECT id, email FROM users WHERE id = ? LIMIT 1", [numericId]);
+    const [userRows] = await conn.query("SELECT id, email FROM users WHERE id = ? LIMIT 1", [userId]);
     if (userRows.length === 0) {
       await conn.rollback();
-      return res.status(404).json({ error: "User not found." });
+      return res.status(404).json({ message: "User not found" });
     }
     const userEmail = String(userRows[0]?.email || "").trim().toLowerCase();
 
-    const [requestRows] = await conn.query(
-      "SELECT id FROM service_requests WHERE user_id = ?",
-      [numericId]
+    const requestIds = toPositiveIntegerList(
+      await queryRowsIfTableExists(
+        conn,
+        hasTable,
+        "service_requests",
+        "SELECT id FROM service_requests WHERE user_id = ?",
+        [userId]
+      )
     );
-    const requestIds = requestRows.map((row) => Number(row.id)).filter((value) => Number.isInteger(value) && value > 0);
-
-    const [paymentRows] = await conn.query(
-      "SELECT id FROM payments WHERE user_id = ?",
-      [numericId]
+    const paymentIds = toPositiveIntegerList(
+      await queryRowsIfTableExists(
+        conn,
+        hasTable,
+        "payments",
+        "SELECT id FROM payments WHERE user_id = ?",
+        [userId]
+      )
     );
-    const paymentIds = paymentRows.map((row) => Number(row.id)).filter((value) => Number.isInteger(value) && value > 0);
+    const paymentWalletTransactionIds =
+      paymentIds.length > 0
+        ? toPositiveIntegerList(
+            await queryRowsIfTableExists(
+              conn,
+              hasTable,
+              "wallet_transactions",
+              `SELECT id FROM wallet_transactions WHERE payment_id IN (${paymentIds.map(() => "?").join(", ")})`,
+              paymentIds
+            )
+          )
+        : [];
+    const requestWalletTransactionIds =
+      requestIds.length > 0
+        ? toPositiveIntegerList(
+            await queryRowsIfTableExists(
+              conn,
+              hasTable,
+              "wallet_transactions",
+              `SELECT id FROM wallet_transactions WHERE service_request_id IN (${requestIds.map(() => "?").join(", ")})`,
+              requestIds
+            )
+          )
+        : [];
+    const dependentWalletTransactionIds = Array.from(
+      new Set([...paymentWalletTransactionIds, ...requestWalletTransactionIds])
+    );
 
-    await conn.execute("DELETE FROM device_tokens WHERE user_id = ? AND user_type = 'user'", [numericId]);
-    await conn.execute("DELETE FROM user_vehicles WHERE user_id = ?", [numericId]);
-    await conn.execute("DELETE FROM reviews WHERE user_id = ?", [numericId]);
-    await conn.execute("DELETE FROM invoices WHERE user_id = ?", [numericId]);
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "device_tokens",
+      "DELETE FROM device_tokens WHERE user_id = ? AND user_type = 'user'",
+      [userId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "user_vehicles",
+      "DELETE FROM user_vehicles WHERE user_id = ?",
+      [userId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "reviews",
+      "DELETE FROM reviews WHERE user_id = ?",
+      [userId]
+    );
+    await executeIfTableExists(
+      conn,
+      hasTable,
+      "invoices",
+      "DELETE FROM invoices WHERE user_id = ?",
+      [userId]
+    );
+    await deleteByIdsIfTableExists(
+      conn,
+      hasTable,
+      "payout_allocations",
+      "wallet_transaction_id",
+      dependentWalletTransactionIds
+    );
 
     if (requestIds.length > 0) {
-      const requestPlaceholders = requestIds.map(() => "?").join(", ");
-
-      await conn.execute(
-        `DELETE FROM reviews WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "reviews",
+        "service_request_id",
         requestIds
       );
-      await conn.execute(
-        `DELETE FROM dispatch_offers WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "dispatch_offers",
+        "service_request_id",
         requestIds
       );
-      await conn.execute(
-        `DELETE FROM technician_dues WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "technician_dues",
+        "service_request_id",
         requestIds
       );
-      await conn.execute(
-        `DELETE FROM technician_location_history WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "technician_location_history",
+        "service_request_id",
         requestIds
       );
-      await conn.execute(
-        `DELETE FROM job_monitoring_alerts WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "job_monitoring_alerts",
+        "service_request_id",
         requestIds
       );
-      await conn.execute(
-        `DELETE FROM invoices WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "invoices",
+        "service_request_id",
         requestIds
       );
 
       if (paymentIds.length > 0) {
-        const paymentPlaceholders = paymentIds.map(() => "?").join(", ");
-
-        await conn.execute(
-          `DELETE FROM payment_refunds WHERE payment_id IN (${paymentPlaceholders})`,
+        await deleteByIdsIfTableExists(
+          conn,
+          hasTable,
+          "payment_refunds",
+          "payment_id",
           paymentIds
         );
-        await conn.execute(
-          `DELETE FROM payout_allocations WHERE payment_id IN (${paymentPlaceholders})`,
+        await deleteByIdsIfTableExists(
+          conn,
+          hasTable,
+          "payout_allocations",
+          "payment_id",
           paymentIds
         );
-        await conn.execute(
-          `DELETE FROM wallet_transactions WHERE payment_id IN (${paymentPlaceholders})`,
+        await deleteByIdsIfTableExists(
+          conn,
+          hasTable,
+          "wallet_transactions",
+          "payment_id",
           paymentIds
         );
       }
 
-      await conn.execute(
-        `DELETE FROM payment_refunds WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "payment_refunds",
+        "service_request_id",
         requestIds
       );
-      await conn.execute(
-        `DELETE FROM payout_allocations WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "payout_allocations",
+        "service_request_id",
         requestIds
       );
-      await conn.execute(
-        `DELETE FROM wallet_transactions WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "wallet_transactions",
+        "service_request_id",
         requestIds
       );
-      await conn.execute(
-        `DELETE FROM payments WHERE service_request_id IN (${requestPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "payments",
+        "service_request_id",
         requestIds
       );
-      await conn.execute(
-        `DELETE FROM payments WHERE user_id = ?`,
-        [numericId]
+      await executeIfTableExists(
+        conn,
+        hasTable,
+        "payments",
+        "DELETE FROM payments WHERE user_id = ?",
+        [userId]
       );
-      await conn.execute(
-        `DELETE FROM service_requests WHERE user_id = ?`,
-        [numericId]
+      await executeIfTableExists(
+        conn,
+        hasTable,
+        "service_requests",
+        "DELETE FROM service_requests WHERE user_id = ?",
+        [userId]
       );
     } else if (paymentIds.length > 0) {
-      const paymentPlaceholders = paymentIds.map(() => "?").join(", ");
-      await conn.execute(
-        `DELETE FROM payment_refunds WHERE payment_id IN (${paymentPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "payment_refunds",
+        "payment_id",
         paymentIds
       );
-      await conn.execute(
-        `DELETE FROM payout_allocations WHERE payment_id IN (${paymentPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "payout_allocations",
+        "payment_id",
         paymentIds
       );
-      await conn.execute(
-        `DELETE FROM wallet_transactions WHERE payment_id IN (${paymentPlaceholders})`,
+      await deleteByIdsIfTableExists(
+        conn,
+        hasTable,
+        "wallet_transactions",
+        "payment_id",
         paymentIds
       );
-      await conn.execute(
-        `DELETE FROM payments WHERE user_id = ?`,
-        [numericId]
+      await executeIfTableExists(
+        conn,
+        hasTable,
+        "payments",
+        "DELETE FROM payments WHERE user_id = ?",
+        [userId]
       );
     }
 
     if (userEmail) {
-      await conn.execute("DELETE FROM otp_requests WHERE email = ?", [userEmail]);
-      await conn.execute("DELETE FROM otp_rate_limits WHERE email = ?", [userEmail]);
+      await executeIfTableExists(
+        conn,
+        hasTable,
+        "otp_requests",
+        "DELETE FROM otp_requests WHERE email = ?",
+        [userEmail]
+      );
+      await executeIfTableExists(
+        conn,
+        hasTable,
+        "otp_rate_limits",
+        "DELETE FROM otp_rate_limits WHERE email = ?",
+        [userEmail]
+      );
     }
 
-    const [result] = await conn.execute("DELETE FROM users WHERE id = ?", [numericId]);
+    const [result] = await conn.execute("DELETE FROM users WHERE id = ?", [userId]);
     await conn.commit();
 
     if (Number(result?.affectedRows || 0) === 0) {
-      return res.status(404).json({ error: "User not found." });
+      return res.status(404).json({ message: "User not found" });
     }
-    return res.status(200).json({ success: true, message: "User deleted successfully" });
+
+    return res.status(200).json({ message: "Deleted successfully" });
   } catch (err) {
     if (conn) {
       try {
@@ -1122,12 +1589,14 @@ router.delete("/users/:id", async (req, res) => {
         // ignore rollback failures
       }
     }
-    console.error("[Admin delete user]", err);
-    return res.status(500).json({
-      success: false,
-      error: "Delete failed",
-      details: err?.message || String(err),
+    console.error("[Admin delete user]", {
+      userId,
+      code: err?.code,
+      errno: err?.errno,
+      message: err?.message,
+      stack: err?.stack,
     });
+    return res.status(500).json({ message: "Failed to delete user" });
   } finally {
     if (conn) {
       conn.release();
