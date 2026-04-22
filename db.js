@@ -760,6 +760,77 @@ export async function ensureUserVehiclesTable() {
   await addColumnIfNotExists(p, 'user_vehicles', "status VARCHAR(32) DEFAULT 'ready'");
 }
 
+const TECHNICIAN_FLEET_VEHICLES_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS technician_fleet_vehicles (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  technician_id INT NOT NULL,
+  vehicle_type VARCHAR(64) NOT NULL,
+  vehicle_number VARCHAR(64) NOT NULL,
+  capacity VARCHAR(64) NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'available',
+  metadata JSON NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_technician_fleet_vehicle_number (technician_id, vehicle_number),
+  INDEX idx_technician_fleet_vehicles_lookup (technician_id, status, updated_at),
+  FOREIGN KEY (technician_id) REFERENCES technicians(id)
+)
+`.trim();
+
+export async function ensureTechnicianFleetVehiclesTable() {
+  const p = await getPool();
+  await p.execute(TECHNICIAN_FLEET_VEHICLES_TABLE_SQL);
+  await addColumnIfNotExists(p, "technician_fleet_vehicles", "capacity VARCHAR(64) NULL");
+  await addColumnIfNotExists(p, "technician_fleet_vehicles", "status VARCHAR(24) NOT NULL DEFAULT 'available'");
+  await addColumnIfNotExists(p, "technician_fleet_vehicles", "metadata JSON NULL");
+  await addColumnIfNotExists(p, "technician_fleet_vehicles", "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
+  await addIndexIfNotExists(
+    p,
+    "technician_fleet_vehicles",
+    "idx_technician_fleet_vehicles_lookup",
+    "technician_id, status, updated_at"
+  );
+}
+
+const TECHNICIAN_TEAM_MEMBERS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS technician_team_members (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  technician_id INT NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  phone VARCHAR(50) NOT NULL,
+  role VARCHAR(24) NOT NULL DEFAULT 'driver',
+  assigned_vehicle_id BIGINT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'active',
+  metadata JSON NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_technician_team_members_lookup (technician_id, status, updated_at),
+  INDEX idx_technician_team_members_vehicle (assigned_vehicle_id),
+  FOREIGN KEY (technician_id) REFERENCES technicians(id)
+)
+`.trim();
+
+export async function ensureTechnicianTeamMembersTable() {
+  const p = await getPool();
+  await p.execute(TECHNICIAN_TEAM_MEMBERS_TABLE_SQL);
+  await addColumnIfNotExists(p, "technician_team_members", "assigned_vehicle_id BIGINT NULL");
+  await addColumnIfNotExists(p, "technician_team_members", "status VARCHAR(24) NOT NULL DEFAULT 'active'");
+  await addColumnIfNotExists(p, "technician_team_members", "metadata JSON NULL");
+  await addColumnIfNotExists(p, "technician_team_members", "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
+  await addIndexIfNotExists(
+    p,
+    "technician_team_members",
+    "idx_technician_team_members_lookup",
+    "technician_id, status, updated_at"
+  );
+  await addIndexIfNotExists(
+    p,
+    "technician_team_members",
+    "idx_technician_team_members_vehicle",
+    "assigned_vehicle_id"
+  );
+}
+
 const DEVICE_TOKENS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS device_tokens (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -1263,6 +1334,8 @@ export async function updateServiceRequestsTableSchema() {
   await addColumnIfNotExists(p, 'service_requests', 'sla_deadline DATETIME NULL');
   await addColumnIfNotExists(p, 'service_requests', 'customer_location_lat DECIMAL(10, 8)');
   await addColumnIfNotExists(p, 'service_requests', 'customer_location_lng DECIMAL(11, 8)');
+  await addColumnIfNotExists(p, 'service_requests', 'assigned_vehicle_id BIGINT NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'assigned_employee_id BIGINT NULL');
 
   // Ensure status column can hold longer status strings like 'payment_pending'
   try {
@@ -1290,6 +1363,8 @@ export async function updateServiceRequestsTableSchema() {
   await addIndexIfNotExists(p, "service_requests", "idx_service_requests_technician_status", "technician_id, status");
   await addIndexIfNotExists(p, "service_requests", "idx_service_requests_created_at", "created_at");
   await addIndexIfNotExists(p, "service_requests", "idx_service_requests_updated_at", "updated_at");
+  await addIndexIfNotExists(p, "service_requests", "idx_service_requests_assigned_vehicle", "assigned_vehicle_id");
+  await addIndexIfNotExists(p, "service_requests", "idx_service_requests_assigned_employee", "assigned_employee_id");
 }
 
 export async function updateUsersTableSchema() {

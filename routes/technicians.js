@@ -184,6 +184,7 @@ function rowToTechnician(row) {
 
   return {
     id: String(row.id),
+    role: row.service_type || "technician",
     name: row.name,
     email: row.email,
     phone: row.phone || "",
@@ -282,6 +283,135 @@ async function fetchTechnicianFinancialSnapshot(pool, technicianId) {
     pending_dues: pendingDues,
     currency: wallet.currency || "INR",
   };
+}
+
+const TECHNICIAN_FLEET_STATUSES = new Set(["available", "busy", "offline"]);
+const TECHNICIAN_TEAM_MEMBER_ROLES = new Set(["driver", "helper"]);
+const TECHNICIAN_TEAM_MEMBER_STATUSES = new Set(["active", "offline"]);
+
+function normalizeTechnicianFleetVehicleType(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function normalizeTechnicianFleetStatus(value, fallback = "available") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return TECHNICIAN_FLEET_STATUSES.has(normalized) ? normalized : fallback;
+}
+
+function normalizeTechnicianTeamRole(value, fallback = "driver") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return TECHNICIAN_TEAM_MEMBER_ROLES.has(normalized) ? normalized : fallback;
+}
+
+function normalizeTechnicianTeamStatus(value, fallback = "active") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return TECHNICIAN_TEAM_MEMBER_STATUSES.has(normalized) ? normalized : fallback;
+}
+
+function normalizeOptionalText(value, maxLength = 255) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return null;
+  return normalized.slice(0, maxLength);
+}
+
+function normalizeRequiredText(value, maxLength = 255) {
+  const normalized = normalizeOptionalText(value, maxLength);
+  return normalized || "";
+}
+
+function normalizeOptionalNumericIdentifier(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function technicianHasTowingAccess(row) {
+  const categories = [row?.service_type, ...parseTechnicianSpecialties(row?.specialties)];
+  return categories.some((category) => canonicalizeServiceDomain(category) === "towing");
+}
+
+async function requireTowingTechnicianAccess(req, res) {
+  const rows = await db.query(
+    "SELECT id, service_type, specialties FROM technicians WHERE id = ? LIMIT 1",
+    [req.technicianId]
+  );
+  const technicianRow = rows?.[0] || null;
+
+  if (!technicianRow) {
+    res.status(404).json({ error: "Technician not found." });
+    return null;
+  }
+
+  if (!technicianHasTowingAccess(technicianRow)) {
+    res.status(403).json({
+      error: "Fleet and team management is available only for towing technicians.",
+    });
+    return null;
+  }
+
+  return technicianRow;
+}
+
+function mapTechnicianFleetVehicle(row) {
+  return {
+    id: String(row.id),
+    vehicle_id: String(row.id),
+    technician_id: String(row.technician_id),
+    vehicle_type: row.vehicle_type,
+    vehicle_number: row.vehicle_number,
+    capacity: row.capacity || null,
+    status: normalizeTechnicianFleetStatus(row.status),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function mapTechnicianTeamMember(row) {
+  const assignedVehicleId = row.assigned_vehicle_id != null ? String(row.assigned_vehicle_id) : null;
+  const assignedVehicle =
+    assignedVehicleId && row.assigned_vehicle_number
+      ? {
+          id: assignedVehicleId,
+          vehicle_id: assignedVehicleId,
+          vehicle_number: row.assigned_vehicle_number,
+          vehicle_type: row.assigned_vehicle_type,
+        }
+      : null;
+
+  return {
+    id: String(row.id),
+    employee_id: String(row.id),
+    technician_id: String(row.technician_id),
+    name: row.name,
+    phone: row.phone,
+    role: normalizeTechnicianTeamRole(row.role),
+    status: normalizeTechnicianTeamStatus(row.status),
+    assigned_vehicle_id: assignedVehicleId,
+    assigned_vehicle: assignedVehicle,
+    assigned_vehicle_label: assignedVehicle
+      ? `${assignedVehicle.vehicle_number} (${assignedVehicle.vehicle_type})`
+      : null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+async function assertAssignedVehicleBelongsToTechnician(pool, technicianId, vehicleId) {
+  if (vehicleId == null) return null;
+
+  const [rows] = await pool.query(
+    `SELECT id, technician_id, vehicle_type, vehicle_number, capacity, status, created_at, updated_at
+     FROM technician_fleet_vehicles
+     WHERE id = ? AND technician_id = ?
+     LIMIT 1`,
+    [vehicleId, technicianId]
+  );
+
+  return rows?.[0] || null;
 }
 
 const TECHNICIAN_CATEGORY_ALIASES = new Map([
@@ -641,8 +771,14 @@ router.get("/requests", verifyTechnician, async (req, res) => {
         payment_status: r.payment_status,
         amount: resolvedAmount,
         created_at: r.created_at,
+        updated_at: r.updated_at,
         started_at: r.started_at,
         completed_at: r.completed_at,
+        accepted_time: r.accepted_time,
+        sla_deadline: r.sla_deadline,
+        eta_minutes: r.eta_minutes,
+        cancellation_reason: r.cancellation_reason,
+        cancelled_at: r.cancelled_at,
         user_id: r.user_id,
         contact_name: r.contact_name || r.user_full_name || 'Not Available',
         contact_phone: r.contact_phone || r.user_phone || null,
@@ -1001,6 +1137,443 @@ router.patch("/me/profile", verifyTechnician, async (req, res) => {
   } catch (err) {
     console.error("Profile update error:", err);
     return res.status(500).json({ error: "Failed to update profile" });
+  }
+});
+
+router.get("/vehicles", verifyTechnician, async (req, res) => {
+  try {
+    const technicianRow = await requireTowingTechnicianAccess(req, res);
+    if (!technicianRow) return;
+
+    const pool = await db.getPool();
+    const [rows] = await pool.query(
+      `SELECT id, technician_id, vehicle_type, vehicle_number, capacity, status, created_at, updated_at
+       FROM technician_fleet_vehicles
+       WHERE technician_id = ?
+       ORDER BY updated_at DESC, id DESC`,
+      [technicianRow.id]
+    );
+
+    return res.json((rows || []).map(mapTechnicianFleetVehicle));
+  } catch (err) {
+    console.error("[Technician vehicles list] failed:", err);
+    return res.status(500).json({ error: "Failed to fetch fleet vehicles." });
+  }
+});
+
+router.post("/vehicles", verifyTechnician, async (req, res) => {
+  try {
+    const technicianRow = await requireTowingTechnicianAccess(req, res);
+    if (!technicianRow) return;
+
+    const vehicleType = normalizeTechnicianFleetVehicleType(
+      req.body?.vehicle_type ?? req.body?.vehicleType
+    );
+    const vehicleNumber = normalizeRequiredText(
+      req.body?.vehicle_number ?? req.body?.vehicleNumber,
+      64
+    ).toUpperCase();
+    const capacity = normalizeOptionalText(req.body?.capacity, 64);
+    const status = normalizeTechnicianFleetStatus(req.body?.status, "available");
+
+    if (!vehicleType || !vehicleNumber) {
+      return res.status(400).json({
+        error: "vehicle_type and vehicle_number are required.",
+      });
+    }
+
+    const pool = await db.getPool();
+    const [result] = await pool.execute(
+      `INSERT INTO technician_fleet_vehicles
+        (technician_id, vehicle_type, vehicle_number, capacity, status)
+       VALUES (?, ?, ?, ?, ?)`,
+      [technicianRow.id, vehicleType, vehicleNumber, capacity, status]
+    );
+
+    const [rows] = await pool.query(
+      `SELECT id, technician_id, vehicle_type, vehicle_number, capacity, status, created_at, updated_at
+       FROM technician_fleet_vehicles
+       WHERE id = ? AND technician_id = ?
+       LIMIT 1`,
+      [result.insertId, technicianRow.id]
+    );
+
+    return res.status(201).json(mapTechnicianFleetVehicle(rows[0]));
+  } catch (err) {
+    if (err?.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({
+        error: "This vehicle number is already registered in your fleet.",
+      });
+    }
+    console.error("[Technician vehicles create] failed:", err);
+    return res.status(500).json({ error: "Failed to add fleet vehicle." });
+  }
+});
+
+router.patch("/vehicles/:id", verifyTechnician, async (req, res) => {
+  try {
+    const technicianRow = await requireTowingTechnicianAccess(req, res);
+    if (!technicianRow) return;
+
+    const vehicleId = normalizeOptionalNumericIdentifier(req.params.id);
+    if (!vehicleId) {
+      return res.status(400).json({ error: "Valid vehicle id is required." });
+    }
+
+    const pool = await db.getPool();
+    const [existingRows] = await pool.query(
+      `SELECT id, technician_id, vehicle_type, vehicle_number, capacity, status, created_at, updated_at
+       FROM technician_fleet_vehicles
+       WHERE id = ? AND technician_id = ?
+       LIMIT 1`,
+      [vehicleId, technicianRow.id]
+    );
+
+    if (!existingRows?.length) {
+      return res.status(404).json({ error: "Fleet vehicle not found." });
+    }
+
+    const existing = existingRows[0];
+    const nextVehicleType =
+      req.body?.vehicle_type != null || req.body?.vehicleType != null
+        ? normalizeTechnicianFleetVehicleType(req.body?.vehicle_type ?? req.body?.vehicleType)
+        : existing.vehicle_type;
+    const nextVehicleNumber =
+      req.body?.vehicle_number != null || req.body?.vehicleNumber != null
+        ? normalizeRequiredText(req.body?.vehicle_number ?? req.body?.vehicleNumber, 64).toUpperCase()
+        : existing.vehicle_number;
+    const nextCapacity =
+      req.body?.capacity !== undefined
+        ? normalizeOptionalText(req.body?.capacity, 64)
+        : existing.capacity;
+    const nextStatus =
+      req.body?.status !== undefined
+        ? normalizeTechnicianFleetStatus(req.body?.status, existing.status)
+        : normalizeTechnicianFleetStatus(existing.status);
+
+    if (!nextVehicleType || !nextVehicleNumber) {
+      return res.status(400).json({
+        error: "vehicle_type and vehicle_number are required.",
+      });
+    }
+
+    await pool.execute(
+      `UPDATE technician_fleet_vehicles
+       SET vehicle_type = ?, vehicle_number = ?, capacity = ?, status = ?
+       WHERE id = ? AND technician_id = ?`,
+      [
+        nextVehicleType,
+        nextVehicleNumber,
+        nextCapacity,
+        nextStatus,
+        vehicleId,
+        technicianRow.id,
+      ]
+    );
+
+    const [rows] = await pool.query(
+      `SELECT id, technician_id, vehicle_type, vehicle_number, capacity, status, created_at, updated_at
+       FROM technician_fleet_vehicles
+       WHERE id = ? AND technician_id = ?
+       LIMIT 1`,
+      [vehicleId, technicianRow.id]
+    );
+
+    return res.json(mapTechnicianFleetVehicle(rows[0]));
+  } catch (err) {
+    if (err?.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({
+        error: "This vehicle number is already registered in your fleet.",
+      });
+    }
+    console.error("[Technician vehicles update] failed:", err);
+    return res.status(500).json({ error: "Failed to update fleet vehicle." });
+  }
+});
+
+router.delete("/vehicles/:id", verifyTechnician, async (req, res) => {
+  try {
+    const technicianRow = await requireTowingTechnicianAccess(req, res);
+    if (!technicianRow) return;
+
+    const vehicleId = normalizeOptionalNumericIdentifier(req.params.id);
+    if (!vehicleId) {
+      return res.status(400).json({ error: "Valid vehicle id is required." });
+    }
+
+    const pool = await db.getPool();
+    const conn = await pool.getConnection();
+
+    try {
+      await conn.beginTransaction();
+
+      await conn.execute(
+        `UPDATE technician_team_members
+         SET assigned_vehicle_id = NULL
+         WHERE technician_id = ? AND assigned_vehicle_id = ?`,
+        [technicianRow.id, vehicleId]
+      );
+
+      const [result] = await conn.execute(
+        `DELETE FROM technician_fleet_vehicles
+         WHERE id = ? AND technician_id = ?`,
+        [vehicleId, technicianRow.id]
+      );
+
+      if (!result?.affectedRows) {
+        await conn.rollback();
+        return res.status(404).json({ error: "Fleet vehicle not found." });
+      }
+
+      await conn.commit();
+      return res.json({ success: true, id: String(vehicleId) });
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
+    }
+  } catch (err) {
+    console.error("[Technician vehicles delete] failed:", err);
+    return res.status(500).json({ error: "Failed to delete fleet vehicle." });
+  }
+});
+
+router.get("/employees", verifyTechnician, async (req, res) => {
+  try {
+    const technicianRow = await requireTowingTechnicianAccess(req, res);
+    if (!technicianRow) return;
+
+    const pool = await db.getPool();
+    const [rows] = await pool.query(
+      `SELECT
+         tm.id,
+         tm.technician_id,
+         tm.name,
+         tm.phone,
+         tm.role,
+         tm.assigned_vehicle_id,
+         tm.status,
+         tm.created_at,
+         tm.updated_at,
+         fv.vehicle_number AS assigned_vehicle_number,
+         fv.vehicle_type AS assigned_vehicle_type
+       FROM technician_team_members tm
+       LEFT JOIN technician_fleet_vehicles fv
+         ON fv.id = tm.assigned_vehicle_id
+        AND fv.technician_id = tm.technician_id
+       WHERE tm.technician_id = ?
+       ORDER BY tm.updated_at DESC, tm.id DESC`,
+      [technicianRow.id]
+    );
+
+    return res.json((rows || []).map(mapTechnicianTeamMember));
+  } catch (err) {
+    console.error("[Technician employees list] failed:", err);
+    return res.status(500).json({ error: "Failed to fetch team members." });
+  }
+});
+
+router.post("/employees", verifyTechnician, async (req, res) => {
+  try {
+    const technicianRow = await requireTowingTechnicianAccess(req, res);
+    if (!technicianRow) return;
+
+    const name = normalizeRequiredText(req.body?.name, 255);
+    const phone = normalizeRequiredText(req.body?.phone, 50);
+    const role = normalizeTechnicianTeamRole(req.body?.role, "driver");
+    const assignedVehicleId = normalizeOptionalNumericIdentifier(
+      req.body?.assigned_vehicle ?? req.body?.assigned_vehicle_id
+    );
+    const status = normalizeTechnicianTeamStatus(req.body?.status, "active");
+
+    if (!name || !phone) {
+      return res.status(400).json({ error: "name and phone are required." });
+    }
+
+    const pool = await db.getPool();
+    if (assignedVehicleId != null) {
+      const assignedVehicle = await assertAssignedVehicleBelongsToTechnician(
+        pool,
+        technicianRow.id,
+        assignedVehicleId
+      );
+      if (!assignedVehicle) {
+        return res.status(400).json({
+          error: "assigned_vehicle must belong to your fleet.",
+        });
+      }
+    }
+
+    const [result] = await pool.execute(
+      `INSERT INTO technician_team_members
+        (technician_id, name, phone, role, assigned_vehicle_id, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [technicianRow.id, name, phone, role, assignedVehicleId, status]
+    );
+
+    const [rows] = await pool.query(
+      `SELECT
+         tm.id,
+         tm.technician_id,
+         tm.name,
+         tm.phone,
+         tm.role,
+         tm.assigned_vehicle_id,
+         tm.status,
+         tm.created_at,
+         tm.updated_at,
+         fv.vehicle_number AS assigned_vehicle_number,
+         fv.vehicle_type AS assigned_vehicle_type
+       FROM technician_team_members tm
+       LEFT JOIN technician_fleet_vehicles fv
+         ON fv.id = tm.assigned_vehicle_id
+        AND fv.technician_id = tm.technician_id
+       WHERE tm.id = ? AND tm.technician_id = ?
+       LIMIT 1`,
+      [result.insertId, technicianRow.id]
+    );
+
+    return res.status(201).json(mapTechnicianTeamMember(rows[0]));
+  } catch (err) {
+    console.error("[Technician employees create] failed:", err);
+    return res.status(500).json({ error: "Failed to add team member." });
+  }
+});
+
+router.patch("/employees/:id", verifyTechnician, async (req, res) => {
+  try {
+    const technicianRow = await requireTowingTechnicianAccess(req, res);
+    if (!technicianRow) return;
+
+    const employeeId = normalizeOptionalNumericIdentifier(req.params.id);
+    if (!employeeId) {
+      return res.status(400).json({ error: "Valid employee id is required." });
+    }
+
+    const pool = await db.getPool();
+    const [existingRows] = await pool.query(
+      `SELECT id, technician_id, name, phone, role, assigned_vehicle_id, status
+       FROM technician_team_members
+       WHERE id = ? AND technician_id = ?
+       LIMIT 1`,
+      [employeeId, technicianRow.id]
+    );
+
+    if (!existingRows?.length) {
+      return res.status(404).json({ error: "Team member not found." });
+    }
+
+    const existing = existingRows[0];
+    const nextName =
+      req.body?.name !== undefined
+        ? normalizeRequiredText(req.body?.name, 255)
+        : existing.name;
+    const nextPhone =
+      req.body?.phone !== undefined
+        ? normalizeRequiredText(req.body?.phone, 50)
+        : existing.phone;
+    const nextRole =
+      req.body?.role !== undefined
+        ? normalizeTechnicianTeamRole(req.body?.role, existing.role)
+        : normalizeTechnicianTeamRole(existing.role);
+    const nextAssignedVehicleId =
+      req.body?.assigned_vehicle !== undefined || req.body?.assigned_vehicle_id !== undefined
+        ? normalizeOptionalNumericIdentifier(
+            req.body?.assigned_vehicle ?? req.body?.assigned_vehicle_id
+          )
+        : existing.assigned_vehicle_id;
+    const nextStatus =
+      req.body?.status !== undefined
+        ? normalizeTechnicianTeamStatus(req.body?.status, existing.status)
+        : normalizeTechnicianTeamStatus(existing.status);
+
+    if (!nextName || !nextPhone) {
+      return res.status(400).json({ error: "name and phone are required." });
+    }
+
+    if (nextAssignedVehicleId != null) {
+      const assignedVehicle = await assertAssignedVehicleBelongsToTechnician(
+        pool,
+        technicianRow.id,
+        nextAssignedVehicleId
+      );
+      if (!assignedVehicle) {
+        return res.status(400).json({
+          error: "assigned_vehicle must belong to your fleet.",
+        });
+      }
+    }
+
+    await pool.execute(
+      `UPDATE technician_team_members
+       SET name = ?, phone = ?, role = ?, assigned_vehicle_id = ?, status = ?
+       WHERE id = ? AND technician_id = ?`,
+      [
+        nextName,
+        nextPhone,
+        nextRole,
+        nextAssignedVehicleId,
+        nextStatus,
+        employeeId,
+        technicianRow.id,
+      ]
+    );
+
+    const [rows] = await pool.query(
+      `SELECT
+         tm.id,
+         tm.technician_id,
+         tm.name,
+         tm.phone,
+         tm.role,
+         tm.assigned_vehicle_id,
+         tm.status,
+         tm.created_at,
+         tm.updated_at,
+         fv.vehicle_number AS assigned_vehicle_number,
+         fv.vehicle_type AS assigned_vehicle_type
+       FROM technician_team_members tm
+       LEFT JOIN technician_fleet_vehicles fv
+         ON fv.id = tm.assigned_vehicle_id
+        AND fv.technician_id = tm.technician_id
+       WHERE tm.id = ? AND tm.technician_id = ?
+       LIMIT 1`,
+      [employeeId, technicianRow.id]
+    );
+
+    return res.json(mapTechnicianTeamMember(rows[0]));
+  } catch (err) {
+    console.error("[Technician employees update] failed:", err);
+    return res.status(500).json({ error: "Failed to update team member." });
+  }
+});
+
+router.delete("/employees/:id", verifyTechnician, async (req, res) => {
+  try {
+    const technicianRow = await requireTowingTechnicianAccess(req, res);
+    if (!technicianRow) return;
+
+    const employeeId = normalizeOptionalNumericIdentifier(req.params.id);
+    if (!employeeId) {
+      return res.status(400).json({ error: "Valid employee id is required." });
+    }
+
+    const pool = await db.getPool();
+    const [result] = await pool.execute(
+      `DELETE FROM technician_team_members
+       WHERE id = ? AND technician_id = ?`,
+      [employeeId, technicianRow.id]
+    );
+
+    if (!result?.affectedRows) {
+      return res.status(404).json({ error: "Team member not found." });
+    }
+
+    return res.json({ success: true, id: String(employeeId) });
+  } catch (err) {
+    console.error("[Technician employees delete] failed:", err);
+    return res.status(500).json({ error: "Failed to delete team member." });
   }
 });
 
