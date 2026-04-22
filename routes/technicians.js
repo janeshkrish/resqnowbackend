@@ -184,7 +184,7 @@ function rowToTechnician(row) {
 
   return {
     id: String(row.id),
-    role: row.service_type || "technician",
+    role: "technician",
     name: row.name,
     email: row.email,
     phone: row.phone || "",
