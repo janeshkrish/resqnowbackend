@@ -181,10 +181,14 @@ function rowToTechnician(row) {
   try { if (row.documents) documents = typeof row.documents === "string" ? JSON.parse(row.documents) : row.documents; } catch { }
   try { if (row.settings) settings = typeof row.settings === "string" ? JSON.parse(row.settings) : row.settings; } catch { }
   const normalizedDocuments = sanitizeTechnicianDocuments(documents);
+  const operationalRole =
+    canonicalizeServiceDomain(row.service_type || specialties?.[0] || "technician") || "technician";
 
   return {
     id: String(row.id),
-    role: "technician",
+    role: operationalRole,
+    account_role: "technician",
+    operational_role: operationalRole,
     name: row.name,
     email: row.email,
     phone: row.phone || "",
