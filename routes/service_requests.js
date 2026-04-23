@@ -43,6 +43,52 @@ const safeParse = (value) => {
     try { return typeof value === "string" ? JSON.parse(value) : value; } catch { return []; }
 };
 
+const normalizeUploadResourcePath = (rawValue) => {
+    const raw = String(rawValue || "").trim();
+    if (!raw) return "";
+
+    if (raw.startsWith("/api/upload/files/")) {
+        return raw;
+    }
+
+    if (/^https?:\/\//i.test(raw)) {
+        try {
+            const parsed = new URL(raw);
+            const pathname = String(parsed.pathname || "").trim();
+            if (pathname.startsWith("/api/upload/files/")) {
+                return pathname;
+            }
+            return raw;
+        } catch {
+            return raw;
+        }
+    }
+
+    if (/^api\/upload\/files\//i.test(raw)) {
+        return `/${raw.replace(/^\/+/, "")}`;
+    }
+
+    return raw;
+};
+
+const parseTechnicianDocuments = (rawValue) => {
+    if (!rawValue) return {};
+    if (typeof rawValue === "string") {
+        try {
+            const parsed = JSON.parse(rawValue);
+            return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+        } catch {
+            return {};
+        }
+    }
+    return rawValue && typeof rawValue === "object" && !Array.isArray(rawValue) ? rawValue : {};
+};
+
+const resolveTechnicianAvatar = (rawDocuments) => {
+    const documents = parseTechnicianDocuments(rawDocuments);
+    return normalizeUploadResourcePath(documents.profile_photo || "");
+};
+
 const toPositiveMoney = (value) => {
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -197,6 +243,7 @@ router.get("/", verifyUser, async (req, res) => {
         t.jobs_completed as technician_jobs_completed,
         t.latitude as technician_lat,
         t.longitude as technician_lng,
+        t.documents as technician_documents,
         t.pricing as technician_pricing,
         EXISTS(
           SELECT 1 FROM reviews r
@@ -231,6 +278,7 @@ router.get("/", verifyUser, async (req, res) => {
                 name: row.technician_name,
                 phone: row.technician_phone,
                 rating: Number.isFinite(Number(row.technician_rating)) ? Number(row.technician_rating) : 0,
+                avatar_url: resolveTechnicianAvatar(row.technician_documents) || null,
                 completedJobs: Number.isFinite(Number(row.technician_jobs_completed)) ? Number(row.technician_jobs_completed) : 0,
                 location: {
                     lat: Number.isFinite(Number(row.technician_lat)) ? Number(row.technician_lat) : null,
@@ -1137,6 +1185,7 @@ router.get("/:id", verifyUser, async (req, res) => {
         t.phone as technician_phone,
         t.rating as technician_rating,
         t.jobs_completed as technician_jobs_completed,
+        t.documents as technician_documents,
         t.pricing as technician_pricing,
         t.service_costs as technician_service_costs,
         t.latitude as technician_lat,
@@ -1180,6 +1229,7 @@ router.get("/:id", verifyUser, async (req, res) => {
                 name: row.technician_name,
                 phone: row.technician_phone,
                 rating: Number.isFinite(Number(row.technician_rating)) ? Number(row.technician_rating) : 0,
+                avatar_url: resolveTechnicianAvatar(row.technician_documents) || null,
                 completedJobs: Number.isFinite(Number(row.technician_jobs_completed)) ? Number(row.technician_jobs_completed) : 0,
                 location: {
                     lat: Number.isFinite(Number(row.technician_lat)) ? Number(row.technician_lat) : null,

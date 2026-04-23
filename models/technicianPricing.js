@@ -16,6 +16,25 @@ const STORED_TO_ENGINE_SERVICE_TYPE = Object.freeze(
 );
 
 const VALID_NIGHT_TYPES = new Set(["flat", "percentage"]);
+const SUPPORTED_VEHICLE_TYPES = new Set(["bike", "car", "commercial", "ev"]);
+const RESERVED_NESTED_PRICING_KEYS = new Set([
+  "service",
+  "service_name",
+  "service_domain",
+  "serviceType",
+  "service_type",
+  "domain",
+  "vehicle_categories",
+  "vehicle_category",
+  "vehicle_type",
+  "vehicleType",
+  "vehicle_type_pricing",
+  "vehicle_pricing",
+  "towing_vehicle_pricing",
+  "flat_tire_vehicle_pricing",
+  "towing_fleet_types",
+  "metadata",
+]);
 
 const firstPresent = (...values) => {
   for (const value of values) {
@@ -56,16 +75,79 @@ const normalizeStoredVehicleType = (value) => {
   return String(value || "").trim().toLowerCase();
 };
 
+const isPlainObject = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+
+const getDirectVehiclePricingMap = (row) => {
+  if (!isPlainObject(row)) return {};
+
+  return Object.fromEntries(
+    Object.entries(row).filter(([key, value]) => {
+      if (RESERVED_NESTED_PRICING_KEYS.has(key)) return false;
+      const vehicleType = normalizeStoredVehicleType(key);
+      return SUPPORTED_VEHICLE_TYPES.has(vehicleType) && isPlainObject(value);
+    })
+  );
+};
+
+const getNestedVehiclePricingMap = (row) => {
+  if (!isPlainObject(row)) return {};
+  if (isPlainObject(row.towing_vehicle_pricing)) return row.towing_vehicle_pricing;
+  if (isPlainObject(row.flat_tire_vehicle_pricing)) return row.flat_tire_vehicle_pricing;
+  if (isPlainObject(row.vehicle_pricing)) return row.vehicle_pricing;
+  return getDirectVehiclePricingMap(row);
+};
+
+const expandNestedVehiclePricingRows = (row) => {
+  const nestedVehiclePricing = getNestedVehiclePricingMap(row);
+  const nestedKeys = Object.keys(nestedVehiclePricing);
+  if (nestedKeys.length === 0) return [];
+
+  const rawVehicleCategories = Array.isArray(row?.vehicle_categories)
+    ? row.vehicle_categories
+    : nestedKeys;
+
+  const vehicleCategories = rawVehicleCategories
+    .map((vehicleType) => normalizeStoredVehicleType(vehicleType))
+    .filter((vehicleType) => SUPPORTED_VEHICLE_TYPES.has(vehicleType));
+
+  return vehicleCategories
+    .map((vehicleType) => {
+      const vehiclePricing = nestedVehiclePricing[vehicleType];
+      if (!isPlainObject(vehiclePricing)) return null;
+
+      return {
+        ...row,
+        ...vehiclePricing,
+        vehicle_type: vehicleType,
+        vehicle_category: vehicleType,
+      };
+    })
+    .filter(Boolean);
+};
+
 const normalizeRawEntries = (value) => {
   const parsed = safeParseJson(value, value);
   const rows = [];
 
   if (Array.isArray(parsed)) {
-    rows.push(...parsed);
+    parsed.forEach((entry) => {
+      const expandedRows = expandNestedVehiclePricingRows(entry);
+      if (expandedRows.length > 0) {
+        rows.push(...expandedRows);
+      } else {
+        rows.push(entry);
+      }
+    });
   } else if (parsed && typeof parsed === "object") {
     Object.entries(parsed).forEach(([serviceName, config]) => {
       if (config && typeof config === "object") {
-        rows.push({ service_name: serviceName, ...config });
+        const baseRow = { service_name: serviceName, service_domain: serviceName, ...config };
+        const expandedRows = expandNestedVehiclePricingRows(baseRow);
+        if (expandedRows.length > 0) {
+          rows.push(...expandedRows);
+        } else {
+          rows.push(baseRow);
+        }
       } else {
         rows.push({ service_name: serviceName, service_charge: config });
       }
@@ -116,13 +198,27 @@ const normalizeTechnicianPricingEntry = (input) => {
   );
 
   const basePrice = toNullableNumber(
-    firstPresent(row.base_price, row.basePrice, row.service_charge, row.serviceCharge, row.amount, row.price)
+    firstPresent(
+      row.base_price,
+      row.basePrice,
+      row.base_charge,
+      row.baseCharge,
+      row.service_charge,
+      row.serviceCharge,
+      row.amount,
+      row.price
+    )
   );
   const perKmPrice = toNullableNumber(
     firstPresent(row.per_km_price, row.perKmPrice, row.extra_km_charge, row.extraKmCharge)
   );
   const visitCharge = toNullableNumber(
-    firstPresent(row.visit_charge, row.visitCharge, row.base_charge, row.baseCharge)
+    firstPresent(
+      row.visit_charge,
+      row.visitCharge,
+      storedServiceDomain === "towing" ? null : row.base_charge,
+      storedServiceDomain === "towing" ? null : row.baseCharge
+    )
   );
   const serviceCharge = toNullableNumber(
     firstPresent(row.service_charge, row.serviceCharge, row.amount, row.price)

@@ -1105,10 +1105,34 @@ router.patch("/me/profile", verifyTechnician, async (req, res) => {
     const {
       name, phone, address,
       specialties, service_area_range,
-      vehicle_types, experience
+      vehicle_types, experience,
+      profile_photo,
+      documents
     } = req.body;
 
     const pool = await db.getPool();
+    const [existingRows] = await pool.query(
+      "SELECT * FROM technicians WHERE id = ? LIMIT 1",
+      [req.technicianId]
+    );
+
+    if (existingRows.length === 0) {
+      return res.status(404).json({ error: "Technician not found." });
+    }
+
+    const existingRow = existingRows[0];
+    const existingDocuments = sanitizeTechnicianDocuments(existingRow.documents);
+    const incomingDocuments = parseObject(documents);
+    const nextDocuments = { ...existingDocuments };
+
+    for (const key of KNOWN_DOCUMENT_KEYS) {
+      if (incomingDocuments[key] !== undefined) {
+        nextDocuments[key] = normalizeUploadResourcePath(incomingDocuments[key]);
+      }
+    }
+    if (profile_photo !== undefined) {
+      nextDocuments.profile_photo = normalizeUploadResourcePath(profile_photo);
+    }
 
     // Prepare JSON fields
     const specialtiesJson = specialties ? JSON.stringify(specialties) : undefined;
@@ -1125,6 +1149,10 @@ router.patch("/me/profile", verifyTechnician, async (req, res) => {
     if (vehicleTypesJson) { fields.push("vehicle_types = ?"); values.push(vehicleTypesJson); }
     if (service_area_range !== undefined) { fields.push("service_area_range = ?"); values.push(Number(service_area_range)); }
     if (experience !== undefined) { fields.push("experience = ?"); values.push(Number(experience)); }
+    if (documents !== undefined || profile_photo !== undefined) {
+      fields.push("documents = ?");
+      values.push(JSON.stringify(nextDocuments));
+    }
 
     if (fields.length === 0) {
       return res.json({ message: "No changes to update" });
@@ -1137,7 +1165,16 @@ router.patch("/me/profile", verifyTechnician, async (req, res) => {
       values
     );
 
-    return res.json({ success: true, message: "Profile updated successfully" });
+    const [updatedRows] = await pool.query(
+      "SELECT * FROM technicians WHERE id = ? LIMIT 1",
+      [req.technicianId]
+    );
+
+    return res.json({
+      success: true,
+      message: "Profile updated successfully",
+      technician: updatedRows[0] ? rowToTechnician(updatedRows[0]) : null,
+    });
   } catch (err) {
     console.error("Profile update error:", err);
     return res.status(500).json({ error: "Failed to update profile" });
