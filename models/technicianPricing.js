@@ -33,6 +33,8 @@ const RESERVED_NESTED_PRICING_KEYS = new Set([
   "towing_vehicle_pricing",
   "flat_tire_vehicle_pricing",
   "towing_fleet_types",
+  "default_tow_truck_type",
+  "fleet_pricing",
   "metadata",
 ]);
 
@@ -345,6 +347,15 @@ export function mapStoredPricingRowToTechnicianPricing(row, requestedServiceType
       ),
       night_charge: nightCharge ?? 0,
       night_type: nightType,
+      tow_truck_types: Array.isArray(metadata?.tow_truck_types) ? metadata.tow_truck_types : [],
+      default_tow_truck_type: firstPresent(
+        metadata?.default_tow_truck_type,
+        metadata?.defaultTowTruckType
+      ),
+      fleet_pricing:
+        metadata?.fleet_pricing && typeof metadata.fleet_pricing === "object"
+          ? metadata.fleet_pricing
+          : null,
       vehicle_type: normalizePricingVehicleType(
         firstPresent(row?.vehicle_type, metadata?.vehicle_type, metadata?.vehicleType, metadata?.vehicle)
       ),
@@ -357,6 +368,19 @@ export function mapStoredPricingRowToTechnicianPricing(row, requestedServiceType
     ),
     visit_charge: toNullableNumber(
       firstPresent(row?.visit_charge, metadata?.visit_charge, metadata?.visitCharge, metadata?.base_charge, metadata?.baseCharge)
+    ),
+    free_distance: toNullableNumber(
+      firstPresent(row?.free_km, metadata?.free_km, metadata?.freeKm, metadata?.free_distance, metadata?.freeDistance)
+    ),
+    extra_km_charge: toNullableNumber(
+      firstPresent(
+        row?.extra_km_charge,
+        metadata?.extra_km_charge,
+        metadata?.extraKmCharge,
+        row?.per_km_price,
+        metadata?.per_km_price,
+        metadata?.perKmPrice
+      )
     ),
     night_charge: nightCharge ?? 0,
     night_type: nightType,
