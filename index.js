@@ -14,6 +14,7 @@ import publicRouter from "./routes/public.js";
 import uploadRouter from "./routes/upload.js";
 import vehiclesRouter from "./routes/vehicles.js";
 import paymentsRouter, { razorpayWebhookHandler } from "./routes/payments.js";
+import pricingRouter from "./routes/pricing.js";
 import chatbotRouter from "./routes/chatbot.js";
 import adminExtendedDashboardRouter from "./routes/adminExtended.dashboard.js";
 import adminExtendedRequestsRouter from "./routes/adminExtended.requests.js";
@@ -237,6 +238,7 @@ function createApp() {
   app.use("/api/requests", serviceRequestsRouter);
   app.use("/api/public", publicRouter);
   app.use("/api/payments", paymentsRouter);
+  app.use("/api/pricing", pricingRouter);
   app.use("/api/vehicles", vehiclesRouter);
   app.use("/api/chatbot", chatbotRouter);
   app.use("/api/admin-extended", adminExtendedDashboardRouter);

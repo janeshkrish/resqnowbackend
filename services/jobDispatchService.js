@@ -10,6 +10,7 @@ import {
 } from "./serviceNormalization.js";
 import { estimateTechnicianPayoutAsync } from "./pricingEstimator.js";
 import { markTechnicianReserved } from "./technicianStateService.js";
+import { isTowingServiceType } from "./towingQuoteService.js";
 
 
 /**
@@ -30,6 +31,48 @@ const safeParse = (str) => {
 const toPositiveMoney = (value) => {
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const safeParseObject = (value) => {
+    try {
+        const parsed = typeof value === "string" ? JSON.parse(value) : value;
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
+};
+
+const hasTowingRouteData = (row) =>
+    isTowingServiceType(row?.service_type) ||
+    row?.drop_address != null ||
+    row?.route_distance_km != null ||
+    row?.routeDistanceKm != null;
+
+const buildTowingDispatchFields = (row = {}) => {
+    const dropAddress = row.dropAddress || row.drop_address || row?.dropLocation?.address || "";
+    const dropLat = Number(row.drop_latitude ?? row.dropLat ?? row?.dropLocation?.lat);
+    const dropLng = Number(row.drop_longitude ?? row.dropLng ?? row?.dropLocation?.lng);
+    const distance = row.routeDistanceKm ?? row.route_distance_km;
+    const duration = row.estimatedDuration ?? row.estimated_duration;
+    const pricingBreakdown =
+        row.pricingBreakdown ||
+        safeParseObject(row.pricing_breakdown_json) ||
+        safeParseObject(row.pricing_breakdown);
+
+    if (!dropAddress && distance == null && !pricingBreakdown) return {};
+
+    return {
+        dropLocation: {
+            lat: Number.isFinite(dropLat) ? dropLat : null,
+            lng: Number.isFinite(dropLng) ? dropLng : null,
+            address: dropAddress,
+        },
+        dropAddress: dropAddress || null,
+        routeDistanceKm: distance == null ? null : Number(distance),
+        estimatedDuration: duration == null ? null : Number(duration),
+        pricingBreakdown,
+        finalEstimatedPrice: row.finalEstimatedPrice ?? row.final_price ?? row.estimated_price ?? null,
+    };
 };
 
 const canonicalizeDomain = canonicalizeServiceDomain;
@@ -259,11 +302,17 @@ export const jobDispatchService = {
 
         // 2. Send WebSocket Alerts
         for (const t of freshTechnicians) {
-            const estimatedAmount = await estimateTechnicianPayoutAsync({
-                service_type: jobRequest.service_type,
-                vehicle_type: jobRequest.vehicle_type
-            }, t, { technicianId: t.id });
+            const storedTowingAmount = hasTowingRouteData(jobRequest)
+                ? toPositiveMoney(jobRequest.amount ?? jobRequest.service_charge)
+                : null;
+            const estimatedAmount = storedTowingAmount == null
+                ? await estimateTechnicianPayoutAsync({
+                    service_type: jobRequest.service_type,
+                    vehicle_type: jobRequest.vehicle_type
+                }, t, { technicianId: t.id })
+                : null;
             const resolvedOfferAmount =
+                storedTowingAmount ??
                 toPositiveMoney(estimatedAmount) ??
                 0;
             const offerPayload = {
@@ -273,6 +322,7 @@ export const jobDispatchService = {
                 location: { lat: jobRequest.location_lat, lng: jobRequest.location_lng },
                 address: jobRequest.address,
                 customerName: jobRequest.contact_name || "Valued Customer",
+                ...buildTowingDispatchFields(jobRequest),
                 amount: resolvedOfferAmount,
                 priceAmount: resolvedOfferAmount,
                 distance: t.distanceText,
@@ -355,15 +405,21 @@ export const jobDispatchService = {
                 return { success: false, code: "technician_not_found", reason: "Technician not found" };
             }
             tech = techRows[0];
-            const estimatedAmount = await estimateTechnicianPayoutAsync(
-                {
-                    service_type: sourceJob?.service_type,
-                    vehicle_type: sourceJob?.vehicle_type
-                },
-                tech,
-                { technicianId }
-            );
+            const storedTowingAmount = hasTowingRouteData(sourceJob)
+                ? toPositiveMoney(sourceJob?.amount ?? sourceJob?.service_charge)
+                : null;
+            const estimatedAmount = storedTowingAmount == null
+                ? await estimateTechnicianPayoutAsync(
+                    {
+                        service_type: sourceJob?.service_type,
+                        vehicle_type: sourceJob?.vehicle_type
+                    },
+                    tech,
+                    { technicianId }
+                )
+                : null;
             assignedAmount =
+                storedTowingAmount ??
                 toPositiveMoney(estimatedAmount) ??
                 toPositiveMoney(sourceJob?.amount) ??
                 toPositiveMoney(sourceJob?.service_charge);
@@ -560,6 +616,7 @@ export const jobDispatchService = {
                     locationDistance,
                     priceAmount: assignedAmount ?? 0,
                     amount: assignedAmount ?? 0,
+                    ...buildTowingDispatchFields(sourceJob),
                     location: {
                         lat: sourceJob?.location_lat,
                         lng: sourceJob?.location_lng,

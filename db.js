@@ -315,6 +315,15 @@ CREATE TABLE IF NOT EXISTS service_requests (
   description TEXT,
   location_lat FLOAT,
   location_lng FLOAT,
+  drop_address VARCHAR(512),
+  drop_latitude DECIMAL(10, 8),
+  drop_longitude DECIMAL(11, 8),
+  route_distance_km DECIMAL(10, 2),
+  estimated_duration INT,
+  route_metadata_json JSON,
+  pricing_breakdown_json JSON,
+  estimated_price DECIMAL(10, 2),
+  final_price DECIMAL(10, 2),
   amount DECIMAL(10, 2) DEFAULT 0.00,
   applied_coupon_code VARCHAR(64),
   applied_discount_percent DECIMAL(8,6) DEFAULT 0.000000,
@@ -1256,6 +1265,7 @@ CREATE TABLE IF NOT EXISTS platform_pricing_config (
   pay_now_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.000000,
   default_service_amount DECIMAL(12,2) NOT NULL DEFAULT 500.00,
   service_base_prices JSON,
+  towing_pricing_rules JSON,
   subscription_plans JSON,
   is_active BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1279,6 +1289,7 @@ export async function ensurePlatformPricingConfigTable() {
   await addColumnIfNotExists(p, 'platform_pricing_config', 'pay_now_discount_percent DECIMAL(8,6) NOT NULL DEFAULT 0.000000');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'default_service_amount DECIMAL(12,2) NOT NULL DEFAULT 500.00');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'service_base_prices JSON');
+  await addColumnIfNotExists(p, 'platform_pricing_config', 'towing_pricing_rules JSON');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'subscription_plans JSON');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'is_active BOOLEAN DEFAULT TRUE');
   await addColumnIfNotExists(p, 'platform_pricing_config', 'updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
@@ -1323,6 +1334,18 @@ export async function updateServiceRequestsTableSchema() {
   await addColumnIfNotExists(p, 'service_requests', 'address VARCHAR(512)');
   await addColumnIfNotExists(p, 'service_requests', 'location_lat FLOAT');
   await addColumnIfNotExists(p, 'service_requests', 'location_lng FLOAT');
+  await addColumnIfNotExists(p, 'service_requests', 'drop_address VARCHAR(512)');
+  await addColumnIfNotExists(p, 'service_requests', 'drop_latitude DECIMAL(10, 8)');
+  await addColumnIfNotExists(p, 'service_requests', 'drop_longitude DECIMAL(11, 8)');
+  await addColumnIfNotExists(p, 'service_requests', 'route_distance_km DECIMAL(10, 2)');
+  await addColumnIfNotExists(p, 'service_requests', 'estimated_duration INT');
+  await addColumnIfNotExists(p, 'service_requests', 'route_metadata_json JSON');
+  await addColumnIfNotExists(p, 'service_requests', 'pricing_breakdown_json JSON');
+  await addColumnIfNotExists(p, 'service_requests', 'estimated_price DECIMAL(10, 2)');
+  await addColumnIfNotExists(p, 'service_requests', 'final_price DECIMAL(10, 2)');
+  await addColumnIfNotExists(p, 'service_requests', 'pricing_override_json JSON');
+  await addColumnIfNotExists(p, 'service_requests', 'pricing_overridden_by VARCHAR(255)');
+  await addColumnIfNotExists(p, 'service_requests', 'pricing_overridden_at TIMESTAMP NULL');
   await addColumnIfNotExists(p, 'service_requests', 'started_at TIMESTAMP NULL');
   await addColumnIfNotExists(p, 'service_requests', 'completed_at TIMESTAMP NULL');
   await addColumnIfNotExists(p, 'service_requests', 'cancelled_at TIMESTAMP NULL');
@@ -1363,6 +1386,7 @@ export async function updateServiceRequestsTableSchema() {
   await addIndexIfNotExists(p, "service_requests", "idx_service_requests_technician_status", "technician_id, status");
   await addIndexIfNotExists(p, "service_requests", "idx_service_requests_created_at", "created_at");
   await addIndexIfNotExists(p, "service_requests", "idx_service_requests_updated_at", "updated_at");
+  await addIndexIfNotExists(p, "service_requests", "idx_service_requests_towing_route", "service_type, route_distance_km");
   await addIndexIfNotExists(p, "service_requests", "idx_service_requests_assigned_vehicle", "assigned_vehicle_id");
   await addIndexIfNotExists(p, "service_requests", "idx_service_requests_assigned_employee", "assigned_employee_id");
 }

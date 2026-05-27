@@ -84,12 +84,49 @@ function canonicalizeRequestStatus(value) {
   return normalized || "pending";
 }
 
+const safeParseObject = (value) => {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const toPositiveMoney = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round((parsed + Number.EPSILON) * 100) / 100 : null;
+};
+
 function mapRequestRow(row) {
+  const pricingBreakdown = safeParseObject(row.pricing_breakdown_json);
   return {
     requestId: row.request_id,
     user: row.user_name,
     issueType: row.issue_type,
     location: row.location,
+    pickupLocation: row.location,
+    dropLocation: row.drop_location || null,
+    dropLatitude: row.drop_latitude == null ? null : Number(row.drop_latitude),
+    dropLongitude: row.drop_longitude == null ? null : Number(row.drop_longitude),
+    routeDistanceKm: row.route_distance_km == null ? null : Number(row.route_distance_km),
+    estimatedDuration: row.estimated_duration == null ? null : Number(row.estimated_duration),
+    estimatedPrice: row.estimated_price == null ? null : Number(row.estimated_price),
+    finalPrice: row.final_price == null ? null : Number(row.final_price),
+    amount: row.amount == null ? null : Number(row.amount),
+    pricingBreakdown,
+    pricingFactors: pricingBreakdown
+      ? {
+          vehicleMultiplier: pricingBreakdown.vehicle_multiplier,
+          surgeMultiplier: pricingBreakdown.surge_multiplier,
+          weatherFactor: pricingBreakdown.weather_factor,
+          highwayFactor: pricingBreakdown.highway_factor,
+          emergencyFactor: pricingBreakdown.emergency_factor,
+          peakHour: pricingBreakdown.peak_hour,
+          activeDemandNearby: pricingBreakdown.active_demand_nearby,
+          activeMechanicsNearby: pricingBreakdown.active_mechanics_nearby,
+        }
+      : null,
     assignedTechnician: row.technician_name,
     status: canonicalizeRequestStatus(row.status),
     priority: row.priority,
@@ -159,6 +196,15 @@ export async function getRequests(req, res) {
          COALESCE(u.full_name, CONCAT('User #', sr.user_id)) AS user_name,
          sr.service_type AS issue_type,
          sr.address AS location,
+         sr.drop_address AS drop_location,
+         sr.drop_latitude,
+         sr.drop_longitude,
+         sr.route_distance_km,
+         sr.estimated_duration,
+         sr.pricing_breakdown_json,
+         sr.estimated_price,
+         sr.final_price,
+         sr.amount,
          COALESCE(t.name, 'Unassigned') AS technician_name,
          sr.status,
          CASE WHEN hp.request_id IS NULL THEN 'Normal' ELSE 'High' END AS priority,
@@ -459,6 +505,125 @@ export async function closeRequest(req, res) {
     console.error("[admin.requests.close] failed:", error?.message || error);
     const statusCode = Number(error?.statusCode) || 500;
     return res.status(statusCode).json({ error: error?.message || "Failed to close request." });
+  }
+}
+
+export async function overrideRequestPricing(req, res) {
+  try {
+    const requestId = toPositiveInt(req.body?.requestId ?? req.body?.request_id, 0, {
+      min: 1,
+      max: Number.MAX_SAFE_INTEGER,
+    });
+    const baseAmount = toPositiveMoney(req.body?.baseAmount ?? req.body?.amount);
+    const finalPrice = toPositiveMoney(req.body?.finalPrice ?? req.body?.final_price ?? req.body?.estimatedPrice);
+    const reason = String(req.body?.reason || req.body?.note || "").trim();
+
+    if (!requestId) {
+      return res.status(400).json({ error: "requestId is required." });
+    }
+    if (baseAmount == null || baseAmount > 1000000) {
+      return res.status(400).json({ error: "A valid baseAmount is required." });
+    }
+    if (reason.length > 1000) {
+      return res.status(400).json({ error: "reason must be 1000 characters or fewer." });
+    }
+
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT id, user_id, technician_id, status, payment_status, pricing_breakdown_json
+       FROM service_requests
+       WHERE id = ?
+       LIMIT 1`,
+      [requestId]
+    );
+    const requestRow = rows?.[0] || null;
+    if (!requestRow) {
+      return res.status(404).json({ error: "Request not found." });
+    }
+
+    const paidStatus = new Set(["paid", "completed"]);
+    if (
+      paidStatus.has(String(requestRow.status || "").toLowerCase()) ||
+      paidStatus.has(String(requestRow.payment_status || "").toLowerCase())
+    ) {
+      return res.status(409).json({ error: "Cannot override pricing after payment is complete." });
+    }
+
+    const existingBreakdown = safeParseObject(requestRow.pricing_breakdown_json) || {};
+    const override = {
+      base_amount: baseAmount,
+      final_estimated_price: finalPrice ?? existingBreakdown.final_estimated_price ?? null,
+      admin_override: true,
+      override_reason: reason || null,
+      overridden_by: resolveAdminId(req),
+      overridden_at: new Date().toISOString(),
+    };
+    const mergedBreakdown = {
+      ...existingBreakdown,
+      ...override,
+    };
+
+    await pool.execute(
+      `UPDATE service_requests
+       SET amount = ?,
+           estimated_price = COALESCE(?, estimated_price),
+           final_price = COALESCE(?, final_price),
+           pricing_breakdown_json = ?,
+           pricing_override_json = ?,
+           pricing_overridden_by = ?,
+           pricing_overridden_at = NOW(),
+           updated_at = NOW()
+       WHERE id = ?`,
+      [
+        baseAmount,
+        finalPrice,
+        finalPrice,
+        JSON.stringify(mergedBreakdown),
+        JSON.stringify(override),
+        resolveAdminId(req),
+        requestId,
+      ]
+    );
+
+    await logAction({
+      pool,
+      adminId: resolveAdminId(req),
+      actionType: "overrideRequestPricing",
+      targetId: requestId,
+      metadata: override,
+    });
+
+    socketService.notifyUser(requestRow.user_id, "request:pricing_updated", {
+      requestId,
+      amount: baseAmount,
+      finalPrice,
+      pricingBreakdown: mergedBreakdown,
+    });
+    if (requestRow.technician_id) {
+      socketService.notifyTechnician(requestRow.technician_id, "request:pricing_updated", {
+        requestId,
+        amount: baseAmount,
+        finalPrice,
+        pricingBreakdown: mergedBreakdown,
+      });
+    }
+    socketService.broadcast("admin:request_pricing_updated", {
+      requestId,
+      amount: baseAmount,
+      finalPrice,
+      at: new Date().toISOString(),
+    });
+
+    return res.json({
+      success: true,
+      requestId,
+      amount: baseAmount,
+      finalPrice,
+      pricingBreakdown: mergedBreakdown,
+    });
+  } catch (error) {
+    console.error("[admin.requests.pricingOverride] failed:", error?.message || error);
+    return res.status(500).json({ error: "Failed to override pricing." });
   }
 }
 

@@ -26,6 +26,7 @@ import {
   getTechnicianWithdrawalRequests,
 } from "../services/marketplaceWithdrawalService.js";
 import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPaymentService.js";
+import { isTowingServiceType } from "../services/towingQuoteService.js";
 import {
   markTechnicianHeartbeat,
   markTechnicianLogin,
@@ -250,6 +251,48 @@ const roundMoney = (value) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return 0;
   return Math.round((parsed + Number.EPSILON) * 100) / 100;
+};
+
+const hasTowingRouteData = (row) =>
+  isTowingServiceType(row?.service_type) ||
+  row?.drop_address != null ||
+  row?.route_distance_km != null;
+
+const toNullableObject = (value) => {
+  const parsed = parseObject(value);
+  return Object.keys(parsed).length > 0 ? parsed : null;
+};
+
+const buildTechnicianRouteFields = (row = {}) => {
+  const dropLatitude = toOptionalNumber(row.drop_latitude ?? row.dropLatitude);
+  const dropLongitude = toOptionalNumber(row.drop_longitude ?? row.dropLongitude);
+  const dropAddress = toOptionalString(row.drop_address ?? row.dropAddress);
+  const routeDistanceKm = toOptionalNumber(row.route_distance_km ?? row.routeDistanceKm);
+  const estimatedDuration = toOptionalNumber(row.estimated_duration ?? row.estimatedDuration);
+  const pricingBreakdown = toNullableObject(row.pricing_breakdown_json ?? row.pricingBreakdown);
+
+  return {
+    drop_address: dropAddress,
+    dropAddress,
+    drop_latitude: dropLatitude,
+    drop_longitude: dropLongitude,
+    dropLocation: dropAddress || dropLatitude != null || dropLongitude != null
+      ? {
+          lat: dropLatitude,
+          lng: dropLongitude,
+          address: dropAddress || "",
+        }
+      : null,
+    route_distance_km: routeDistanceKm,
+    routeDistanceKm,
+    estimated_duration: estimatedDuration,
+    estimatedDuration,
+    routeMetadata: toNullableObject(row.route_metadata_json ?? row.routeMetadata),
+    pricingBreakdown,
+    pricing_breakdown: pricingBreakdown,
+    estimated_price: toOptionalNumber(row.estimated_price),
+    final_price: toOptionalNumber(row.final_price),
+  };
 };
 
 async function fetchTechnicianFinancialSnapshot(pool, technicianId) {
@@ -516,6 +559,11 @@ function resolveBroadcastTechnicianStatus(row) {
 }
 
 async function resolveTechnicianJobAmount(jobRow, technicianProfile, _pricingConfig = null) {
+  if (hasTowingRouteData(jobRow)) {
+    const stored = toPositiveMoney(jobRow?.amount ?? jobRow?.service_charge);
+    if (stored != null) return stored;
+  }
+
   const techAmount = await estimateTechnicianPayoutAsync(
     { service_type: jobRow?.service_type, vehicle_type: jobRow?.vehicle_type },
     technicianProfile || null,
@@ -574,11 +622,12 @@ function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
   const phoneNumber = toOptionalPhone(jobRow.contact_phone) || toOptionalPhone(jobRow.user_phone);
   const pickupLatitude = toOptionalNumber(jobRow.customer_location_lat ?? jobRow.location_lat);
   const pickupLongitude = toOptionalNumber(jobRow.customer_location_lng ?? jobRow.location_lng);
-  const destinationLatitude = toOptionalNumber(jobRow.destination_lat ?? jobRow.destinationLatitude);
-  const destinationLongitude = toOptionalNumber(jobRow.destination_lng ?? jobRow.destinationLongitude);
+  const destinationLatitude = toOptionalNumber(jobRow.drop_latitude ?? jobRow.destination_lat ?? jobRow.destinationLatitude);
+  const destinationLongitude = toOptionalNumber(jobRow.drop_longitude ?? jobRow.destination_lng ?? jobRow.destinationLongitude);
   const address = toOptionalString(jobRow.address);
   const status = toOptionalString(jobRow.status);
   const description = toOptionalString(jobRow.description);
+  const routeFields = buildTechnicianRouteFields(jobRow);
   const paymentDetails = buildServiceRequestPaymentDetails({
     requestRow: jobRow,
     paymentRow,
@@ -597,9 +646,11 @@ function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
     pickupLongitude,
     destinationLatitude,
     destinationLongitude,
+    destinationAddress: routeFields.dropAddress,
     jobStatus: status,
     amount,
     ...paymentDetails,
+    ...routeFields,
     address,
     description,
     status,
@@ -615,6 +666,7 @@ function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
       lng: pickupLongitude,
       address,
     },
+    destination: routeFields.dropLocation,
     user: {
       name: customerName,
       phone: phoneNumber,
@@ -788,7 +840,8 @@ router.get("/requests", verifyTechnician, async (req, res) => {
         contact_phone: r.contact_phone || r.user_phone || null,
         description: r.description,
         location_lat: r.location_lat,
-        location_lng: r.location_lng
+        location_lng: r.location_lng,
+        ...buildTechnicianRouteFields(r)
       };
     }));
 
@@ -1827,7 +1880,8 @@ router.get('/jobs/history', verifyTechnician, async (req, res) => {
         const resolvedAmount = await resolveTechnicianJobAmount(row, technicianProfile, pricingConfig);
         return {
           ...row,
-          amount: resolvedAmount
+          amount: resolvedAmount,
+          ...buildTechnicianRouteFields(row)
         };
       })
     );

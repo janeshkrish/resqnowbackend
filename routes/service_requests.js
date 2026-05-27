@@ -17,6 +17,7 @@ import { estimateRequestAmount, estimateRequestAmountAsync, estimateTechnicianPa
 import { computePaymentAmounts, getPlatformPricingConfig } from "../services/platformPricing.js";
 import { buildMarketplacePricingSnapshot } from "../services/marketplacePaymentService.js";
 import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPaymentService.js";
+import { buildTowingQuote, isTowingServiceType, normalizeTowingQuoteError } from "../services/towingQuoteService.js";
 import {
     PAYMENT_LEDGER_STATUS,
     PAYMENT_TO_TECHNICIAN_STATUS,
@@ -94,7 +95,54 @@ const toPositiveMoney = (value) => {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const safeParseObject = (value) => {
+    if (!value) return null;
+    try {
+        const parsed = typeof value === "string" ? JSON.parse(value) : value;
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
+};
+
+const hasTowingRouteData = (row) =>
+    isTowingServiceType(row?.service_type) ||
+    row?.drop_address != null ||
+    row?.route_distance_km != null;
+
+const buildDropLocationPayload = (row) => {
+    const lat = Number(row?.drop_latitude);
+    const lng = Number(row?.drop_longitude);
+    if (!row?.drop_address && !Number.isFinite(lat) && !Number.isFinite(lng)) return null;
+    return {
+        lat: Number.isFinite(lat) ? lat : null,
+        lng: Number.isFinite(lng) ? lng : null,
+        address: row?.drop_address || "",
+    };
+};
+
+const buildTowingRouteResponseFields = (row) => ({
+    drop_address: row?.drop_address || null,
+    dropLocation: buildDropLocationPayload(row),
+    drop_latitude: row?.drop_latitude ?? null,
+    drop_longitude: row?.drop_longitude ?? null,
+    route_distance_km: row?.route_distance_km ?? null,
+    routeDistanceKm: row?.route_distance_km == null ? null : Number(row.route_distance_km),
+    estimated_duration: row?.estimated_duration ?? null,
+    estimatedDuration: row?.estimated_duration == null ? null : Number(row.estimated_duration),
+    route_metadata: safeParseObject(row?.route_metadata_json),
+    pricing_breakdown: safeParseObject(row?.pricing_breakdown_json),
+    pricingBreakdown: safeParseObject(row?.pricing_breakdown_json),
+    estimated_price: row?.estimated_price ?? null,
+    final_price: row?.final_price ?? null,
+});
+
 async function resolveRequestBaseAmount(requestRow, pricingConfig = null) {
+    if (hasTowingRouteData(requestRow)) {
+        const stored = toPositiveMoney(requestRow?.amount ?? requestRow?.service_charge);
+        if (stored != null) return stored;
+    }
+
     const technicianId = Number(requestRow?.technician_id);
     let technicianProfile = null;
 
@@ -273,6 +321,7 @@ router.get("/", verifyUser, async (req, res) => {
             description: row.description,
             location_lat: row.location_lat,
             location_lng: row.location_lng,
+            ...buildTowingRouteResponseFields(row),
             technician: row.technician_id ? {
                 id: row.technician_id,
                 name: row.technician_name,
@@ -312,6 +361,15 @@ router.post("/", verifyUser, async (req, res) => {
             description,
             location_lat,
             location_lng,
+            dropLocation,
+            dropAddress,
+            drop_address,
+            dropLat,
+            dropLatitude,
+            drop_latitude,
+            dropLng,
+            dropLongitude,
+            drop_longitude,
             technician_id
         } = req.body;
 
@@ -351,6 +409,7 @@ router.post("/", verifyUser, async (req, res) => {
         let directTechnicianId = hasDirectTechnician ? Number(technician_id) : null;
         let selectedTechnician = null;
         let directDistanceKm = null;
+        let towingQuote = null;
 
         if (hasDirectTechnician) {
             if (!Number.isFinite(directTechnicianId)) {
@@ -402,7 +461,35 @@ router.post("/", verifyUser, async (req, res) => {
         }
 
         let initialAmount = null;
-        if (hasDirectTechnician && selectedTechnician) {
+        if (inferredDomain === "towing") {
+            const incomingDropAddress = dropAddress || dropLocation || drop_address;
+            const incomingDropLat = dropLat ?? dropLatitude ?? drop_latitude;
+            const incomingDropLng = dropLng ?? dropLongitude ?? drop_longitude;
+            try {
+                towingQuote = await buildTowingQuote({
+                    pool,
+                    serviceType: canonicalServiceType,
+                    vehicleType: inferredVehicle,
+                    vehicleModel: vehicle_model,
+                    pickupAddress: address,
+                    pickupLat: location_lat,
+                    pickupLng: location_lng,
+                    dropAddress: incomingDropAddress,
+                    dropLat: incomingDropLat,
+                    dropLng: incomingDropLng,
+                    clientDistanceKm: req.body.distanceKm ?? req.body.distance_km ?? req.body.route_distance_km,
+                    technicianId: directTechnicianId,
+                    paymentMode: req.body.paymentMode || req.body.payment_mode || "upi",
+                    emergency: req.body.emergency || req.body.isEmergency,
+                });
+                initialAmount = towingQuote.base_amount;
+            } catch (quoteErr) {
+                const normalized = normalizeTowingQuoteError(quoteErr);
+                return res.status(normalized.statusCode).json(normalized.payload);
+            }
+        }
+
+        if (initialAmount == null && hasDirectTechnician && selectedTechnician) {
             initialAmount = await estimateRequestAmountAsync(
                 { service_type: canonicalServiceType, vehicle_type: inferredVehicle },
                 selectedTechnician
@@ -416,17 +503,24 @@ router.post("/", verifyUser, async (req, res) => {
         }
 
         const initialStatus = hasDirectTechnician ? "assigned" : "pending";
+        const pickupAddressForDb = towingQuote?.pickup?.address || address;
+        const routeDistanceKm = towingQuote?.distance_km ?? null;
+        const estimatedDuration = towingQuote?.estimated_duration ?? null;
+        const routeMetadataJson = towingQuote ? JSON.stringify(towingQuote.route_metadata || {}) : null;
+        const pricingBreakdownJson = towingQuote ? JSON.stringify(towingQuote.pricing_breakdown || {}) : null;
+        const estimatedPrice = towingQuote?.final_estimated_price ?? null;
+        const finalPrice = towingQuote?.final_estimated_price ?? null;
 
         const [result] = await pool.execute(
             `INSERT INTO service_requests 
-      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, technician_id, status, amount) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_id, status, amount) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 userId,
                 canonicalServiceType,
                 inferredVehicle || null,
                 vehicle_model || null,
-                address,
+                pickupAddressForDb,
                 req.body.contact_name || null,
                 req.body.contact_email || null,
                 contact_phone || null,
@@ -435,6 +529,15 @@ router.post("/", verifyUser, async (req, res) => {
                 location_lng || null,
                 location_lat || null,
                 location_lng || null,
+                towingQuote?.drop?.address || null,
+                towingQuote?.drop?.lat ?? null,
+                towingQuote?.drop?.lng ?? null,
+                routeDistanceKm,
+                estimatedDuration,
+                routeMetadataJson,
+                pricingBreakdownJson,
+                estimatedPrice,
+                finalPrice,
                 directTechnicianId,
                 initialStatus,
                 initialAmount
@@ -455,6 +558,21 @@ router.post("/", verifyUser, async (req, res) => {
             `User #${userId}`
         ).trim();
         const adminNotificationEmail = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+        const dispatchTowingFields = towingQuote
+            ? {
+                dropLocation: {
+                    lat: towingQuote.drop.lat,
+                    lng: towingQuote.drop.lng,
+                    address: towingQuote.drop.address,
+                },
+                dropAddress: towingQuote.drop.address,
+                routeDistanceKm: towingQuote.distance_km,
+                estimatedDuration: towingQuote.estimated_duration,
+                routeMetadata: towingQuote.route_metadata,
+                pricingBreakdown: towingQuote.pricing_breakdown,
+                finalEstimatedPrice: towingQuote.final_estimated_price,
+            }
+            : {};
 
         if (adminNotificationEmail) {
             void sendEventEmail("ADMIN_NEW_USER_REQUEST", {
@@ -492,9 +610,16 @@ router.post("/", verifyUser, async (req, res) => {
                     location_lng,
                     service_type: canonicalServiceType,
                     vehicle_type: inferredVehicle,
-                    address,
+                    address: pickupAddressForDb,
                     amount: initialAmount,
-                    contact_name: req.body.contact_name || null
+                    contact_name: req.body.contact_name || null,
+                    drop_address: towingQuote?.drop?.address || null,
+                    drop_latitude: towingQuote?.drop?.lat ?? null,
+                    drop_longitude: towingQuote?.drop?.lng ?? null,
+                    route_distance_km: routeDistanceKm,
+                    estimated_duration: estimatedDuration,
+                    pricing_breakdown_json: pricingBreakdownJson,
+                    ...dispatchTowingFields
                 };
 
                 const candidates = await jobDispatchService.findTopTechnicians(fallbackJobRequest);
@@ -526,9 +651,10 @@ router.post("/", verifyUser, async (req, res) => {
                         location: {
                             lat: location_lat,
                             lng: location_lng,
-                            address
+                            address: pickupAddressForDb
                         },
-                        address,
+                        address: pickupAddressForDb,
+                        ...dispatchTowingFields,
                         amount: initialAmount || 0,
                         priceAmount: initialAmount || 0
                     };
@@ -580,6 +706,9 @@ router.post("/", verifyUser, async (req, res) => {
             canonical_service_type: canonicalServiceType,
             status: initialStatus,
             technician_id: directTechnicianId,
+            amount: initialAmount,
+            ...dispatchTowingFields,
+            towingQuote,
             message: hasDirectTechnician
                 ? "Request created and assigned. Technician has been notified."
                 : "Request created. Dispatch queued for nearby technicians...",
@@ -679,6 +808,15 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 sr.service_type,
                 sr.vehicle_type,
                 sr.address,
+                sr.drop_address,
+                sr.drop_latitude,
+                sr.drop_longitude,
+                sr.route_distance_km,
+                sr.estimated_duration,
+                sr.route_metadata_json,
+                sr.pricing_breakdown_json,
+                sr.estimated_price,
+                sr.final_price,
                 sr.contact_name,
                 sr.location_lat,
                 sr.location_lng,
@@ -715,7 +853,8 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
             },
             { technicianId }
         );
-        const resolvedOfferAmount = toPositiveMoney(estimatedAmount) ?? 0;
+        const storedTowingAmount = hasTowingRouteData(row) ? toPositiveMoney(row.amount) : null;
+        const resolvedOfferAmount = storedTowingAmount ?? toPositiveMoney(estimatedAmount) ?? toPositiveMoney(row.amount) ?? 0;
         const normalizedStatus = normalizeStatus(row?.status) || String(row?.status || "").trim().toLowerCase();
         const offerStatus = String(row?.offer_status || "").trim().toLowerCase();
         const assignedTechnicianId = row?.technician_id == null ? null : String(row.technician_id);
@@ -779,6 +918,7 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 },
                 location_lat: Number.isFinite(customerLat) ? customerLat : null,
                 location_lng: Number.isFinite(customerLng) ? customerLng : null,
+                ...buildTowingRouteResponseFields(row),
                 distance: distanceKm,
                 locationDistance: distanceKm != null ? `${distanceKm.toFixed(1)} km` : "Nearby",
                 amount: resolvedOfferAmount,
@@ -864,10 +1004,12 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             if (nextMatch) {
                 newTechId = nextMatch.id;
                 newStatus = 'assigned';
-                reassignedAmount = await estimateRequestAmountAsync(
-                    { service_type: request.service_type, vehicle_type: request.vehicle_type },
-                    nextMatch
-                );
+                reassignedAmount = hasTowingRouteData(request)
+                    ? toPositiveMoney(request.amount ?? request.service_charge)
+                    : await estimateRequestAmountAsync(
+                        { service_type: request.service_type, vehicle_type: request.vehicle_type },
+                        nextMatch
+                    );
                 await markTechnicianReserved(pool, newTechId, requestId);
                 await pool.query(
                     "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id = ?",
@@ -901,6 +1043,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                         lng: request.location_lng,
                         address: request.address
                     },
+                    ...buildTowingRouteResponseFields(request),
                     locationDistance: Number.isFinite(Number(nextMatch.distance))
                         ? `${Number(nextMatch.distance).toFixed(1)} km`
                         : (nextMatch.distanceText || "Nearby"),
@@ -1237,6 +1380,7 @@ router.get("/:id", verifyUser, async (req, res) => {
                 }
             } : null,
             amount: paymentDetails.baseAmount,
+            ...buildTowingRouteResponseFields(row),
             ...paymentDetails,
         };
 

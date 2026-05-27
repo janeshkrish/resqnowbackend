@@ -79,6 +79,20 @@ export async function generateInvoicePDF(data) {
             doc.text("Total Amount", 350, totalY);
             doc.text(`INR ${Number(data.totalAmount || 0).toFixed(2)}`, amountX, totalY, { align: "right", width: 90 });
 
+            const routeTop = totalY + 40;
+            if (data.pickupAddress || data.dropAddress || data.routeDistanceKm) {
+                doc.fontSize(10).font("Helvetica-Bold").fillColor("#0F172A").text("Route Details", 50, routeTop);
+                doc.font("Helvetica").fillColor("#64748B");
+                doc.text(`Pickup: ${data.pickupAddress || data.customerAddress || "N/A"}`, 50, routeTop + 16, { width: 500 });
+                if (data.dropAddress) {
+                    doc.text(`Drop: ${data.dropAddress}`, 50, routeTop + 32, { width: 500 });
+                }
+                if (data.routeDistanceKm) {
+                    const durationText = data.estimatedDuration ? `, ETA ${data.estimatedDuration} min` : "";
+                    doc.text(`Towing distance: ${Number(data.routeDistanceKm).toFixed(1)} km${durationText}`, 50, routeTop + 48, { width: 500 });
+                }
+            }
+
             doc.moveDown(4);
 
             const footerY = 700;

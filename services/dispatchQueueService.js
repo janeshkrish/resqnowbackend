@@ -99,6 +99,15 @@ function normalizeStatus(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+const safeParseObject = (value) => {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
 function normalizeAttemptedTechnicianIds(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map((entry) => String(entry || "").trim()).filter(Boolean))];
@@ -122,6 +131,15 @@ async function fetchRequestRow(pool, jobId) {
         sr.service_type,
         sr.vehicle_type,
         sr.address,
+        sr.drop_address,
+        sr.drop_latitude,
+        sr.drop_longitude,
+        sr.route_distance_km,
+        sr.estimated_duration,
+        sr.route_metadata_json,
+        sr.pricing_breakdown_json,
+        sr.estimated_price,
+        sr.final_price,
         sr.contact_name,
         sr.location_lat,
         sr.location_lng,
@@ -187,6 +205,9 @@ async function getAttemptedTechnicianSet(pool, jobId, explicitAttempted) {
 function buildOfferPayload(requestRow, candidateTech) {
   const distanceText = String(candidateTech?.distanceText || "Nearby").trim() || "Nearby";
   const etaText = String(candidateTech?.etaText || "").trim();
+  const dropLat = Number(requestRow.drop_latitude);
+  const dropLng = Number(requestRow.drop_longitude);
+  const pricingBreakdown = safeParseObject(requestRow.pricing_breakdown_json);
 
   return {
     id: String(requestRow.id),
@@ -202,6 +223,19 @@ function buildOfferPayload(requestRow, candidateTech) {
       address: String(requestRow.address || ""),
     },
     address: String(requestRow.address || ""),
+    dropLocation: requestRow.drop_address
+      ? {
+          lat: Number.isFinite(dropLat) ? dropLat : null,
+          lng: Number.isFinite(dropLng) ? dropLng : null,
+          address: String(requestRow.drop_address || ""),
+        }
+      : null,
+    dropAddress: requestRow.drop_address || null,
+    routeDistanceKm: requestRow.route_distance_km == null ? null : Number(requestRow.route_distance_km),
+    estimatedDuration: requestRow.estimated_duration == null ? null : Number(requestRow.estimated_duration),
+    routeMetadata: safeParseObject(requestRow.route_metadata_json),
+    pricingBreakdown,
+    finalEstimatedPrice: requestRow.final_price ?? requestRow.estimated_price ?? pricingBreakdown?.final_estimated_price ?? null,
     amount: Number(requestRow.amount || 0),
     priceAmount: Number(requestRow.amount || 0),
     distance: distanceText,
@@ -292,6 +326,12 @@ async function processNewDispatchJob(data) {
     location_lat: requestRow.location_lat,
     location_lng: requestRow.location_lng,
     amount: requestRow.amount,
+    drop_address: requestRow.drop_address,
+    drop_latitude: requestRow.drop_latitude,
+    drop_longitude: requestRow.drop_longitude,
+    route_distance_km: requestRow.route_distance_km,
+    estimated_duration: requestRow.estimated_duration,
+    pricing_breakdown_json: requestRow.pricing_breakdown_json,
     contact_name: requestRow.contact_name || DEFAULT_CUSTOMER_NAME,
   });
   console.log(

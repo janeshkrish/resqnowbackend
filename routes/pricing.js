@@ -1,9 +1,20 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { calculateFinalPrice } from "../services/pricing.service.js";
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
 import { fetchTechnicianPricingDefinition } from "../services/technicianPricingStore.js";
+import { verifyUser } from "../middleware/auth.js";
+import { buildTowingQuote, normalizeTowingQuoteError } from "../services/towingQuoteService.js";
 
 const router = Router();
+
+const towingEstimateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many towing estimate requests. Please try again shortly." },
+});
 
 const normalizeOptionalDistance = (value) => {
   if (value == null) return undefined;
@@ -75,6 +86,34 @@ router.post("/calculate", async (req, res) => {
 
     console.error("[Pricing calculate]", err);
     return res.status(500).json({ error: "Failed to calculate pricing." });
+  }
+});
+
+router.post("/towing-estimate", verifyUser, towingEstimateLimiter, async (req, res) => {
+  try {
+    const quote = await buildTowingQuote({
+      ...req.body,
+      paymentMode: req.body?.paymentMode || req.body?.payment_mode || "upi",
+    });
+
+    return res.json({
+      success: true,
+      quote,
+      distanceKm: quote.distance_km,
+      estimatedDuration: quote.estimated_duration,
+      routeMetadata: quote.route_metadata,
+      pricingBreakdown: quote.pricing_breakdown,
+      finalEstimatedPrice: quote.final_estimated_price,
+    });
+  } catch (err) {
+    if (err?.statusCode && err.statusCode < 500) {
+      const normalized = normalizeTowingQuoteError(err);
+      return res.status(normalized.statusCode).json(normalized.payload);
+    }
+
+    console.error("[Pricing towing-estimate]", err);
+    const normalized = normalizeTowingQuoteError(err);
+    return res.status(normalized.statusCode).json(normalized.payload);
   }
 });
 

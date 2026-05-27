@@ -145,6 +145,7 @@ export function calculateFinalPrice(input, pricingConfig = DEFAULT_PRICING_CONFI
 
   let basePricePaise;
   let extraChargesPaise;
+  let distanceChargePaise = 0n;
 
   if (serviceType === "towing") {
     const basePrice = parseNonNegativeBigInt("base_price", input.technician_pricing.base_price, parseMoneyToPaise);
@@ -167,6 +168,7 @@ export function calculateFinalPrice(input, pricingConfig = DEFAULT_PRICING_CONFI
     });
     basePricePaise = towingCharges.basePricePaise;
     extraChargesPaise = towingCharges.extraChargesPaise;
+    distanceChargePaise = towingCharges.extraChargesPaise;
   } else {
     const serviceChargePaise = parseNonNegativeBigInt(
       "service_charge",
@@ -206,7 +208,10 @@ export function calculateFinalPrice(input, pricingConfig = DEFAULT_PRICING_CONFI
 
   return Object.freeze({
     base_price: paiseToNumber(basePricePaise),
+    distance_charge: paiseToNumber(distanceChargePaise),
+    night_charge: paiseToNumber(nightChargePaise),
     extra_charges: paiseToNumber(extraChargesPaise),
+    subtotal: paiseToNumber(subtotalPaise),
     platform_fee: paiseToNumber(platformFeePaise),
     payment_fee: paiseToNumber(paymentFeePaise),
     final_price: paiseToNumber(finalPricePaise),

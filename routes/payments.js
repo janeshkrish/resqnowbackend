@@ -23,6 +23,7 @@ import {
     PAYMENT_LEDGER_STATUS,
     PAYMENT_TO_TECHNICIAN_STATUS,
 } from "../models/marketplaceConstants.js";
+import { isTowingServiceType } from "../services/towingQuoteService.js";
 
 const router = express.Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -73,6 +74,20 @@ const toPositiveMoney = (value) => {
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
+
+const safeParseObject = (value) => {
+    try {
+        const parsed = typeof value === "string" ? JSON.parse(value) : value;
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
+};
+
+const hasTowingRouteData = (row) =>
+    isTowingServiceType(row?.service_type) ||
+    row?.drop_address != null ||
+    row?.route_distance_km != null;
 
 const normalizeCouponCode = (value) => String(value || "").trim().toUpperCase();
 
@@ -231,6 +246,11 @@ async function buildServiceRequestPaymentQuote({
 }
 
 async function resolveRequestBaseAmount(requestRow, pricingConfig) {
+    if (hasTowingRouteData(requestRow)) {
+        const stored = toPositiveMoney(requestRow?.amount ?? requestRow?.service_charge);
+        if (stored != null) return stored;
+    }
+
     const technicianId = Number(requestRow?.technician_id);
     let technicianProfile = null;
 
@@ -459,6 +479,11 @@ function buildInvoiceData({ invoiceId, request, breakdown, paymentId, orderId })
         customerName: request.customer_name || "Customer",
         customerPhone: request.customer_phone || "N/A",
         customerAddress: request.address || "N/A",
+        pickupAddress: request.address || "N/A",
+        dropAddress: request.drop_address || null,
+        routeDistanceKm: request.route_distance_km == null ? null : Number(request.route_distance_km),
+        estimatedDuration: request.estimated_duration == null ? null : Number(request.estimated_duration),
+        pricingBreakdown: safeParseObject(request.pricing_breakdown_json),
         serviceType: request.service_type || "Roadside Assistance",
         vehicleType: request.vehicle_type || "Vehicle",
         technicianName: request.technician_name || "Assigned Technician",
@@ -542,7 +567,10 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
 
         const [requestRows] = await conn.query(
             `SELECT sr.id, sr.user_id, sr.technician_id, sr.service_type, sr.vehicle_type, sr.amount, sr.service_charge,
-                    sr.address, sr.status, sr.payment_status,
+                    sr.address, sr.drop_address, sr.drop_latitude, sr.drop_longitude,
+                    sr.route_distance_km, sr.estimated_duration, sr.route_metadata_json,
+                    sr.pricing_breakdown_json, sr.estimated_price, sr.final_price,
+                    sr.status, sr.payment_status,
                     sr.applied_coupon_code, sr.applied_discount_percent, sr.applied_discount_amount,
                     u.email AS customer_email, u.full_name AS customer_name, u.phone AS customer_phone,
                     t.name AS technician_name, t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
@@ -599,9 +627,9 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
 
         await conn.execute(
             `UPDATE service_requests
-             SET payment_status = ?, payment_method = ?, status = ?, amount = ?, updated_at = NOW()
+             SET payment_status = ?, payment_method = ?, status = ?, amount = ?, final_price = ?, updated_at = NOW()
              WHERE id = ?`,
-            ["paid", "razorpay", "completed", breakdown.baseAmount, requestId]
+            ["paid", "razorpay", "completed", breakdown.baseAmount, breakdown.totalAmount, requestId]
         );
         if (request.technician_id) {
             await releaseTechnicianAvailability(conn, request.technician_id, requestId);
@@ -1028,6 +1056,7 @@ router.get("/config", async (_req, res) => {
             pay_now_discount_percent: pricingConfig.pay_now_discount_percent,
             default_service_amount: pricingConfig.default_service_amount,
             service_base_prices: pricingConfig.service_base_prices,
+            towing_pricing_rules: pricingConfig.towing_pricing_rules,
             subscription_plans: listSubscriptionPlans(pricingConfig),
         });
     } catch (err) {
@@ -1049,6 +1078,7 @@ router.post('/quote', verifyUser, async (req, res) => {
         const pricingConfig = await getPlatformPricingConfig();
         const [rows] = await pool.query(
             `SELECT id, user_id, amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status,
+                    drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, pricing_breakdown_json,
                     applied_coupon_code, applied_discount_percent, applied_discount_amount
              FROM service_requests
              WHERE id = ? AND user_id = ?
@@ -1124,6 +1154,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
         const pricingConfig = await getPlatformPricingConfig();
         const [rows] = await pool.query(
             `SELECT id, user_id, amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status,
+                    drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, pricing_breakdown_json,
                     applied_coupon_code, applied_discount_percent, applied_discount_amount
              FROM service_requests
              WHERE id = ? AND user_id = ?`,
@@ -1459,6 +1490,7 @@ router.post('/cash', verifyUser, async (req, res) => {
         const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
             `SELECT id, user_id, amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status,
+                    address, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, pricing_breakdown_json,
                     applied_coupon_code, applied_discount_percent, applied_discount_amount
              FROM service_requests
              WHERE id = ? AND user_id = ?`,
@@ -1508,6 +1540,7 @@ router.post('/cash', verifyUser, async (req, res) => {
                      payment_method = ?,
                      status = ?,
                      amount = ?,
+                     final_price = ?,
                      applied_coupon_code = ?,
                      applied_discount_percent = ?,
                      applied_discount_amount = ?,
@@ -1518,6 +1551,7 @@ router.post('/cash', verifyUser, async (req, res) => {
                     'cash',
                     'completed',
                     breakdown.baseAmount,
+                    breakdown.totalAmount,
                     coupon.appliedCode || null,
                     coupon.isApplied ? coupon.discountPercent : 0,
                     breakdown.discountAmount,
@@ -1584,7 +1618,12 @@ router.post('/cash', verifyUser, async (req, res) => {
                     requestId,
                     customerName: "Customer",
                     customerPhone: "N/A",
-                    customerAddress: "N/A",
+                    customerAddress: reqRows[0].address || "N/A",
+                    pickupAddress: reqRows[0].address || "N/A",
+                    dropAddress: reqRows[0].drop_address || null,
+                    routeDistanceKm: reqRows[0].route_distance_km == null ? null : Number(reqRows[0].route_distance_km),
+                    estimatedDuration: reqRows[0].estimated_duration == null ? null : Number(reqRows[0].estimated_duration),
+                    pricingBreakdown: safeParseObject(reqRows[0].pricing_breakdown_json),
                     serviceType: reqRows[0].service_type || "Roadside Assistance",
                     vehicleType: reqRows[0].vehicle_type || "Vehicle",
                     technicianName: "Assigned Technician",

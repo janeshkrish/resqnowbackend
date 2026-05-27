@@ -77,6 +77,38 @@ const DEFAULT_SERVICE_BASE_PRICES = Object.freeze({
   other: { car: 500, bike: 500, commercial: 500, ev: 500 },
 });
 
+export const DEFAULT_TOWING_PRICING_RULES = Object.freeze({
+  base_includes_km: 5,
+  per_km_price: 25,
+  night_charge: 0,
+  night_type: "flat",
+  tax_percent: 0,
+  vehicle_multipliers: {
+    bike: 1,
+    scooter: 1,
+    hatchback: 1.05,
+    sedan: 1.1,
+    suv: 1.25,
+    luxury_car: 1.5,
+    ev: 1.2,
+    truck: 1.8,
+    car: 1.1,
+    commercial: 1.8,
+  },
+  surge: {
+    enabled: true,
+    radius_km: 12,
+    demand_window_minutes: 30,
+    demand_supply_weight: 0.08,
+    peak_hour_multiplier: 1.1,
+    max_multiplier: 1.75,
+  },
+  weather_multiplier: 1,
+  highway_multiplier: 1,
+  highway_min_km: 25,
+  emergency_multiplier: 1,
+});
+
 const DEFAULT_SUBSCRIPTION_PLANS = Object.freeze([
   {
     id: "free",
@@ -163,6 +195,7 @@ export const DEFAULT_PLATFORM_PRICING_CONFIG = Object.freeze({
   pay_now_discount_percent: 0,
   default_service_amount: 500,
   service_base_prices: clone(DEFAULT_SERVICE_BASE_PRICES),
+  towing_pricing_rules: clone(DEFAULT_TOWING_PRICING_RULES),
   subscription_plans: clone(DEFAULT_SUBSCRIPTION_PLANS),
 });
 
@@ -187,6 +220,73 @@ function normalizeServiceBasePrices(rawPrices) {
   });
 
   return matrix;
+}
+
+const normalizePricingRuleKey = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+export function normalizeTowingPricingRules(rawRules) {
+  const parsed = parseJson(rawRules);
+  const fallback = clone(DEFAULT_TOWING_PRICING_RULES);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
+
+  const rules = {
+    ...fallback,
+    ...parsed,
+    vehicle_multipliers: { ...fallback.vehicle_multipliers },
+    surge: { ...fallback.surge },
+  };
+
+  const rawMultipliers = parsed.vehicle_multipliers;
+  if (rawMultipliers && typeof rawMultipliers === "object" && !Array.isArray(rawMultipliers)) {
+    Object.entries(rawMultipliers).forEach(([key, value]) => {
+      const normalizedKey = normalizePricingRuleKey(key);
+      if (!normalizedKey) return;
+      const parsedValue = toPositiveNumber(value, null);
+      if (parsedValue == null) return;
+      rules.vehicle_multipliers[normalizedKey] = parsedValue;
+    });
+  }
+
+  if (parsed.surge && typeof parsed.surge === "object" && !Array.isArray(parsed.surge)) {
+    rules.surge = {
+      ...rules.surge,
+      ...parsed.surge,
+      enabled: toBoolean(parsed.surge.enabled, fallback.surge.enabled),
+      radius_km: toPositiveNumber(parsed.surge.radius_km, fallback.surge.radius_km),
+      demand_window_minutes: toPositiveInteger(
+        parsed.surge.demand_window_minutes,
+        fallback.surge.demand_window_minutes
+      ),
+      demand_supply_weight: toPositiveNumber(
+        parsed.surge.demand_supply_weight,
+        fallback.surge.demand_supply_weight
+      ),
+      peak_hour_multiplier: toPositiveNumber(
+        parsed.surge.peak_hour_multiplier,
+        fallback.surge.peak_hour_multiplier
+      ),
+      max_multiplier: toPositiveNumber(parsed.surge.max_multiplier, fallback.surge.max_multiplier),
+    };
+  }
+
+  rules.base_includes_km = toPositiveNumber(parsed.base_includes_km, fallback.base_includes_km, { allowZero: true });
+  rules.per_km_price = toPositiveNumber(parsed.per_km_price, fallback.per_km_price, { allowZero: true });
+  rules.night_charge = toPositiveNumber(parsed.night_charge, fallback.night_charge, { allowZero: true });
+  rules.night_type = ["flat", "percentage"].includes(String(parsed.night_type || "").toLowerCase())
+    ? String(parsed.night_type).toLowerCase()
+    : fallback.night_type;
+  rules.tax_percent = toPercent(parsed.tax_percent, fallback.tax_percent);
+  rules.weather_multiplier = toPositiveNumber(parsed.weather_multiplier, fallback.weather_multiplier);
+  rules.highway_multiplier = toPositiveNumber(parsed.highway_multiplier, fallback.highway_multiplier);
+  rules.highway_min_km = toPositiveNumber(parsed.highway_min_km, fallback.highway_min_km);
+  rules.emergency_multiplier = toPositiveNumber(parsed.emergency_multiplier, fallback.emergency_multiplier);
+
+  return rules;
 }
 
 function normalizeCustomerPriceRoundingIncrement(value, fallback) {
@@ -268,6 +368,7 @@ function normalizeConfigRow(row) {
     pay_now_discount_percent: toPercent(row?.pay_now_discount_percent, fallback.pay_now_discount_percent),
     default_service_amount: roundMoney(toPositiveNumber(row?.default_service_amount, fallback.default_service_amount)),
     service_base_prices: normalizeServiceBasePrices(row?.service_base_prices),
+    towing_pricing_rules: normalizeTowingPricingRules(row?.towing_pricing_rules),
     subscription_plans: normalizeSubscriptionPlans(row?.subscription_plans),
   };
 }
@@ -293,10 +394,11 @@ async function seedDefaultConfig(pool) {
         pay_now_discount_percent,
         default_service_amount,
         service_base_prices,
+        towing_pricing_rules,
         subscription_plans,
         is_active
       )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
     [
       DEFAULT_PLATFORM_PRICING_CONFIG.currency,
       DEFAULT_PLATFORM_PRICING_CONFIG.platform_fee_percent,
@@ -311,6 +413,7 @@ async function seedDefaultConfig(pool) {
       DEFAULT_PLATFORM_PRICING_CONFIG.pay_now_discount_percent,
       DEFAULT_PLATFORM_PRICING_CONFIG.default_service_amount,
       JSON.stringify(DEFAULT_PLATFORM_PRICING_CONFIG.service_base_prices),
+      JSON.stringify(DEFAULT_PLATFORM_PRICING_CONFIG.towing_pricing_rules),
       JSON.stringify(DEFAULT_PLATFORM_PRICING_CONFIG.subscription_plans),
     ]
   );

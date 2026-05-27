@@ -17,6 +17,7 @@ import {
   escalateRequest,
   markHighPriority,
   closeRequest,
+  overrideRequestPricing,
 } from "../controllers/requestController.js";
 import {
   getTechnicians,
@@ -97,6 +98,7 @@ router.get("/requests", getRequests);
 router.post("/assign", assignRequest);
 router.post("/escalate", escalateRequest);
 router.post("/requests/high-priority", markHighPriority);
+router.post("/requests/pricing-override", overrideRequestPricing);
 router.post("/close", closeRequest);
 router.post("/requests/close", closeRequest);
 
