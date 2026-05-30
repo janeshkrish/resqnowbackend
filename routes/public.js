@@ -2,8 +2,15 @@ import { Router } from "express";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import rateLimit from "express-rate-limit";
 import * as db from "../db.js";
 import { sendMail } from "../services/mailer.js";
+import {
+    normalizeLocationProviderError,
+    reverseGeocode,
+    searchLocations,
+} from "../services/locationProviderService.js";
+import { getRoute, normalizeRouteServiceError } from "../services/routeService.js";
 
 const router = Router();
 
@@ -11,6 +18,30 @@ const ROUTES_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_ROOT = path.resolve(ROUTES_DIR, "..");
 const DEFAULT_ANDROID_APK_FILE_NAME = "resqnow.apk";
 const DEFAULT_ANDROID_APK_RELATIVE_PATH = path.join("public", "downloads", DEFAULT_ANDROID_APK_FILE_NAME);
+
+const locationSearchLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.LOCATION_SEARCH_RATE_LIMIT_PER_MINUTE || 45),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many location searches. Please try again shortly." },
+});
+
+const reverseGeocodeLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.REVERSE_GEOCODE_RATE_LIMIT_PER_MINUTE || 60),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many reverse geocode requests. Please try again shortly." },
+});
+
+const routeLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.ROUTE_RATE_LIMIT_PER_MINUTE || 60),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many route requests. Please try again shortly." },
+});
 
 function extractEmailAddress(value) {
     const raw = String(value || "").trim();
@@ -217,34 +248,74 @@ router.post("/contact", async (req, res) => {
 });
 
 /**
- * GET /api/public/reverse-geocode?lat=..&lng=..
- * Proxies reverse geocoding to avoid browser CORS issues.
+ * GET /api/public/location-search?q=..
+ * Backend-driven OSM-compatible autocomplete endpoint.
  */
-router.get("/reverse-geocode", async (req, res) => {
+router.get("/location-search", locationSearchLimiter, async (req, res) => {
     try {
-        const lat = Number(req.query.lat);
-        const lng = Number(req.query.lng);
-        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-            return res.status(400).json({ error: "Valid lat and lng are required." });
-        }
-
-        const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1`;
-        const upstream = await fetch(url, {
-            headers: {
-                "User-Agent": "ResQNow/1.0 (support@resqnow.com)",
-                "Accept": "application/json",
-            },
+        const result = await searchLocations({
+            query: req.query.q || req.query.query,
+            lat: req.query.lat,
+            lng: req.query.lng || req.query.lon,
+            limit: req.query.limit,
+            provider: req.query.provider,
         });
-
-        if (!upstream.ok) {
-            return res.status(502).json({ error: "Geocoding provider failed." });
-        }
-
-        const data = await upstream.json();
-        return res.json(data);
+        return res.json(result);
     } catch (error) {
-        console.error("[Reverse Geocode] Error:", error);
-        return res.status(500).json({ error: "Failed to reverse geocode." });
+        const normalized = normalizeLocationProviderError(error);
+        return res.status(normalized.statusCode).json(normalized.payload);
+    }
+});
+
+/**
+ * GET /api/public/reverse-geocode?lat=..&lng=..
+ * Proxies reverse geocoding through the backend provider layer.
+ */
+router.get("/reverse-geocode", reverseGeocodeLimiter, async (req, res) => {
+    try {
+        const result = await reverseGeocode({
+            lat: req.query.lat,
+            lng: req.query.lng || req.query.lon,
+            provider: req.query.provider,
+        });
+        return res.json(result);
+    } catch (error) {
+        const normalized = normalizeLocationProviderError(error);
+        return res.status(normalized.statusCode).json(normalized.payload);
+    }
+});
+
+function parseRoutePoints(query) {
+    const rawPoints = String(query.points || "").trim();
+    if (rawPoints) {
+        return rawPoints
+            .split(";")
+            .map((pair) => {
+                const [lat, lng] = pair.split(",").map((value) => Number(value.trim()));
+                return { lat, lng };
+            });
+    }
+
+    return [
+        { lat: query.pickupLat ?? query.fromLat, lng: query.pickupLng ?? query.fromLng },
+        { lat: query.dropLat ?? query.toLat, lng: query.dropLng ?? query.toLng },
+    ];
+}
+
+/**
+ * GET /api/public/route?points=lat,lng;lat,lng
+ * Returns road geometry from the configured OSRM-compatible route provider.
+ */
+router.get("/route", routeLimiter, async (req, res) => {
+    try {
+        const route = await getRoute({
+            points: parseRoutePoints(req.query),
+            overview: req.query.overview || "full",
+        });
+        return res.json(route);
+    } catch (error) {
+        const normalized = normalizeRouteServiceError(error);
+        return res.status(normalized.statusCode).json(normalized.payload);
     }
 });
 

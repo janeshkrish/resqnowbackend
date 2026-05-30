@@ -1,6 +1,6 @@
-import axios from "axios";
 import { getPool } from "../db.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "./serviceNormalization.js";
+import { coercePricingTimestamp } from "./pricingTimestamp.js";
 import { calculateFinalPrice } from "./pricing.service.js";
 import {
   getPlatformPricingConfig,
@@ -10,13 +10,12 @@ import {
 import { fetchTechnicianPricingDefinition } from "./technicianPricingStore.js";
 import { computeServiceRequestPaymentAmounts } from "./serviceRequestPaymentService.js";
 import { roundMoney } from "../utils/money.js";
+import { getRoute } from "./routeService.js";
+import { isTowingServiceType } from "./towingServiceType.js";
 
-const GOOGLE_DIRECTIONS_URL = "https://maps.googleapis.com/maps/api/directions/json";
-const OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1/driving";
-const ROUTE_TIMEOUT_MS = Math.max(2500, Number(process.env.TOWING_ROUTE_TIMEOUT_MS || 6500));
 const MAX_DISTANCE_TAMPER_RATIO = 0.15;
 const MAX_DISTANCE_TAMPER_KM = 2;
-const DEFAULT_TIME_OF_DAY = () => new Date().toTimeString().slice(0, 5);
+export { coercePricingTimestamp, isTowingServiceType };
 
 class TowingQuoteError extends Error {
   constructor(message, statusCode = 400, code = "towing_quote_error") {
@@ -100,89 +99,6 @@ function normalizeVehicleCategory({ vehicleType, vehicleModel, vehicleSubtype })
   return canonical || "car";
 }
 
-export function isTowingServiceType(serviceType) {
-  return canonicalizeServiceDomain(String(serviceType || "").replace(/^(car|bike|ev|commercial)-/i, "")) === "towing";
-}
-
-async function resolveRouteWithGoogle(pickup, drop) {
-  const apiKey = String(process.env.GOOGLE_MAPS_API_KEY || process.env.GMAPS_API_KEY || "").trim();
-  if (!apiKey) return null;
-
-  const response = await axios.get(GOOGLE_DIRECTIONS_URL, {
-    timeout: ROUTE_TIMEOUT_MS,
-    params: {
-      origin: `${pickup.lat},${pickup.lng}`,
-      destination: `${drop.lat},${drop.lng}`,
-      mode: "driving",
-      departure_time: "now",
-      traffic_model: "best_guess",
-      key: apiKey,
-    },
-  });
-
-  const data = response.data || {};
-  if (data.status !== "OK" || !Array.isArray(data.routes) || data.routes.length === 0) {
-    return null;
-  }
-
-  const route = data.routes[0];
-  const legs = Array.isArray(route.legs) ? route.legs : [];
-  if (legs.length === 0) return null;
-
-  const distanceMeters = legs.reduce((sum, leg) => sum + Number(leg?.distance?.value || 0), 0);
-  const durationSeconds = legs.reduce(
-    (sum, leg) => sum + Number(leg?.duration_in_traffic?.value || leg?.duration?.value || 0),
-    0
-  );
-  if (distanceMeters <= 0 || durationSeconds <= 0) return null;
-
-  const warnings = Array.isArray(route.warnings) ? route.warnings : [];
-  const tollDetected = `${route.summary || ""} ${warnings.join(" ")}`.toLowerCase().includes("toll");
-
-  return {
-    distanceKm: roundMoney(distanceMeters / 1000),
-    durationMinutes: Math.max(1, Math.round(durationSeconds / 60)),
-    metadata: {
-      source: "google_directions",
-      traffic_aware: true,
-      toll_detected: tollDetected,
-      summary: route.summary || "",
-      warnings,
-    },
-  };
-}
-
-async function resolveRouteWithOsrm(pickup, drop) {
-  const response = await axios.get(
-    `${OSRM_ROUTE_URL}/${pickup.lng},${pickup.lat};${drop.lng},${drop.lat}`,
-    {
-      timeout: ROUTE_TIMEOUT_MS,
-      params: {
-        overview: "simplified",
-        alternatives: false,
-        steps: false,
-      },
-    }
-  );
-
-  const route = response.data?.routes?.[0];
-  const distanceMeters = Number(route?.distance || 0);
-  const durationSeconds = Number(route?.duration || 0);
-  if (distanceMeters <= 0 || durationSeconds <= 0) return null;
-
-  return {
-    distanceKm: roundMoney(distanceMeters / 1000),
-    durationMinutes: Math.max(1, Math.round(durationSeconds / 60)),
-    metadata: {
-      source: "osrm",
-      traffic_aware: false,
-      toll_detected: false,
-      summary: "OSRM driving route",
-      warnings: [],
-    },
-  };
-}
-
 async function resolveRouteMetrics(pickup, drop) {
   const directKm = haversineKm(pickup, drop);
   if (directKm < 0.05) {
@@ -190,17 +106,26 @@ async function resolveRouteMetrics(pickup, drop) {
   }
 
   try {
-    const googleRoute = await resolveRouteWithGoogle(pickup, drop);
-    if (googleRoute) return googleRoute;
+    const route = await getRoute({
+      points: [pickup, drop],
+      overview: "full",
+    });
+    return {
+      distanceKm: route.distanceKm,
+      durationMinutes: route.durationMinutes,
+      metadata: {
+        source: route.source,
+        provider: route.provider,
+        traffic_aware: route.traffic_aware,
+        toll_detected: route.toll_detected,
+        summary: route.summary,
+        warnings: route.warnings,
+        geometry: route.geometry,
+        polyline: route.polyline,
+      },
+    };
   } catch (err) {
-    console.warn("[Towing quote] Google route lookup failed:", err?.message || err);
-  }
-
-  try {
-    const osrmRoute = await resolveRouteWithOsrm(pickup, drop);
-    if (osrmRoute) return osrmRoute;
-  } catch (err) {
-    console.warn("[Towing quote] OSRM route lookup failed:", err?.message || err);
+    console.warn("[Towing quote] route lookup failed:", err?.message || err);
   }
 
   throw new TowingQuoteError(
@@ -464,7 +389,9 @@ export async function buildTowingQuote(input = {}) {
       vehicle_type: pricingDefinition.vehicle_type,
       technician_pricing: pricingDefinition.technician_pricing,
       distance_km: route.distanceKm,
-      time_of_day: input.timeOfDay ?? input.time_of_day ?? DEFAULT_TIME_OF_DAY(),
+      time_of_day: coercePricingTimestamp(
+        input.timeOfDay ?? input.time_of_day ?? input.scheduledTime ?? input.scheduled_time
+      ),
     },
     {
       platform_fee_percent: pricingConfig.platform_fee_percent,

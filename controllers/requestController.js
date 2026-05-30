@@ -7,6 +7,12 @@ import { sendEventEmail } from "../utils/eventEmail.js";
 const ACTIVE_REQUEST_STATES = [
   "assigned",
   "accepted",
+  "en_route_pickup",
+  "arrived_pickup",
+  "vehicle_loaded",
+  "enroute_drop",
+  "arrived_drop",
+  "service_completed",
   "processing",
   "service_started",
   "en-route",
@@ -22,11 +28,18 @@ const REQUEST_STATUS_FILTER_SET = {
   pending: ["pending"],
   assigned: ["assigned"],
   accepted: ["accepted"],
+  en_route_pickup: ["en_route_pickup"],
+  arrived_pickup: ["arrived_pickup"],
+  vehicle_loaded: ["vehicle_loaded"],
+  enroute_drop: ["enroute_drop"],
+  arrived_drop: ["arrived_drop"],
+  service_completed: ["service_completed"],
   processing: ["processing"],
   in_progress: ["in_progress", "in-progress"],
   service_started: ["service_started", "en-route", "on-the-way", "arrived"],
   payment_pending: ["payment_pending", "awaiting_payment"],
   completed: ["completed", "paid"],
+  closed: ["closed"],
   cancelled: ["cancelled"],
 };
 
@@ -46,6 +59,15 @@ function normalizeRequestStatusKey(value) {
     "awaiting-payment": "payment_pending",
     "awaiting payment": "payment_pending",
     "awaiting_payment": "payment_pending",
+    "en route pickup": "en_route_pickup",
+    "en-route-pickup": "en_route_pickup",
+    "arrived pickup": "arrived_pickup",
+    "vehicle loaded": "vehicle_loaded",
+    "tow started": "enroute_drop",
+    "start tow": "enroute_drop",
+    "en route drop": "enroute_drop",
+    "arrived drop": "arrived_drop",
+    "service completed": "service_completed",
   };
 
   const mapped = map[normalized] || normalized;
@@ -81,6 +103,9 @@ function canonicalizeRequestStatus(value) {
   if (normalized === "awaiting_payment") {
     return "payment_pending";
   }
+  if (["en_route_pickup", "arrived_pickup", "vehicle_loaded", "enroute_drop", "arrived_drop", "service_completed", "closed"].includes(normalized)) {
+    return normalized;
+  }
   return normalized || "pending";
 }
 
@@ -100,12 +125,32 @@ const toPositiveMoney = (value) => {
 
 function mapRequestRow(row) {
   const pricingBreakdown = safeParseObject(row.pricing_breakdown_json);
+  const routeMetadata = safeParseObject(row.route_metadata_json);
+  const customerFare = toPositiveMoney(row.final_price ?? row.estimated_price ?? row.amount);
+  const technicianEstimatedEarning = toPositiveMoney(row.technician_estimated_earning);
+  const platformMargin =
+    customerFare != null && technicianEstimatedEarning != null
+      ? Math.round((customerFare - technicianEstimatedEarning + Number.EPSILON) * 100) / 100
+      : null;
+  const statusTimeline = [
+    ["created", row.created_at],
+    ["accepted", row.accepted_time],
+    ["started", row.started_at || row.start_time],
+    ["vehicle_loaded", row.vehicle_loaded_time],
+    ["arrived_drop", row.drop_arrival_time],
+    ["completed", row.completed_at],
+    ["updated", row.updated_at],
+  ]
+    .filter(([, at]) => Boolean(at))
+    .map(([status, at]) => ({ status, at }));
   return {
     requestId: row.request_id,
     user: row.user_name,
     issueType: row.issue_type,
     location: row.location,
     pickupLocation: row.location,
+    pickupLatitude: row.location_lat == null ? null : Number(row.location_lat),
+    pickupLongitude: row.location_lng == null ? null : Number(row.location_lng),
     dropLocation: row.drop_location || null,
     dropLatitude: row.drop_latitude == null ? null : Number(row.drop_latitude),
     dropLongitude: row.drop_longitude == null ? null : Number(row.drop_longitude),
@@ -114,6 +159,9 @@ function mapRequestRow(row) {
     estimatedPrice: row.estimated_price == null ? null : Number(row.estimated_price),
     finalPrice: row.final_price == null ? null : Number(row.final_price),
     amount: row.amount == null ? null : Number(row.amount),
+    customerFare,
+    technicianEstimatedEarning,
+    platformMargin,
     pricingBreakdown,
     pricingFactors: pricingBreakdown
       ? {
@@ -127,6 +175,10 @@ function mapRequestRow(row) {
           activeMechanicsNearby: pricingBreakdown.active_mechanics_nearby,
         }
       : null,
+    routeMetadata,
+    routeGeometry: routeMetadata?.geometry || null,
+    routePolyline: Array.isArray(routeMetadata?.polyline) ? routeMetadata.polyline : null,
+    statusTimeline,
     assignedTechnician: row.technician_name,
     status: canonicalizeRequestStatus(row.status),
     priority: row.priority,
@@ -196,19 +248,30 @@ export async function getRequests(req, res) {
          COALESCE(u.full_name, CONCAT('User #', sr.user_id)) AS user_name,
          sr.service_type AS issue_type,
          sr.address AS location,
+         sr.location_lat,
+         sr.location_lng,
          sr.drop_address AS drop_location,
          sr.drop_latitude,
          sr.drop_longitude,
          sr.route_distance_km,
          sr.estimated_duration,
+         sr.route_metadata_json,
          sr.pricing_breakdown_json,
          sr.estimated_price,
          sr.final_price,
          sr.amount,
+         sr.technician_estimated_earning,
          COALESCE(t.name, 'Unassigned') AS technician_name,
          sr.status,
          CASE WHEN hp.request_id IS NULL THEN 'Normal' ELSE 'High' END AS priority,
-         sr.created_at
+         sr.created_at,
+         sr.updated_at,
+         sr.accepted_time,
+         sr.started_at,
+         sr.start_time,
+         sr.vehicle_loaded_time,
+         sr.drop_arrival_time,
+         sr.completed_at
        FROM service_requests sr
        LEFT JOIN users u ON u.id = sr.user_id
        LEFT JOIN technicians t ON t.id = sr.technician_id

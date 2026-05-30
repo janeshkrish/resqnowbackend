@@ -23,7 +23,8 @@ import {
     PAYMENT_LEDGER_STATUS,
     PAYMENT_TO_TECHNICIAN_STATUS,
 } from "../models/marketplaceConstants.js";
-import { isTowingServiceType } from "../services/towingQuoteService.js";
+import { isTowingServiceType } from "../services/towingServiceType.js";
+import { estimateTechnicianEarningForRequest } from "../services/technicianEarningsService.js";
 
 const router = express.Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -88,6 +89,20 @@ const hasTowingRouteData = (row) =>
     isTowingServiceType(row?.service_type) ||
     row?.drop_address != null ||
     row?.route_distance_km != null;
+
+async function resolveTechnicianPaymentAmount({ requestRow, technicianProfile = null, connection = null }) {
+    if (!requestRow?.technician_id) {
+        return null;
+    }
+
+    const earning = await estimateTechnicianEarningForRequest({
+        request: requestRow,
+        technician: technicianProfile,
+        technicianId: requestRow.technician_id,
+        connection,
+    });
+    return toPositiveMoney(earning?.amount);
+}
 
 const normalizeCouponCode = (value) => String(value || "").trim().toUpperCase();
 
@@ -308,8 +323,10 @@ async function upsertPendingRazorpayPayment({
     orderId,
     breakdown,
     coupon = null,
+    technicianAmount = null,
 }) {
     const pricingSnapshot = buildMarketplacePricingSnapshot({ breakdown, coupon });
+    const resolvedTechnicianAmount = toPositiveMoney(technicianAmount) ?? breakdown.baseAmount;
     const [existing] = await pool.query(
         `SELECT id
          FROM payments
@@ -332,7 +349,7 @@ async function upsertPendingRazorpayPayment({
                 breakdown.baseAmount,
                 breakdown.platformFee,
                 breakdown.paymentFee,
-                breakdown.baseAmount,
+                resolvedTechnicianAmount,
                 PAYMENT_TO_TECHNICIAN_STATUS.pending,
                 PAYMENT_LEDGER_STATUS.pending,
                 JSON.stringify(pricingSnapshot),
@@ -370,7 +387,7 @@ async function upsertPendingRazorpayPayment({
             breakdown.baseAmount,
             breakdown.platformFee,
             breakdown.paymentFee,
-            breakdown.baseAmount,
+            resolvedTechnicianAmount,
             true,
             PAYMENT_TO_TECHNICIAN_STATUS.pending,
             PAYMENT_LEDGER_STATUS.pending,
@@ -391,8 +408,10 @@ async function markClientSideVerification({
     signature,
     breakdown,
     coupon = null,
+    technicianAmount = null,
 }) {
     const pricingSnapshot = buildMarketplacePricingSnapshot({ breakdown, coupon });
+    const resolvedTechnicianAmount = toPositiveMoney(technicianAmount) ?? breakdown.baseAmount;
     const [existing] = await pool.query(
         `SELECT id
          FROM payments
@@ -417,7 +436,7 @@ async function markClientSideVerification({
                 breakdown.baseAmount,
                 breakdown.platformFee,
                 breakdown.paymentFee,
-                breakdown.baseAmount,
+                resolvedTechnicianAmount,
                 JSON.stringify(pricingSnapshot),
                 existing[0].id
             ]
@@ -456,7 +475,7 @@ async function markClientSideVerification({
             breakdown.baseAmount,
             breakdown.platformFee,
             breakdown.paymentFee,
-            breakdown.baseAmount,
+            resolvedTechnicianAmount,
             true,
             PAYMENT_TO_TECHNICIAN_STATUS.pending,
             PAYMENT_LEDGER_STATUS.pending,
@@ -567,6 +586,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
 
         const [requestRows] = await conn.query(
             `SELECT sr.id, sr.user_id, sr.technician_id, sr.service_type, sr.vehicle_type, sr.amount, sr.service_charge,
+                    sr.technician_estimated_earning,
                     sr.address, sr.drop_address, sr.drop_latitude, sr.drop_longitude,
                     sr.route_distance_km, sr.estimated_duration, sr.route_metadata_json,
                     sr.pricing_breakdown_json, sr.estimated_price, sr.final_price,
@@ -601,6 +621,18 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
             paymentMode: "upi",
             ...getStoredDiscountOptions(request),
         });
+        const technicianAmount = await resolveTechnicianPaymentAmount({
+            requestRow: request,
+            technicianProfile: {
+                id: request.technician_id,
+                pricing: request.technician_pricing,
+                service_costs: request.technician_service_costs,
+            },
+            connection: conn,
+        });
+        const resolvedTechnicianAmount = technicianAmount ?? breakdown.baseAmount;
+        const isTowingRequest = hasTowingRouteData(request);
+        const paidRequestStatus = isTowingRequest ? "payment_pending" : "completed";
 
         const requestWasPaid = (
             ["paid", "completed"].includes(String(request.status || "").toLowerCase()) ||
@@ -619,7 +651,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
                 breakdown.baseAmount,
                 breakdown.platformFee,
                 breakdown.paymentFee,
-                breakdown.baseAmount,
+                resolvedTechnicianAmount,
                 paymentId,
                 paymentRow.id
             ]
@@ -629,9 +661,9 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
             `UPDATE service_requests
              SET payment_status = ?, payment_method = ?, status = ?, amount = ?, final_price = ?, updated_at = NOW()
              WHERE id = ?`,
-            ["paid", "razorpay", "completed", breakdown.baseAmount, breakdown.totalAmount, requestId]
+            ["paid", "razorpay", paidRequestStatus, breakdown.baseAmount, breakdown.totalAmount, requestId]
         );
-        if (request.technician_id) {
+        if (request.technician_id && !isTowingRequest) {
             await releaseTechnicianAvailability(conn, request.technician_id, requestId);
         }
 
@@ -665,7 +697,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
                     breakdown.totalAmount,
                     breakdown.platformFee,
                     breakdown.paymentFee,
-                    breakdown.baseAmount,
+                    resolvedTechnicianAmount,
                     0,
                     breakdown.totalAmount,
                     invoiceId
@@ -708,7 +740,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
                     request.technician_id || null,
                     breakdown.platformFee,
                     breakdown.paymentFee,
-                    breakdown.baseAmount,
+                    resolvedTechnicianAmount,
                     0,
                     breakdown.totalAmount
                 ]
@@ -727,7 +759,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
                 technicianId: request.technician_id,
                 paymentId: paymentRow.id,
                 serviceRequestId: requestId,
-                amount: breakdown.baseAmount,
+                amount: resolvedTechnicianAmount,
                 currency: breakdown.currency,
                 description: `Marketplace service payment credited for request #${requestId}.`,
                 idempotencyKey: `payment-credit:${paymentRow.id}`,
@@ -745,7 +777,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
                  SET jobs_completed = jobs_completed + 1,
                      total_earnings = total_earnings + ?
                  WHERE id = ?`,
-                [breakdown.baseAmount, request.technician_id]
+                [resolvedTechnicianAmount, request.technician_id]
             );
         }
 
@@ -757,7 +789,8 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
             requestId,
             userId: request.user_id,
             technicianId: request.technician_id || null,
-            amount: breakdown.baseAmount,
+            amount: resolvedTechnicianAmount,
+            status: paidRequestStatus,
             invoiceId,
             invoiceStatus,
             customerEmail: request.customer_email || null,
@@ -785,6 +818,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
 async function processFinalizedServicePaymentNotifications(finalized, { paymentMethod = "razorpay" } = {}) {
     if (!finalized || !finalized.processed) return;
     const pool = await getPool();
+    const status = finalized.status || "completed";
 
     if (finalized.invoiceId && finalized.customerEmail && finalized.invoiceStatus !== "EMAILED") {
         try {
@@ -802,14 +836,14 @@ async function processFinalizedServicePaymentNotifications(finalized, { paymentM
     socketService.broadcast("admin:payment_update", {
         requestId: finalized.requestId,
         paymentMethod,
-        status: "completed",
+        status,
         at: new Date().toISOString()
     });
 
     if (finalized.technicianId) {
         socketService.notifyTechnician(finalized.technicianId, "job:status_update", {
             requestId: finalized.requestId,
-            status: "completed",
+            status,
             amount: finalized.amount ?? null,
         });
         socketService.notifyTechnician(finalized.technicianId, "job:list_update", {
@@ -821,11 +855,11 @@ async function processFinalizedServicePaymentNotifications(finalized, { paymentM
     if (finalized.userId) {
         socketService.notifyUser(finalized.userId, "payment_completed", {
             requestId: finalized.requestId,
-            status: "completed"
+            status
         });
         socketService.notifyUser(finalized.userId, "job:status_update", {
             requestId: finalized.requestId,
-            status: "completed"
+            status
         });
     }
 }
@@ -884,10 +918,13 @@ export async function razorpayWebhookHandler(req, res) {
                 const pool = await getPool();
                 const pricingConfig = await getPlatformPricingConfig();
                 const [reqRows] = await pool.query(
-                    `SELECT amount, service_charge, service_type, vehicle_type, technician_id,
-                            applied_coupon_code, applied_discount_percent, applied_discount_amount
-                     FROM service_requests
-                     WHERE id = ? AND user_id = ?
+                    `SELECT sr.id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type, sr.technician_id,
+                            sr.technician_estimated_earning, sr.drop_address, sr.route_distance_km,
+                            sr.applied_coupon_code, sr.applied_discount_percent, sr.applied_discount_amount,
+                            t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
+                     FROM service_requests sr
+                     LEFT JOIN technicians t ON t.id = sr.technician_id
+                     WHERE sr.id = ? AND sr.user_id = ?
                      LIMIT 1`,
                     [requestIdFromNotes, userIdFromNotes]
                 );
@@ -899,12 +936,22 @@ export async function razorpayWebhookHandler(req, res) {
                         paymentMode: "upi",
                         ...getStoredDiscountOptions(reqRows[0]),
                     });
+                    const technicianAmount = await resolveTechnicianPaymentAmount({
+                        requestRow: reqRows[0],
+                        technicianProfile: {
+                            id: reqRows[0].technician_id,
+                            pricing: reqRows[0].technician_pricing,
+                            service_costs: reqRows[0].technician_service_costs,
+                        },
+                        connection: pool,
+                    });
                     await upsertPendingRazorpayPayment({
                         pool,
                         userId: userIdFromNotes,
                         requestId: requestIdFromNotes,
                         orderId,
-                        breakdown
+                        breakdown,
+                        technicianAmount,
                     });
                     finalized = await finalizeCapturedServicePayment({ orderId, paymentId });
                 }
@@ -1153,11 +1200,14 @@ router.post('/create-order', verifyUser, async (req, res) => {
         const pool = await getPool();
         const pricingConfig = await getPlatformPricingConfig();
         const [rows] = await pool.query(
-            `SELECT id, user_id, amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status,
-                    drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, pricing_breakdown_json,
-                    applied_coupon_code, applied_discount_percent, applied_discount_amount
-             FROM service_requests
-             WHERE id = ? AND user_id = ?`,
+            `SELECT sr.id, sr.user_id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type, sr.technician_id,
+                    sr.technician_estimated_earning, sr.status, sr.payment_status,
+                    sr.drop_address, sr.drop_latitude, sr.drop_longitude, sr.route_distance_km, sr.estimated_duration,
+                    sr.pricing_breakdown_json, sr.applied_coupon_code, sr.applied_discount_percent, sr.applied_discount_amount,
+                    t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
+             FROM service_requests sr
+             LEFT JOIN technicians t ON t.id = sr.technician_id
+             WHERE sr.id = ? AND sr.user_id = ?`,
             [requestId, userId]
         );
         if (rows.length === 0) return res.status(404).json({ error: 'Request not found' });
@@ -1166,6 +1216,15 @@ router.post('/create-order', verifyUser, async (req, res) => {
         }
 
         const requestRow = rows[0];
+        const technicianAmount = await resolveTechnicianPaymentAmount({
+            requestRow,
+            technicianProfile: {
+                id: requestRow.technician_id,
+                pricing: requestRow.technician_pricing,
+                service_costs: requestRow.technician_service_costs,
+            },
+            connection: pool,
+        });
         const { breakdown, coupon } = await buildServiceRequestPaymentQuote({
             pool,
             requestRow,
@@ -1203,6 +1262,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
                 orderId: reusablePayment.razorpay_order_id,
                 breakdown,
                 coupon,
+                technicianAmount,
             });
 
             await pool.execute(
@@ -1289,6 +1349,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
             orderId: order.id,
             breakdown,
             coupon,
+            technicianAmount,
         });
 
         await pool.execute(
@@ -1367,10 +1428,13 @@ router.post('/confirm', verifyUser, async (req, res) => {
         const authUserId = req.user.userId;
         const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
-            `SELECT id, amount, service_charge, service_type, vehicle_type, technician_id, user_id, status, payment_status,
-                    applied_coupon_code, applied_discount_percent, applied_discount_amount
-             FROM service_requests
-             WHERE id = ? AND user_id = ?
+            `SELECT sr.id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type, sr.technician_id,
+                    sr.technician_estimated_earning, sr.user_id, sr.status, sr.payment_status,
+                    sr.drop_address, sr.route_distance_km, sr.applied_coupon_code, sr.applied_discount_percent,
+                    sr.applied_discount_amount, t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
+             FROM service_requests sr
+             LEFT JOIN technicians t ON t.id = sr.technician_id
+             WHERE sr.id = ? AND sr.user_id = ?
              LIMIT 1`,
             [requestId, authUserId]
         );
@@ -1380,6 +1444,15 @@ router.post('/confirm', verifyUser, async (req, res) => {
         if (isRequestAlreadyPaid(requestRow)) {
             return res.json({ success: true, alreadyPaid: true });
         }
+        const technicianAmount = await resolveTechnicianPaymentAmount({
+            requestRow,
+            technicianProfile: {
+                id: requestRow.technician_id,
+                pricing: requestRow.technician_pricing,
+                service_costs: requestRow.technician_service_costs,
+            },
+            connection: pool,
+        });
 
         const baseAmount = await resolveRequestBaseAmount(requestRow, pricingConfig);
         const breakdown = computeServiceRequestPaymentAmounts(baseAmount, {
@@ -1400,6 +1473,7 @@ router.post('/confirm', verifyUser, async (req, res) => {
                 appliedCode: requestRow.applied_coupon_code || null,
                 discountPercent: requestRow.applied_discount_percent || 0,
             },
+            technicianAmount,
         });
 
         await pool.execute(
@@ -1418,7 +1492,8 @@ router.post('/confirm', verifyUser, async (req, res) => {
                 userId: authUserId,
                 requestId,
                 orderId: razorpay_order_id,
-                breakdown
+                breakdown,
+                technicianAmount,
             });
             finalized = await finalizeCapturedServicePayment({
                 orderId: razorpay_order_id,
@@ -1489,11 +1564,15 @@ router.post('/cash', verifyUser, async (req, res) => {
         const pool = await getPool();
         const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
-            `SELECT id, user_id, amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status,
-                    address, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, pricing_breakdown_json,
-                    applied_coupon_code, applied_discount_percent, applied_discount_amount
-             FROM service_requests
-             WHERE id = ? AND user_id = ?`,
+            `SELECT sr.id, sr.user_id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type,
+                    sr.technician_id, sr.technician_estimated_earning, sr.status, sr.payment_status,
+                    sr.address, sr.drop_address, sr.drop_latitude, sr.drop_longitude, sr.route_distance_km,
+                    sr.estimated_duration, sr.pricing_breakdown_json, sr.applied_coupon_code,
+                    sr.applied_discount_percent, sr.applied_discount_amount,
+                    t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
+             FROM service_requests sr
+             LEFT JOIN technicians t ON t.id = sr.technician_id
+             WHERE sr.id = ? AND sr.user_id = ?`,
             [requestId, authUserId]
         );
         if (reqRows.length === 0) return res.status(404).json({ error: 'Request not found' });
@@ -1528,7 +1607,17 @@ router.post('/cash', verifyUser, async (req, res) => {
             });
         }
 
-        const techAmount = breakdown.baseAmount;
+        const techAmount = await resolveTechnicianPaymentAmount({
+            requestRow,
+            technicianProfile: {
+                id: requestRow.technician_id,
+                pricing: requestRow.technician_pricing,
+                service_costs: requestRow.technician_service_costs,
+            },
+            connection: pool,
+        }) ?? breakdown.baseAmount;
+        const isTowingRequest = hasTowingRouteData(requestRow);
+        const paidRequestStatus = isTowingRequest ? "payment_pending" : "completed";
 
         const conn = await pool.getConnection();
         try {
@@ -1549,7 +1638,7 @@ router.post('/cash', verifyUser, async (req, res) => {
                 [
                     'paid',
                     'cash',
-                    'completed',
+                    paidRequestStatus,
                     breakdown.baseAmount,
                     breakdown.totalAmount,
                     coupon.appliedCode || null,
@@ -1558,10 +1647,10 @@ router.post('/cash', verifyUser, async (req, res) => {
                     requestId
                 ]
             );
-            if (technicianId) {
+            if (technicianId && !isTowingRequest) {
                 await releaseTechnicianAvailability(conn, technicianId, requestId);
             }
-            console.log('REQUEST STATUS UPDATED:', { requestId, status: 'completed', amount: breakdown.baseAmount });
+            console.log('REQUEST STATUS UPDATED:', { requestId, status: paidRequestStatus, amount: breakdown.baseAmount });
 
             await conn.execute(
                 `INSERT INTO payments (
@@ -1660,7 +1749,7 @@ router.post('/cash', verifyUser, async (req, res) => {
             socketService.broadcast("admin:payment_update", {
                 requestId,
                 paymentMethod: "cash",
-                status: "completed",
+                status: paidRequestStatus,
                 totalAmount: breakdown.totalAmount,
                 at: new Date().toISOString()
             });
@@ -1679,7 +1768,7 @@ router.post('/cash', verifyUser, async (req, res) => {
                 const pendingDues = Number(pendingDueRows?.[0]?.total || 0);
                 socketService.notifyTechnician(technicianId, 'job:status_update', {
                     requestId,
-                    status: 'completed',
+                    status: paidRequestStatus,
                     amount: techAmount,
                 });
                 socketService.notifyTechnician(technicianId, 'job:list_update', { requestId, action: 'updated' });
@@ -1688,8 +1777,8 @@ router.post('/cash', verifyUser, async (req, res) => {
                     at: new Date().toISOString(),
                 });
             }
-            socketService.notifyUser(userId, 'payment_completed', { requestId, status: 'completed' });
-            socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'completed' });
+            socketService.notifyUser(userId, 'payment_completed', { requestId, status: paidRequestStatus });
+            socketService.notifyUser(userId, 'job:status_update', { requestId, status: paidRequestStatus });
 
             const [updatedRows] = await pool.query('SELECT * FROM service_requests WHERE id = ?', [requestId]);
             res.json({ success: true, request: updatedRows[0] });

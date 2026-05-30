@@ -26,7 +26,7 @@ import {
   getTechnicianWithdrawalRequests,
 } from "../services/marketplaceWithdrawalService.js";
 import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPaymentService.js";
-import { isTowingServiceType } from "../services/towingQuoteService.js";
+import { isTowingServiceType } from "../services/towingServiceType.js";
 import {
   markTechnicianHeartbeat,
   markTechnicianLogin,
@@ -270,6 +270,10 @@ const buildTechnicianRouteFields = (row = {}) => {
   const routeDistanceKm = toOptionalNumber(row.route_distance_km ?? row.routeDistanceKm);
   const estimatedDuration = toOptionalNumber(row.estimated_duration ?? row.estimatedDuration);
   const pricingBreakdown = toNullableObject(row.pricing_breakdown_json ?? row.pricingBreakdown);
+  const routeMetadata = toNullableObject(row.route_metadata_json ?? row.routeMetadata);
+  const technicianEstimatedEarning = toPositiveMoney(
+    row.technician_estimated_earning ?? row.technicianEstimatedEarning ?? row.estimatedEarnings
+  );
 
   return {
     drop_address: dropAddress,
@@ -287,11 +291,17 @@ const buildTechnicianRouteFields = (row = {}) => {
     routeDistanceKm,
     estimated_duration: estimatedDuration,
     estimatedDuration,
-    routeMetadata: toNullableObject(row.route_metadata_json ?? row.routeMetadata),
+    routeMetadata,
+    routeGeometry: routeMetadata?.geometry || null,
+    routePolyline: Array.isArray(routeMetadata?.polyline) ? routeMetadata.polyline : null,
     pricingBreakdown,
     pricing_breakdown: pricingBreakdown,
+    vehicleCategory: pricingBreakdown?.vehicle_category || row.vehicle_category || null,
     estimated_price: toOptionalNumber(row.estimated_price),
     final_price: toOptionalNumber(row.final_price),
+    technician_estimated_earning: technicianEstimatedEarning,
+    technicianEstimatedEarning,
+    estimatedEarnings: technicianEstimatedEarning,
   };
 };
 
@@ -560,7 +570,13 @@ function resolveBroadcastTechnicianStatus(row) {
 
 async function resolveTechnicianJobAmount(jobRow, technicianProfile, _pricingConfig = null) {
   if (hasTowingRouteData(jobRow)) {
-    const stored = toPositiveMoney(jobRow?.amount ?? jobRow?.service_charge);
+    const stored = toPositiveMoney(
+      jobRow?.technician_estimated_earning ??
+      jobRow?.technicianEstimatedEarning ??
+      jobRow?.estimatedEarnings ??
+      jobRow?.amount ??
+      jobRow?.service_charge
+    );
     if (stored != null) return stored;
   }
 
@@ -578,6 +594,12 @@ const ACTIVE_TECHNICIAN_JOB_STATUSES = Object.freeze([
   "assigned",
   "technician_assigned",
   "accepted",
+  "en_route_pickup",
+  "arrived_pickup",
+  "vehicle_loaded",
+  "enroute_drop",
+  "arrived_drop",
+  "service_completed",
   "service_started",
   "en-route",
   "en_route",
@@ -1758,6 +1780,12 @@ router.patch("/me/location", verifyTechnician, async (req, res) => {
             AND LOWER(COALESCE(status, '')) IN (
                'assigned',
                'accepted',
+               'en_route_pickup',
+               'arrived_pickup',
+               'vehicle_loaded',
+               'enroute_drop',
+               'arrived_drop',
+               'service_completed',
                'processing',
                'service_started',
                'en-route',
@@ -2339,6 +2367,12 @@ router.patch("/location", verifyTechnician, async (req, res) => {
             AND LOWER(COALESCE(status, '')) IN (
                'assigned',
                'accepted',
+               'en_route_pickup',
+               'arrived_pickup',
+               'vehicle_loaded',
+               'enroute_drop',
+               'arrived_drop',
+               'service_completed',
                'processing',
                'service_started',
                'en-route',
@@ -2436,7 +2470,7 @@ router.get("/me/active-job-legacy", verifyTechnician, async (req, res) => {
     const [rows] = await pool.query(
       `SELECT * FROM service_requests 
        WHERE technician_id = ?
-      AND status IN('assigned', 'accepted', 'processing', 'en-route', 'in_progress', 'in-progress', 'awaiting_payment', 'payment_pending')
+      AND status IN('assigned', 'accepted', 'en_route_pickup', 'arrived_pickup', 'vehicle_loaded', 'enroute_drop', 'arrived_drop', 'service_completed', 'processing', 'en-route', 'in_progress', 'in-progress', 'awaiting_payment', 'payment_pending')
        ORDER BY created_at DESC LIMIT 1`,
       [technicianId]
     );

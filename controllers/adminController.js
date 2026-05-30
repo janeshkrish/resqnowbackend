@@ -16,7 +16,12 @@ export async function getDashboard(req, res) {
       pool.query(
         `SELECT COUNT(*) AS count
          FROM service_requests
-         WHERE LOWER(COALESCE(status, '')) IN ('pending', 'assigned', 'processing')`
+         WHERE LOWER(COALESCE(status, '')) IN (
+           'pending', 'assigned', 'accepted', 'en_route_pickup', 'arrived_pickup',
+           'vehicle_loaded', 'enroute_drop', 'arrived_drop', 'service_completed',
+           'processing', 'service_started', 'en-route', 'on-the-way', 'arrived',
+           'in_progress', 'in-progress', 'awaiting_payment', 'payment_pending'
+         )`
       ),
       pool.query(
         `SELECT COUNT(*) AS count

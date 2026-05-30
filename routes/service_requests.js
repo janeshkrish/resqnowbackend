@@ -17,7 +17,16 @@ import { estimateRequestAmount, estimateRequestAmountAsync, estimateTechnicianPa
 import { computePaymentAmounts, getPlatformPricingConfig } from "../services/platformPricing.js";
 import { buildMarketplacePricingSnapshot } from "../services/marketplacePaymentService.js";
 import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPaymentService.js";
-import { buildTowingQuote, isTowingServiceType, normalizeTowingQuoteError } from "../services/towingQuoteService.js";
+import { buildTowingQuote, normalizeTowingQuoteError } from "../services/towingQuoteService.js";
+import { isTowingServiceType } from "../services/towingServiceType.js";
+import { estimateTechnicianEarningForRequest } from "../services/technicianEarningsService.js";
+import {
+    getTowingRealtimeEvent,
+    mapRequestedTechnicianStatus,
+    normalizeRequestStatus,
+    normalizeStatusForWorkflow,
+    validateTechnicianStatusTransition,
+} from "../services/requestStatusWorkflow.js";
 import {
     PAYMENT_LEDGER_STATUS,
     PAYMENT_TO_TECHNICIAN_STATUS,
@@ -121,21 +130,38 @@ const buildDropLocationPayload = (row) => {
     };
 };
 
-const buildTowingRouteResponseFields = (row) => ({
-    drop_address: row?.drop_address || null,
-    dropLocation: buildDropLocationPayload(row),
-    drop_latitude: row?.drop_latitude ?? null,
-    drop_longitude: row?.drop_longitude ?? null,
-    route_distance_km: row?.route_distance_km ?? null,
-    routeDistanceKm: row?.route_distance_km == null ? null : Number(row.route_distance_km),
-    estimated_duration: row?.estimated_duration ?? null,
-    estimatedDuration: row?.estimated_duration == null ? null : Number(row.estimated_duration),
-    route_metadata: safeParseObject(row?.route_metadata_json),
-    pricing_breakdown: safeParseObject(row?.pricing_breakdown_json),
-    pricingBreakdown: safeParseObject(row?.pricing_breakdown_json),
-    estimated_price: row?.estimated_price ?? null,
-    final_price: row?.final_price ?? null,
-});
+const buildTowingRouteResponseFields = (row) => {
+    const routeMetadata = safeParseObject(row?.route_metadata_json) || safeParseObject(row?.routeMetadata);
+    const pricingBreakdown = safeParseObject(row?.pricing_breakdown_json) || safeParseObject(row?.pricingBreakdown);
+    const technicianEarning = toPositiveMoney(
+        row?.technician_estimated_earning ?? row?.technicianEstimatedEarning ?? row?.estimatedEarnings
+    );
+    return {
+        drop_address: row?.drop_address || null,
+        dropLocation: buildDropLocationPayload(row),
+        drop_latitude: row?.drop_latitude ?? null,
+        drop_longitude: row?.drop_longitude ?? null,
+        route_distance_km: row?.route_distance_km ?? null,
+        routeDistanceKm: row?.route_distance_km == null ? null : Number(row.route_distance_km),
+        estimated_duration: row?.estimated_duration ?? null,
+        estimatedDuration: row?.estimated_duration == null ? null : Number(row.estimated_duration),
+        route_metadata: routeMetadata,
+        routeMetadata,
+        routeGeometry: routeMetadata?.geometry || null,
+        routePolyline: Array.isArray(routeMetadata?.polyline) ? routeMetadata.polyline : null,
+        pricing_breakdown: pricingBreakdown,
+        pricingBreakdown,
+        estimated_price: row?.estimated_price ?? null,
+        final_price: row?.final_price ?? null,
+        technician_estimated_earning: technicianEarning,
+        technicianEstimatedEarning: technicianEarning,
+        estimatedEarnings: technicianEarning,
+        vehicle_loaded_time: row?.vehicle_loaded_time ?? null,
+        vehicleLoadedTime: row?.vehicle_loaded_time ?? null,
+        drop_arrival_time: row?.drop_arrival_time ?? null,
+        dropArrivalTime: row?.drop_arrival_time ?? null,
+    };
+};
 
 async function resolveRequestBaseAmount(requestRow, pricingConfig = null) {
     if (hasTowingRouteData(requestRow)) {
@@ -226,51 +252,8 @@ function sendDeprecatedServiceRequestPaymentRoute(res, replacementPath, details)
     });
 }
 
-// Allowed statuses and a small normalization helper to accept variants used in the UI
-const VALID_STATUSES = new Set([
-    'pending',
-    'assigned',
-    'accepted',
-    'processing',
-    'service_started',
-    'on-the-way',
-    'en-route',
-    'arrived',
-    'in_progress',
-    'in-progress',
-    'awaiting_payment',
-    'payment_pending',
-    'completed',
-    'cancelled',
-    'rejected',
-    'paid'
-]);
-
 function normalizeStatus(status) {
-    if (!status && status !== 0) return null;
-    const s = String(status).trim().toLowerCase();
-    const map = {
-        'service started': 'service_started',
-        'service_started': 'service_started',
-        'service-started': 'service_started',
-        'on_the_way': 'on-the-way',
-        'on the way': 'on-the-way',
-        'on-the-way': 'on-the-way',
-        'in_progress': 'in-progress',
-        'in progress': 'in-progress',
-        'in-progress': 'in-progress',
-        'processing': 'processing',
-        'en_route': 'en-route',
-        'en-route': 'en-route',
-        'payment_pending': 'payment_pending',
-        'payment-pending': 'payment_pending',
-        'awaiting_payment': 'awaiting_payment',
-        'awaiting-payment': 'awaiting_payment',
-        'awaiting payment': 'awaiting_payment'
-    };
-    if (map[s]) return map[s];
-    if (VALID_STATUSES.has(s)) return s;
-    return null;
+    return normalizeRequestStatus(status);
 }
 
 /**
@@ -481,6 +464,7 @@ router.post("/", verifyUser, async (req, res) => {
                     technicianId: directTechnicianId,
                     paymentMode: req.body.paymentMode || req.body.payment_mode || "upi",
                     emergency: req.body.emergency || req.body.isEmergency,
+                    timeOfDay: req.body.timeOfDay ?? req.body.time_of_day ?? req.body.scheduledTime ?? req.body.scheduled_time,
                 });
                 initialAmount = towingQuote.base_amount;
             } catch (quoteErr) {
@@ -510,11 +494,28 @@ router.post("/", verifyUser, async (req, res) => {
         const pricingBreakdownJson = towingQuote ? JSON.stringify(towingQuote.pricing_breakdown || {}) : null;
         const estimatedPrice = towingQuote?.final_estimated_price ?? null;
         const finalPrice = towingQuote?.final_estimated_price ?? null;
+        let technicianEstimatedEarning = null;
+        if (inferredDomain === "towing" && directTechnicianId && selectedTechnician) {
+            const earningEstimate = await estimateTechnicianEarningForRequest({
+                request: {
+                    service_type: canonicalServiceType,
+                    vehicle_type: inferredVehicle,
+                    route_distance_km: routeDistanceKm,
+                    amount: initialAmount,
+                    technician_id: directTechnicianId,
+                    scheduled_time: req.body.scheduled_time ?? req.body.scheduledTime ?? new Date(),
+                },
+                technician: selectedTechnician,
+                technicianId: directTechnicianId,
+                connection: pool,
+            });
+            technicianEstimatedEarning = toPositiveMoney(earningEstimate?.amount);
+        }
 
         const [result] = await pool.execute(
             `INSERT INTO service_requests 
-      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_id, status, amount) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_estimated_earning, technician_id, status, amount) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 userId,
                 canonicalServiceType,
@@ -538,6 +539,7 @@ router.post("/", verifyUser, async (req, res) => {
                 pricingBreakdownJson,
                 estimatedPrice,
                 finalPrice,
+                technicianEstimatedEarning,
                 directTechnicianId,
                 initialStatus,
                 initialAmount
@@ -571,8 +573,14 @@ router.post("/", verifyUser, async (req, res) => {
                 routeMetadata: towingQuote.route_metadata,
                 pricingBreakdown: towingQuote.pricing_breakdown,
                 finalEstimatedPrice: towingQuote.final_estimated_price,
+                technicianEstimatedEarning,
+                estimatedEarnings: technicianEstimatedEarning,
             }
             : {};
+        const technicianOfferAmount =
+            inferredDomain === "towing"
+                ? toPositiveMoney(technicianEstimatedEarning) ?? 0
+                : toPositiveMoney(initialAmount) ?? 0;
 
         if (adminNotificationEmail) {
             void sendEventEmail("ADMIN_NEW_USER_REQUEST", {
@@ -612,6 +620,7 @@ router.post("/", verifyUser, async (req, res) => {
                     vehicle_type: inferredVehicle,
                     address: pickupAddressForDb,
                     amount: initialAmount,
+                    technician_estimated_earning: technicianEstimatedEarning,
                     contact_name: req.body.contact_name || null,
                     drop_address: towingQuote?.drop?.address || null,
                     drop_latitude: towingQuote?.drop?.lat ?? null,
@@ -655,8 +664,10 @@ router.post("/", verifyUser, async (req, res) => {
                         },
                         address: pickupAddressForDb,
                         ...dispatchTowingFields,
-                        amount: initialAmount || 0,
-                        priceAmount: initialAmount || 0
+                        amount: technicianOfferAmount,
+                        priceAmount: technicianOfferAmount,
+                        technicianEstimatedEarning,
+                        estimatedEarnings: technicianEstimatedEarning
                     };
                     if (socketService.io) {
                         socketService.io.to(`technician_${directTechnicianId}`).emit("JOB_ALERT", directAssignedPayload);
@@ -707,6 +718,8 @@ router.post("/", verifyUser, async (req, res) => {
             status: initialStatus,
             technician_id: directTechnicianId,
             amount: initialAmount,
+            technicianEstimatedEarning,
+            estimatedEarnings: technicianEstimatedEarning,
             ...dispatchTowingFields,
             towingQuote,
             message: hasDirectTechnician
@@ -807,6 +820,7 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 sr.id,
                 sr.service_type,
                 sr.vehicle_type,
+                sr.vehicle_model,
                 sr.address,
                 sr.drop_address,
                 sr.drop_latitude,
@@ -817,6 +831,7 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 sr.pricing_breakdown_json,
                 sr.estimated_price,
                 sr.final_price,
+                sr.technician_estimated_earning,
                 sr.contact_name,
                 sr.location_lat,
                 sr.location_lng,
@@ -844,23 +859,22 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
         }
 
         const row = rows[0];
-        const estimatedAmount = await estimateTechnicianPayoutAsync(
-            { service_type: row.service_type, vehicle_type: row.vehicle_type },
-            {
+        const earningEstimate = await estimateTechnicianEarningForRequest({
+            request: row,
+            technicianId,
+            technician: {
                 id: technicianId,
                 pricing: row.technician_pricing,
                 service_costs: row.technician_service_costs
             },
-            { technicianId }
-        );
-        const storedTowingAmount = hasTowingRouteData(row) ? toPositiveMoney(row.amount) : null;
-        const resolvedOfferAmount = storedTowingAmount ?? toPositiveMoney(estimatedAmount) ?? toPositiveMoney(row.amount) ?? 0;
+        });
+        const resolvedOfferAmount = toPositiveMoney(earningEstimate?.amount) ?? toPositiveMoney(row.amount) ?? 0;
         const normalizedStatus = normalizeStatus(row?.status) || String(row?.status || "").trim().toLowerCase();
         const offerStatus = String(row?.offer_status || "").trim().toLowerCase();
         const assignedTechnicianId = row?.technician_id == null ? null : String(row.technician_id);
         const isAssignedToCurrentTechnician = assignedTechnicianId === String(technicianId);
         const hasPendingOffer = offerStatus === "pending";
-        const terminalStatuses = new Set(["cancelled", "completed", "rejected"]);
+        const terminalStatuses = new Set(["cancelled", "completed", "rejected", "paid", "closed"]);
 
         if (terminalStatuses.has(normalizedStatus)) {
             return res.status(409).json({
@@ -907,6 +921,9 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 service_type: row.service_type,
                 vehicleType: row.vehicle_type,
                 vehicle_type: row.vehicle_type,
+                vehicleModel: row.vehicle_model,
+                vehicle_model: row.vehicle_model,
+                vehicleCategory: safeParseObject(row.pricing_breakdown_json)?.vehicle_category || row.vehicle_type || null,
                 customerName: row.contact_name || "Customer",
                 address: row.address || "",
                 status: normalizedStatus,
@@ -923,6 +940,11 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 locationDistance: distanceKm != null ? `${distanceKm.toFixed(1)} km` : "Nearby",
                 amount: resolvedOfferAmount,
                 priceAmount: resolvedOfferAmount,
+                technicianEstimatedEarning: resolvedOfferAmount,
+                technician_estimated_earning: resolvedOfferAmount,
+                estimatedEarnings: resolvedOfferAmount,
+                earningsSource: earningEstimate?.source || null,
+                earningsBreakdown: earningEstimate?.breakdown || null,
             },
         });
     } catch (err) {
@@ -982,6 +1004,25 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                 error: `Cannot reject request when status is '${request.status || currentRequestStatus || "unknown"}'.`
             });
         }
+        const requestedStatus = mapRequestedTechnicianStatus({
+            requestedStatus: normalized,
+            currentStatus: request.status,
+            serviceType: request.service_type,
+        });
+        if (!requestedStatus) {
+            return res.status(400).json({ error: "Invalid status value." });
+        }
+        if (normalized !== "rejected") {
+            const transition = validateTechnicianStatusTransition({
+                currentStatus: request.status,
+                nextStatus: requestedStatus,
+                serviceType: request.service_type,
+                paymentStatus: request.payment_status,
+            });
+            if (!transition.ok) {
+                return res.status(409).json({ error: transition.reason || "Invalid status transition." });
+            }
+        }
 
         // Fetch user and tech info upfront
         const [users] = await pool.query("SELECT email, full_name FROM users WHERE id = ?", [request.user_id]);
@@ -991,7 +1032,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
         const [techs] = await pool.query("SELECT name FROM technicians WHERE id = ?", [technicianId]);
         const techName = techs[0]?.name || "Your Technician";
 
-        let newStatus = normalized;
+        let newStatus = requestedStatus;
         let newTechId = technicianId;
         let reassignedAmount = null;
 
@@ -1079,11 +1120,6 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             }
         }
 
-        // If tech marks work done, move to awaiting_payment until user payment is finished.
-        if (normalized === 'completed' && !['paid', 'completed'].includes(String(request.status || '').toLowerCase())) {
-            newStatus = 'awaiting_payment';
-        }
-
         // Timestamp logic
         let timestampUpdate = "";
         if (newStatus === 'accepted') {
@@ -1091,15 +1127,21 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
         } else if (
             newStatus === 'service_started' ||
             newStatus === 'en-route' ||
+            newStatus === 'en_route_pickup' ||
+            newStatus === 'enroute_drop' ||
             newStatus === 'in-progress' ||
             newStatus === 'in_progress' ||
             newStatus === 'on-the-way'
         ) {
             timestampUpdate = ", started_at = COALESCE(started_at, NOW()), start_time = COALESCE(start_time, NOW())";
-        } else if (normalized === 'completed' || newStatus === 'awaiting_payment' || newStatus === 'payment_pending' || newStatus === 'paid' || newStatus === 'completed') {
+        } else if (newStatus === 'vehicle_loaded') {
+            timestampUpdate = ", vehicle_loaded_time = COALESCE(vehicle_loaded_time, NOW()), started_at = COALESCE(started_at, NOW()), start_time = COALESCE(start_time, NOW())";
+        } else if (newStatus === 'arrived_drop') {
+            timestampUpdate = ", drop_arrival_time = COALESCE(drop_arrival_time, NOW())";
+        } else if (newStatus === 'service_completed' || normalized === 'completed' || newStatus === 'awaiting_payment' || newStatus === 'payment_pending' || newStatus === 'paid' || newStatus === 'completed' || newStatus === 'closed') {
             // mark completed_at
-            timestampUpdate = ", completed_at = NOW()";
-            if (newStatus === 'paid' || newStatus === 'completed') {
+            timestampUpdate = ", completed_at = COALESCE(completed_at, NOW())";
+            if (newStatus === 'paid' || newStatus === 'completed' || newStatus === 'closed') {
                 await releaseTechnicianAvailability(pool, technicianId, requestId);
             }
         }
@@ -1123,18 +1165,28 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
 
         // Notify Customer via Socket
         if (request.user_id) {
-            socketService.notifyUser(request.user_id, 'job:status_update', {
+            const statusPayload = {
                 requestId,
                 status: newStatus,
                 technicianId: newTechId,
                 started_at: (
                     newStatus === 'service_started' ||
                     newStatus === 'en-route' ||
+                    newStatus === 'en_route_pickup' ||
+                    newStatus === 'enroute_drop' ||
                     newStatus === 'in-progress' ||
                     newStatus === 'in_progress'
                 ) ? new Date().toISOString() : undefined,
-                completed_at: (normalized === 'completed' || newStatus === 'awaiting_payment' || newStatus === 'payment_pending') ? new Date().toISOString() : undefined
-            });
+                completed_at: (normalized === 'completed' || newStatus === 'service_completed' || newStatus === 'awaiting_payment' || newStatus === 'payment_pending' || newStatus === 'closed') ? new Date().toISOString() : undefined
+            };
+            socketService.notifyUser(request.user_id, 'job:status_update', statusPayload);
+            socketService.notifyTechnician(newTechId, 'job:status_update', statusPayload);
+            const towingEvent = getTowingRealtimeEvent(newStatus);
+            if (towingEvent) {
+                socketService.notifyUser(request.user_id, towingEvent, statusPayload);
+                socketService.notifyTechnician(newTechId, towingEvent, statusPayload);
+                socketService.broadcast(`admin:${towingEvent}`, statusPayload);
+            }
         }
 
         // Email Notifications for Customer based on status transitions
@@ -1203,7 +1255,7 @@ router.patch("/:id/status", verifyUser, async (req, res) => {
 
         if (normalized === 'cancelled') {
             // Rule: Cannot cancel if technician has arrived or job is done
-            if (['arrived', 'service_started', 'in-progress', 'in_progress', 'awaiting_payment', 'payment_pending', 'completed', 'paid'].includes(String(reqData.status || '').toLowerCase())) {
+            if (['arrived', 'service_started', 'in-progress', 'in_progress', 'en_route_pickup', 'arrived_pickup', 'vehicle_loaded', 'enroute_drop', 'arrived_drop', 'service_completed', 'awaiting_payment', 'payment_pending', 'completed', 'paid', 'closed'].includes(String(reqData.status || '').toLowerCase())) {
                 return res.status(400).json({ error: `Cannot cancel request when status is '${reqData.status}'.` });
             }
         }

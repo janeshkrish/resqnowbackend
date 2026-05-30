@@ -127,7 +127,7 @@ export async function getAnalytics(req, res) {
         `SELECT
            t.id AS technician_id,
            t.name AS technician_name,
-           SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN ('assigned', 'accepted', 'processing', 'en-route', 'on-the-way', 'arrived', 'in_progress', 'in-progress', 'awaiting_payment', 'payment_pending') THEN 1 ELSE 0 END) AS active_requests,
+           SUM(CASE WHEN LOWER(COALESCE(sr.status, '')) IN ('assigned', 'accepted', 'en_route_pickup', 'arrived_pickup', 'vehicle_loaded', 'enroute_drop', 'arrived_drop', 'service_completed', 'processing', 'en-route', 'on-the-way', 'arrived', 'in_progress', 'in-progress', 'awaiting_payment', 'payment_pending') THEN 1 ELSE 0 END) AS active_requests,
            COUNT(sr.id) AS total_assigned
          FROM technicians t
          LEFT JOIN service_requests sr ON sr.technician_id = t.id

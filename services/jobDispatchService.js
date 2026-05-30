@@ -1,6 +1,5 @@
 import * as db from "../db.js";
 import { socketService } from "./socket.js";
-import axios from "axios";
 import {
     canonicalizeServiceDomain,
     canonicalizeVehicleFamily,
@@ -8,19 +7,17 @@ import {
     parseVehicleTypes,
     serviceDomainsFromCosts,
 } from "./serviceNormalization.js";
-import { estimateTechnicianPayoutAsync } from "./pricingEstimator.js";
 import { markTechnicianReserved } from "./technicianStateService.js";
-import { isTowingServiceType } from "./towingQuoteService.js";
+import { estimateTechnicianEarningForRequest } from "./technicianEarningsService.js";
+import { getRoute } from "./routeService.js";
+import { isTowingServiceType } from "./towingServiceType.js";
 
 
 /**
  * Job Dispatch Service
- * Handles finding nearest technicians, calculating ETAs via Google Matrix API,
+ * Handles finding nearest technicians, calculating ETAs via the shared route service,
  * and managing dispatch offers.
  */
-
-// OSRM Public Server (Demo only - use own instance for prod)
-const OSRM_BASE_URL = process.env.OSRM_URL || "http://router.project-osrm.org/route/v1/driving";
 
 
 // Helper: safe JSON parse
@@ -42,12 +39,6 @@ const safeParseObject = (value) => {
     }
 };
 
-const hasTowingRouteData = (row) =>
-    isTowingServiceType(row?.service_type) ||
-    row?.drop_address != null ||
-    row?.route_distance_km != null ||
-    row?.routeDistanceKm != null;
-
 const buildTowingDispatchFields = (row = {}) => {
     const dropAddress = row.dropAddress || row.drop_address || row?.dropLocation?.address || "";
     const dropLat = Number(row.drop_latitude ?? row.dropLat ?? row?.dropLocation?.lat);
@@ -58,6 +49,13 @@ const buildTowingDispatchFields = (row = {}) => {
         row.pricingBreakdown ||
         safeParseObject(row.pricing_breakdown_json) ||
         safeParseObject(row.pricing_breakdown);
+    const routeMetadata =
+        row.routeMetadata ||
+        safeParseObject(row.route_metadata_json) ||
+        safeParseObject(row.route_metadata);
+    const technicianEarning = toPositiveMoney(
+        row.technicianEstimatedEarning ?? row.technician_estimated_earning ?? row.estimatedEarnings
+    );
 
     if (!dropAddress && distance == null && !pricingBreakdown) return {};
 
@@ -71,7 +69,12 @@ const buildTowingDispatchFields = (row = {}) => {
         routeDistanceKm: distance == null ? null : Number(distance),
         estimatedDuration: duration == null ? null : Number(duration),
         pricingBreakdown,
+        routeMetadata,
+        routeGeometry: routeMetadata?.geometry || null,
+        routePolyline: Array.isArray(routeMetadata?.polyline) ? routeMetadata.polyline : null,
         finalEstimatedPrice: row.finalEstimatedPrice ?? row.final_price ?? row.estimated_price ?? null,
+        technicianEstimatedEarning: technicianEarning,
+        estimatedEarnings: technicianEarning,
     };
 };
 
@@ -186,7 +189,7 @@ export const jobDispatchService = {
     /**
      * Find top technicians for a job request (ETA prioritized).
      * 1. Check DB for active, available, and compatible techs within radius.
-     * 2. Calculate ETA using Google Distance Matrix.
+     * 2. Calculate ETA using the shared OSM route service.
      * 3. Sort by ETA (fastest first).
      * 4. Return top candidates.
      */
@@ -228,7 +231,7 @@ export const jobDispatchService = {
             }
 
             // 3. ETA scoring
-            // Use fallback ETA for everyone; enrich top N with OSRM for better ordering.
+            // Use fallback ETA for everyone; enrich top N with the shared OSM route service.
             candidates.sort((a, b) => a.haversineDist - b.haversineDist);
             candidates.forEach((tech) => {
                 tech.etaSeconds = (tech.haversineDist / 30) * 3600; // fallback 30km/h
@@ -243,15 +246,16 @@ export const jobDispatchService = {
                 // Fetch ETA for each candidate in parallel
                 await Promise.all(matrixCandidates.map(async (tech) => {
                     try {
-                        const url = `${OSRM_BASE_URL}/${tech.longitude},${tech.latitude};${userLng},${userLat}?overview=false`;
-                        const res = await axios.get(url, { timeout: 3000 });
-
-                        if (res.data && res.data.routes && res.data.routes.length > 0) {
-                            const route = res.data.routes[0];
-                            tech.etaSeconds = route.duration; // seconds
-                            tech.etaText = `${Math.ceil(route.duration / 60)} mins`;
-                            tech.distanceText = `${(route.distance / 1000).toFixed(1)} km`;
-                        } else throw new Error("No route found");
+                        const route = await getRoute({
+                            points: [
+                                { lat: tech.latitude, lng: tech.longitude },
+                                { lat: userLat, lng: userLng },
+                            ],
+                            overview: "simplified",
+                        });
+                        tech.etaSeconds = Number(route.durationMinutes || 0) * 60;
+                        tech.etaText = `${Math.ceil(Number(route.durationMinutes || 0))} mins`;
+                        tech.distanceText = `${Number(route.distanceKm || 0).toFixed(1)} km`;
                     } catch { }
                 }));
 
@@ -302,19 +306,12 @@ export const jobDispatchService = {
 
         // 2. Send WebSocket Alerts
         for (const t of freshTechnicians) {
-            const storedTowingAmount = hasTowingRouteData(jobRequest)
-                ? toPositiveMoney(jobRequest.amount ?? jobRequest.service_charge)
-                : null;
-            const estimatedAmount = storedTowingAmount == null
-                ? await estimateTechnicianPayoutAsync({
-                    service_type: jobRequest.service_type,
-                    vehicle_type: jobRequest.vehicle_type
-                }, t, { technicianId: t.id })
-                : null;
-            const resolvedOfferAmount =
-                storedTowingAmount ??
-                toPositiveMoney(estimatedAmount) ??
-                0;
+            const earningEstimate = await estimateTechnicianEarningForRequest({
+                request: jobRequest,
+                technician: t,
+                technicianId: t.id,
+            });
+            const resolvedOfferAmount = toPositiveMoney(earningEstimate?.amount) ?? 0;
             const offerPayload = {
                 requestId: jobRequest.id,
                 serviceType: jobRequest.service_type,
@@ -325,6 +322,10 @@ export const jobDispatchService = {
                 ...buildTowingDispatchFields(jobRequest),
                 amount: resolvedOfferAmount,
                 priceAmount: resolvedOfferAmount,
+                technicianEstimatedEarning: resolvedOfferAmount,
+                estimatedEarnings: resolvedOfferAmount,
+                earningsSource: earningEstimate?.source || null,
+                earningsBreakdown: earningEstimate?.breakdown || null,
                 distance: t.distanceText,
                 locationDistance: t.distanceText,
                 eta: t.etaText,
@@ -382,7 +383,7 @@ export const jobDispatchService = {
                 sourceJob?.technician_id == null ? null : String(sourceJob.technician_id);
             const normalizedTechnicianId = String(technicianId);
             const sameTechnician = existingTechnicianId === normalizedTechnicianId;
-            const terminalStatuses = new Set(["cancelled", "completed", "rejected"]);
+            const terminalStatuses = new Set(["cancelled", "completed", "rejected", "paid", "closed"]);
             const sameTechIdempotentStatuses = new Set([
                 "assigned",
                 "accepted",
@@ -390,9 +391,16 @@ export const jobDispatchService = {
                 "on-the-way",
                 "arrived",
                 "in-progress",
+                "en_route_pickup",
+                "arrived_pickup",
+                "vehicle_loaded",
+                "enroute_drop",
+                "arrived_drop",
+                "service_completed",
                 "awaiting_payment",
                 "payment_pending",
                 "paid",
+                "closed",
             ]);
 
             // 2) Lock technician row.
@@ -405,25 +413,21 @@ export const jobDispatchService = {
                 return { success: false, code: "technician_not_found", reason: "Technician not found" };
             }
             tech = techRows[0];
-            const storedTowingAmount = hasTowingRouteData(sourceJob)
-                ? toPositiveMoney(sourceJob?.amount ?? sourceJob?.service_charge)
-                : null;
-            const estimatedAmount = storedTowingAmount == null
-                ? await estimateTechnicianPayoutAsync(
-                    {
-                        service_type: sourceJob?.service_type,
-                        vehicle_type: sourceJob?.vehicle_type
-                    },
-                    tech,
-                    { technicianId }
-                )
-                : null;
+            const earningEstimate = await estimateTechnicianEarningForRequest({
+                request: sourceJob,
+                technician: tech,
+                technicianId,
+                connection: conn,
+            });
+            const isTowingJob = isTowingServiceType(sourceJob?.service_type);
             assignedAmount =
-                storedTowingAmount ??
-                toPositiveMoney(estimatedAmount) ??
+                toPositiveMoney(earningEstimate?.amount) ??
                 toPositiveMoney(sourceJob?.amount) ??
                 toPositiveMoney(sourceJob?.service_charge);
-            const resolvedAmount = assignedAmount ?? sourceJob?.amount ?? sourceJob?.service_charge ?? null;
+            const customerAmount = isTowingJob
+                ? toPositiveMoney(sourceJob?.amount) ?? toPositiveMoney(sourceJob?.service_charge)
+                : null;
+            const resolvedAmount = customerAmount ?? assignedAmount ?? sourceJob?.amount ?? sourceJob?.service_charge ?? null;
 
             if (terminalStatuses.has(currentStatus)) {
                 await conn.rollback();
@@ -441,8 +445,8 @@ export const jobDispatchService = {
                 // Legacy compatibility: convert stale "assigned" into "accepted".
                 if (currentStatus === "assigned") {
                     await conn.query(
-                        "UPDATE service_requests SET status = 'accepted', amount = COALESCE(amount, ?), accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ?",
-                        [assignedAmount, requestId]
+                        "UPDATE service_requests SET status = 'accepted', amount = COALESCE(amount, ?), technician_estimated_earning = ?, accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ?",
+                        [resolvedAmount, assignedAmount, requestId]
                     );
                     await conn.query(
                         "UPDATE dispatch_offers SET status = 'accepted' WHERE service_request_id = ? AND technician_id = ?",
@@ -459,6 +463,7 @@ export const jobDispatchService = {
                         technician_id: technicianId,
                         status: "accepted",
                         amount: resolvedAmount,
+                        technician_estimated_earning: assignedAmount,
                         updated_at: new Date().toISOString(),
                     };
                 } else {
@@ -484,8 +489,8 @@ export const jobDispatchService = {
 
                 // Fresh accept path.
                 const [acceptUpdateResult] = await conn.query(
-                    "UPDATE service_requests SET technician_id = ?, status = 'accepted', amount = ?, accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ? AND status = 'pending'",
-                    [technicianId, resolvedAmount, requestId]
+                    "UPDATE service_requests SET technician_id = ?, status = 'accepted', amount = ?, technician_estimated_earning = ?, accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ? AND status = 'pending'",
+                    [technicianId, resolvedAmount, assignedAmount, requestId]
                 );
                 const updatedRows = Number(acceptUpdateResult?.affectedRows || 0);
                 console.log(
@@ -515,6 +520,7 @@ export const jobDispatchService = {
                     technician_id: technicianId,
                     status: "accepted",
                     amount: resolvedAmount,
+                    technician_estimated_earning: assignedAmount,
                     updated_at: new Date().toISOString(),
                 };
                 shouldNotify = true;
@@ -614,9 +620,11 @@ export const jobDispatchService = {
                     customerName,
                     serviceType: sourceJob?.service_type,
                     locationDistance,
+                    ...buildTowingDispatchFields(sourceJob),
                     priceAmount: assignedAmount ?? 0,
                     amount: assignedAmount ?? 0,
-                    ...buildTowingDispatchFields(sourceJob),
+                    technicianEstimatedEarning: assignedAmount ?? 0,
+                    estimatedEarnings: assignedAmount ?? 0,
                     location: {
                         lat: sourceJob?.location_lat,
                         lng: sourceJob?.location_lng,

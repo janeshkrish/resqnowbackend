@@ -324,12 +324,15 @@ CREATE TABLE IF NOT EXISTS service_requests (
   pricing_breakdown_json JSON,
   estimated_price DECIMAL(10, 2),
   final_price DECIMAL(10, 2),
+  technician_estimated_earning DECIMAL(10, 2),
+  vehicle_loaded_time DATETIME NULL,
+  drop_arrival_time DATETIME NULL,
   amount DECIMAL(10, 2) DEFAULT 0.00,
   applied_coupon_code VARCHAR(64),
   applied_discount_percent DECIMAL(8,6) DEFAULT 0.000000,
   applied_discount_amount DECIMAL(10,2) DEFAULT 0.00,
   payment_status VARCHAR(50) DEFAULT 'pending',
-  status ENUM('pending','assigned','accepted','en-route','in-progress','completed','cancelled') DEFAULT 'pending',
+  status VARCHAR(50) DEFAULT 'pending',
   contact_phone VARCHAR(50),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -1343,6 +1346,9 @@ export async function updateServiceRequestsTableSchema() {
   await addColumnIfNotExists(p, 'service_requests', 'pricing_breakdown_json JSON');
   await addColumnIfNotExists(p, 'service_requests', 'estimated_price DECIMAL(10, 2)');
   await addColumnIfNotExists(p, 'service_requests', 'final_price DECIMAL(10, 2)');
+  await addColumnIfNotExists(p, 'service_requests', 'technician_estimated_earning DECIMAL(10, 2)');
+  await addColumnIfNotExists(p, 'service_requests', 'vehicle_loaded_time DATETIME NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'drop_arrival_time DATETIME NULL');
   await addColumnIfNotExists(p, 'service_requests', 'pricing_override_json JSON');
   await addColumnIfNotExists(p, 'service_requests', 'pricing_overridden_by VARCHAR(255)');
   await addColumnIfNotExists(p, 'service_requests', 'pricing_overridden_at TIMESTAMP NULL');

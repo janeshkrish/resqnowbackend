@@ -5,6 +5,7 @@
   "scripts": {
     "build": "node scripts/build-check.mjs",
     "email:test": "node scripts/email-smoke-test.mjs",
+    "test:towing-phase2": "node --test tests/towing_phase2.test.js",
     "start": "node index.js",
     "dev": "node --watch index.js",
     "worker:dispatch": "node workers/dispatchWorker.js"

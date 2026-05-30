@@ -10,6 +10,12 @@ const ACTIVE_JOB_STATUSES = new Set([
   "in-progress",
   "awaiting_payment",
   "payment_pending",
+  "en_route_pickup",
+  "arrived_pickup",
+  "vehicle_loaded",
+  "enroute_drop",
+  "arrived_drop",
+  "service_completed",
 ]);
 
 const TERMINAL_JOB_STATUSES = new Set([
@@ -17,6 +23,7 @@ const TERMINAL_JOB_STATUSES = new Set([
   "cancelled",
   "rejected",
   "paid",
+  "closed",
   "expired",
 ]);
 
@@ -105,7 +112,13 @@ export async function reconcileTechnicianAvailability(connOrPool) {
            'in_progress',
            'in-progress',
            'awaiting_payment',
-           'payment_pending'
+           'payment_pending',
+           'en_route_pickup',
+           'arrived_pickup',
+           'vehicle_loaded',
+           'enroute_drop',
+           'arrived_drop',
+           'service_completed'
          )
        GROUP BY sr.technician_id
      ) active ON active.technician_id = t.id

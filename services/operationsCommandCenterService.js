@@ -1,16 +1,19 @@
-import axios from "axios";
 import { getPool } from "../db.js";
 import { socketService } from "./socket.js";
 import { jobDispatchService } from "./jobDispatchService.js";
 import { releaseTechnicianAvailability } from "./technicianStateService.js";
 import { MonitoringWorkerQueue } from "./monitoringWorkerQueue.js";
-
-const GOOGLE_DISTANCE_MATRIX_URL = "https://maps.googleapis.com/maps/api/distancematrix/json";
-const GOOGLE_MAPS_API_KEY = String(process.env.GOOGLE_MAPS_API_KEY || process.env.GMAPS_API_KEY || "").trim();
+import { getRoute } from "./routeService.js";
 
 const ACTIVE_MONITORING_STATUSES = new Set([
   "assigned",
   "accepted",
+  "en_route_pickup",
+  "arrived_pickup",
+  "vehicle_loaded",
+  "enroute_drop",
+  "arrived_drop",
+  "service_completed",
   "processing",
   "in_progress",
   "in-progress",
@@ -25,6 +28,12 @@ const ACTIVE_MONITORING_STATUSES = new Set([
 const PRE_START_STATUSES = new Set(["accepted"]);
 const MOVEMENT_STATUSES = new Set([
   "accepted",
+  "en_route_pickup",
+  "arrived_pickup",
+  "vehicle_loaded",
+  "enroute_drop",
+  "arrived_drop",
+  "service_completed",
   "processing",
   "in_progress",
   "in-progress",
@@ -34,6 +43,12 @@ const MOVEMENT_STATUSES = new Set([
   "arrived",
 ]);
 const PROGRESS_TRACKING_STATUSES = new Set([
+  "en_route_pickup",
+  "arrived_pickup",
+  "vehicle_loaded",
+  "enroute_drop",
+  "arrived_drop",
+  "service_completed",
   "processing",
   "service_started",
   "in_progress",
@@ -107,8 +122,8 @@ function getMonitorConcurrency() {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_CONCURRENCY;
 }
 
-function getGoogleEtaBudget() {
-  const parsed = Number(process.env.OPS_MONITOR_GOOGLE_ETA_BUDGET || DEFAULT_API_BUDGET);
+function getRouteEtaBudget() {
+  const parsed = Number(process.env.OPS_MONITOR_ROUTE_ETA_BUDGET || DEFAULT_API_BUDGET);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_API_BUDGET;
 }
 
@@ -174,7 +189,7 @@ async function estimateEtaMinutes(context, origin, destination) {
     return cacheHit.minutes;
   }
 
-  if (!GOOGLE_MAPS_API_KEY || context.googleCallsRemaining <= 0) {
+  if (context.routeCallsRemaining <= 0) {
     const fallback = fallbackEtaMinutes(directDistance);
     if (fallback != null) {
       etaCache.set(cachedKey, {
@@ -185,24 +200,16 @@ async function estimateEtaMinutes(context, origin, destination) {
     return fallback;
   }
 
-  context.googleCallsRemaining -= 1;
+  context.routeCallsRemaining -= 1;
   try {
-    const params = {
-      origins: `${origin.lat},${origin.lng}`,
-      destinations: `${destination.lat},${destination.lng}`,
-      departure_time: "now",
-      key: GOOGLE_MAPS_API_KEY,
-    };
-    const { data } = await axios.get(GOOGLE_DISTANCE_MATRIX_URL, { params, timeout: 5000 });
-    const seconds = Number(
-      data?.rows?.[0]?.elements?.[0]?.duration_in_traffic?.value ??
-      data?.rows?.[0]?.elements?.[0]?.duration?.value
-    );
-    if (!Number.isFinite(seconds) || seconds <= 0) {
-      throw new Error("Distance Matrix did not return duration.");
+    const route = await getRoute({
+      points: [origin, destination],
+      overview: "simplified",
+    });
+    const minutes = Number(route.durationMinutes);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      throw new Error("Route service did not return duration.");
     }
-
-    const minutes = seconds / 60;
     etaCache.set(cachedKey, {
       minutes,
       expiresAt: now + 45_000,
@@ -337,14 +344,14 @@ async function resolveTerminalJobAlerts(pool) {
          a.resolved_at = NOW(),
          a.updated_at = NOW()
      WHERE a.is_active = 1
-       AND sr.status IN ('completed', 'cancelled', 'paid', 'rejected')`
+       AND sr.status IN ('completed', 'cancelled', 'paid', 'closed', 'rejected')`
   );
 }
 
 function buildMonitoringContext() {
   return {
     now: new Date(),
-    googleCallsRemaining: getGoogleEtaBudget(),
+    routeCallsRemaining: getRouteEtaBudget(),
   };
 }
 
@@ -717,7 +724,8 @@ async function executeOperationsCommandCenterCycle({ trigger = "scheduler" } = {
       jobsScanned: 0,
       alertsResolved: 0,
       alertsDetected: 0,
-      googleCallsRemaining: context.googleCallsRemaining,
+      routeCallsRemaining: context.routeCallsRemaining,
+      googleCallsRemaining: context.routeCallsRemaining,
     };
   }
 
@@ -760,7 +768,8 @@ async function executeOperationsCommandCenterCycle({ trigger = "scheduler" } = {
     alertsResolved,
     workerFailures: processingResult.failed,
     workerErrors: processingResult.errors,
-    googleCallsRemaining: context.googleCallsRemaining,
+    routeCallsRemaining: context.routeCallsRemaining,
+    googleCallsRemaining: context.routeCallsRemaining,
   };
 }
 
