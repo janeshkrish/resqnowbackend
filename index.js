@@ -237,6 +237,9 @@ function createApp() {
   app.use("/api/service-requests", serviceRequestsRouter);
   app.use("/api/requests", serviceRequestsRouter);
   app.use("/api/public", publicRouter);
+  // Compatibility alias for public proxy endpoints such as /api/location-search.
+  // The router is still the single backend OSM/provider abstraction used by /api/public/*.
+  app.use("/api", publicRouter);
   app.use("/api/payments", paymentsRouter);
   app.use("/api/pricing", pricingRouter);
   app.use("/api/vehicles", vehiclesRouter);
