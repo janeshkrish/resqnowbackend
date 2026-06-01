@@ -104,6 +104,11 @@ const toPositiveMoney = (value) => {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const toOptionalString = (value) => {
+    const trimmed = String(value || "").trim();
+    return trimmed || null;
+};
+
 const safeParseObject = (value) => {
     if (!value) return null;
     try {
@@ -139,6 +144,8 @@ const buildTowingRouteResponseFields = (row) => {
     return {
         drop_address: row?.drop_address || null,
         dropLocation: buildDropLocationPayload(row),
+        pickupPlaceId: routeMetadata?.pickupPlaceId || routeMetadata?.placeIds?.pickup || routeMetadata?.googlePlaceIds?.pickup || null,
+        dropPlaceId: routeMetadata?.dropPlaceId || routeMetadata?.placeIds?.drop || routeMetadata?.googlePlaceIds?.drop || null,
         drop_latitude: row?.drop_latitude ?? null,
         drop_longitude: row?.drop_longitude ?? null,
         route_distance_km: row?.route_distance_km ?? null,
@@ -490,7 +497,23 @@ router.post("/", verifyUser, async (req, res) => {
         const pickupAddressForDb = towingQuote?.pickup?.address || address;
         const routeDistanceKm = towingQuote?.distance_km ?? null;
         const estimatedDuration = towingQuote?.estimated_duration ?? null;
-        const routeMetadataJson = towingQuote ? JSON.stringify(towingQuote.route_metadata || {}) : null;
+        const pickupPlaceId = toOptionalString(
+            req.body.pickupPlaceId ??
+            req.body.locationPlaceId ??
+            req.body.pickup_place_id ??
+            req.body.location_place_id
+        );
+        const dropPlaceId = toOptionalString(req.body.dropPlaceId ?? req.body.drop_place_id);
+        const routeMetadata = towingQuote ? { ...(towingQuote.route_metadata || {}) } : null;
+        if (routeMetadata && (pickupPlaceId || dropPlaceId)) {
+            routeMetadata.googlePlaceIds = {
+                pickup: pickupPlaceId,
+                drop: dropPlaceId,
+            };
+            routeMetadata.pickupPlaceId = pickupPlaceId;
+            routeMetadata.dropPlaceId = dropPlaceId;
+        }
+        const routeMetadataJson = routeMetadata ? JSON.stringify(routeMetadata) : null;
         const pricingBreakdownJson = towingQuote ? JSON.stringify(towingQuote.pricing_breakdown || {}) : null;
         const estimatedPrice = towingQuote?.final_estimated_price ?? null;
         const finalPrice = towingQuote?.final_estimated_price ?? null;
@@ -570,7 +593,7 @@ router.post("/", verifyUser, async (req, res) => {
                 dropAddress: towingQuote.drop.address,
                 routeDistanceKm: towingQuote.distance_km,
                 estimatedDuration: towingQuote.estimated_duration,
-                routeMetadata: towingQuote.route_metadata,
+                routeMetadata,
                 pricingBreakdown: towingQuote.pricing_breakdown,
                 finalEstimatedPrice: towingQuote.final_estimated_price,
                 technicianEstimatedEarning,
