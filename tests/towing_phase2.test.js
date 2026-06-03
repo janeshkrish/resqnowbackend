@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { coercePricingTimestamp } from "../services/pricingTimestamp.js";
 import { normalizeRoutePoints } from "../services/routePointNormalizer.js";
@@ -92,4 +93,20 @@ test("route point normalization rejects invalid coordinates", () => {
     () => normalizeRoutePoints([{ lat: 11, lng: 77 }, { lat: 111, lng: 77 }]),
     /latitude is invalid/
   );
+});
+
+test("towing estimate API route is declared and mounted before broad public API alias", async () => {
+  const [indexSource, pricingSource] = await Promise.all([
+    readFile(new URL("../index.js", import.meta.url), "utf8"),
+    readFile(new URL("../routes/pricing.js", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(pricingSource, /router\.post\(\s*["']\/towing-estimate["']/);
+
+  const pricingMountIndex = indexSource.indexOf('app.use("/api/pricing", pricingRouter)');
+  const publicAliasMountIndex = indexSource.indexOf('app.use("/api", publicRouter)');
+
+  assert.notEqual(pricingMountIndex, -1);
+  assert.notEqual(publicAliasMountIndex, -1);
+  assert.ok(pricingMountIndex < publicAliasMountIndex);
 });
