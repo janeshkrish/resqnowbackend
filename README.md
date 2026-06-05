@@ -119,7 +119,7 @@ npm start
 
 ### Dispatch Worker (BullMQ)
 
-Run a dedicated queue worker process :
+Run a dedicated queue worker process 
 ```bash
 npm run worker:dispatch
 ```
