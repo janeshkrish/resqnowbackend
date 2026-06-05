@@ -4,6 +4,7 @@ import test from "node:test";
 import { coercePricingTimestamp } from "../services/pricingTimestamp.js";
 import { normalizeRoutePoints } from "../services/routePointNormalizer.js";
 import { isTowingServiceType } from "../services/towingServiceType.js";
+import { buildTowingRouteResponseFields } from "../services/towingRouteResponse.js";
 import {
   mapRequestedTechnicianStatus,
   validateTechnicianStatusTransition,
@@ -13,6 +14,27 @@ test("towing service detection covers towing aliases", () => {
   assert.equal(isTowingServiceType("towing"), true);
   assert.equal(isTowingServiceType("car-towing"), true);
   assert.equal(isTowingServiceType("puncture"), false);
+  assert.equal(isTowingServiceType("car-battery"), false);
+});
+
+test("towing route response fields are only emitted for towing requests", () => {
+  const routeRow = {
+    service_type: "car-battery",
+    drop_address: "Workshop drop",
+    drop_latitude: 11.01,
+    drop_longitude: 76.95,
+    route_distance_km: 12.4,
+  };
+
+  assert.deepEqual(buildTowingRouteResponseFields(routeRow), {});
+
+  const towingFields = buildTowingRouteResponseFields({
+    ...routeRow,
+    service_type: "car-towing",
+  });
+
+  assert.equal(towingFields.drop_address, "Workshop drop");
+  assert.equal(towingFields.routeDistanceKm, 12.4);
 });
 
 test("towing workflow blocks skipped completion", () => {
