@@ -346,6 +346,62 @@ export async function ensureServiceRequestsTable() {
   await p.execute(SERVICE_REQUESTS_TABLE_SQL);
 }
 
+const REQUEST_TIMELINE_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS request_timeline (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  request_id INT NOT NULL,
+  event_type VARCHAR(80) NOT NULL,
+  status VARCHAR(50) NULL,
+  title VARCHAR(255) NOT NULL,
+  description TEXT NULL,
+  actor_type VARCHAR(40) NULL,
+  actor_id VARCHAR(255) NULL,
+  metadata JSON NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_request_timeline_request_time (request_id, created_at),
+  FOREIGN KEY (request_id) REFERENCES service_requests(id) ON DELETE CASCADE
+)
+`.trim();
+
+export async function ensureRequestTimelineTable() {
+  const p = await getPool();
+  await p.execute(REQUEST_TIMELINE_TABLE_SQL);
+  await addIndexIfNotExists(
+    p,
+    "request_timeline",
+    "idx_request_timeline_request_time",
+    "request_id, created_at"
+  );
+}
+
+const REQUEST_ATTACHMENTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS request_attachments (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  request_id INT NOT NULL,
+  file_name VARCHAR(255) NULL,
+  file_url VARCHAR(1024) NOT NULL,
+  mime_type VARCHAR(120) NULL,
+  attachment_type VARCHAR(40) NOT NULL DEFAULT 'document',
+  uploaded_by_type VARCHAR(40) NULL,
+  uploaded_by_id VARCHAR(255) NULL,
+  metadata JSON NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_request_attachments_request_time (request_id, created_at),
+  FOREIGN KEY (request_id) REFERENCES service_requests(id) ON DELETE CASCADE
+)
+`.trim();
+
+export async function ensureRequestAttachmentsTable() {
+  const p = await getPool();
+  await p.execute(REQUEST_ATTACHMENTS_TABLE_SQL);
+  await addIndexIfNotExists(
+    p,
+    "request_attachments",
+    "idx_request_attachments_request_time",
+    "request_id, created_at"
+  );
+}
+
 const TECHNICIAN_SERVICES_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS technician_services (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,

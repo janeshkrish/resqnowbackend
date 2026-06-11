@@ -194,9 +194,37 @@ async function logAction({ pool, adminId, actionType, targetId, metadata = null 
   );
 }
 
+async function appendRequestTimeline({
+  pool,
+  requestId,
+  eventType,
+  title,
+  status = null,
+  description = null,
+  actorType = "admin",
+  actorId = null,
+  metadata = null,
+}) {
+  await pool.execute(
+    `INSERT INTO request_timeline
+      (request_id, event_type, status, title, description, actor_type, actor_id, metadata)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      requestId,
+      eventType,
+      status,
+      title,
+      description,
+      actorType,
+      actorId,
+      JSON.stringify(metadata || {}),
+    ]
+  );
+}
+
 async function getRequestById(pool, requestId) {
   const [rows] = await pool.query(
-    `SELECT id, status, technician_id
+    `SELECT id, user_id, status, technician_id
      FROM service_requests
      WHERE id = ?
      LIMIT 1`,
@@ -326,7 +354,10 @@ export async function getRequests(req, res) {
 
 export async function assignRequest(req, res) {
   try {
-    const requestId = toPositiveInt(req.body?.requestId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const requestId = toPositiveInt(req.params?.requestId ?? req.body?.requestId, 0, {
+      min: 0,
+      max: Number.MAX_SAFE_INTEGER,
+    });
     const technicianId = toPositiveInt(req.body?.technicianId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
 
     if (!requestId || !technicianId) {
@@ -340,7 +371,7 @@ export async function assignRequest(req, res) {
     }
 
     const [technicianRows] = await pool.query(
-      `SELECT id, name
+      `SELECT id, name, phone, status, is_active, is_available
        FROM technicians
        WHERE id = ?
        LIMIT 1`,
@@ -349,15 +380,55 @@ export async function assignRequest(req, res) {
     if (technicianRows.length === 0) {
       return res.status(404).json({ error: "Technician not found." });
     }
+    if (String(technicianRows[0].status || "").toLowerCase() !== "approved") {
+      return res.status(409).json({ error: "Only approved technicians can be assigned." });
+    }
 
-    await pool.execute(
-      `UPDATE service_requests
-       SET technician_id = ?,
-           status = CASE WHEN LOWER(COALESCE(status, '')) IN ('pending', 'open') THEN 'assigned' ELSE status END,
-           updated_at = NOW()
-       WHERE id = ?`,
-      [technicianId, requestId]
-    );
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.execute(
+        `UPDATE service_requests
+         SET technician_id = ?,
+             status = CASE
+               WHEN LOWER(COALESCE(status, '')) IN ('pending', 'open', 'assigned') THEN 'assigned'
+               ELSE status
+             END,
+             updated_at = NOW()
+         WHERE id = ?`,
+        [technicianId, requestId]
+      );
+      if (requestRow.technician_id && Number(requestRow.technician_id) !== technicianId) {
+        await conn.execute(
+          `UPDATE technicians
+           SET current_job_id = NULL, is_available = TRUE
+           WHERE id = ? AND current_job_id = ?`,
+          [requestRow.technician_id, requestId]
+        );
+      }
+      await conn.execute(
+        "UPDATE technicians SET current_job_id = ?, is_available = FALSE WHERE id = ?",
+        [requestId, technicianId]
+      );
+      await appendRequestTimeline({
+        pool: conn,
+        requestId,
+        eventType: "technician_assigned",
+        title: "Technician Assigned",
+        status: "assigned",
+        actorId: resolveAdminId(req),
+        metadata: {
+          technicianId,
+          previousTechnicianId: requestRow.technician_id || null,
+        },
+      });
+      await conn.commit();
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
+    }
 
     const adminNotificationEmail = String(req.adminEmail || process.env.ADMIN_EMAIL || "").trim().toLowerCase();
     if (adminNotificationEmail) {
@@ -389,6 +460,22 @@ export async function assignRequest(req, res) {
       metadata: { technicianId },
     });
 
+    const assignmentPayload = {
+      requestId,
+      jobId: String(requestId),
+      id: String(requestId),
+      technicianId,
+      status: "assigned",
+      assignedByAdmin: true,
+    };
+    if (requestRow.technician_id && Number(requestRow.technician_id) !== technicianId) {
+      socketService.notifyTechnician(requestRow.technician_id, "job:revoked", assignmentPayload);
+    }
+    socketService.notifyTechnician(technicianId, "job:assigned", assignmentPayload);
+    socketService.notifyUser(requestRow.user_id, "job:status_update", assignmentPayload);
+    socketService.broadcast("admin:request_status_updated", assignmentPayload);
+    socketService.broadcast("admin:technician_update", assignmentPayload);
+
     return res.json({
       success: true,
       requestId,
@@ -403,7 +490,10 @@ export async function assignRequest(req, res) {
 
 export async function escalateRequest(req, res) {
   try {
-    const requestId = toPositiveInt(req.body?.requestId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const requestId = toPositiveInt(req.params?.requestId ?? req.body?.requestId, 0, {
+      min: 0,
+      max: Number.MAX_SAFE_INTEGER,
+    });
     const reason = String(req.body?.reason || req.body?.note || "").trim();
     const radiusKm = toPositiveInt(req.body?.radiusKm, 35, { min: 5, max: 200 });
 
@@ -427,6 +517,22 @@ export async function escalateRequest(req, res) {
         radiusKm,
         escalatedAt: new Date().toISOString(),
       },
+    });
+    await appendRequestTimeline({
+      pool,
+      requestId,
+      eventType: "escalated",
+      title: "Request Escalated",
+      status: requestRow.status,
+      description: reason || null,
+      actorId: resolveAdminId(req),
+      metadata: { radiusKm },
+    });
+    socketService.broadcast("admin:request_status_updated", {
+      requestId,
+      status: requestRow.status,
+      escalated: true,
+      at: new Date().toISOString(),
     });
 
     return res.json({
@@ -465,6 +571,15 @@ export async function markHighPriority(req, res) {
         note: note || null,
       },
     });
+    await appendRequestTimeline({
+      pool,
+      requestId,
+      eventType: "high_priority",
+      title: "Marked High Priority",
+      status: requestRow.status,
+      description: note || null,
+      actorId: resolveAdminId(req),
+    });
 
     return res.json({
       success: true,
@@ -480,7 +595,7 @@ export async function markHighPriority(req, res) {
 export async function closeRequest(req, res) {
   try {
     const requestId = toPositiveInt(
-      req.body?.requestId ?? req.body?.id ?? req.body?.request_id,
+      req.params?.requestId ?? req.body?.requestId ?? req.body?.id ?? req.body?.request_id,
       0,
       { min: 0, max: Number.MAX_SAFE_INTEGER }
     );
@@ -520,6 +635,16 @@ export async function closeRequest(req, res) {
         paymentRowsUpdated: closureResult.paymentRowsUpdated,
         alreadyTerminal: closureResult.alreadyTerminal,
       },
+    });
+    await appendRequestTimeline({
+      pool,
+      requestId,
+      eventType: closureResult.status === "completed" ? "completed" : "cancelled",
+      title: closureResult.status === "completed" ? "Request Completed" : "Request Cancelled",
+      status: closureResult.status,
+      description: reason || null,
+      actorId: resolveAdminId(req),
+      metadata: { previousStatus: closureResult.previousStatus },
     });
 
     if (closureResult.userId) {
@@ -573,7 +698,7 @@ export async function closeRequest(req, res) {
 
 export async function overrideRequestPricing(req, res) {
   try {
-    const requestId = toPositiveInt(req.body?.requestId ?? req.body?.request_id, 0, {
+    const requestId = toPositiveInt(req.params?.requestId ?? req.body?.requestId ?? req.body?.request_id, 0, {
       min: 1,
       max: Number.MAX_SAFE_INTEGER,
     });
@@ -653,6 +778,16 @@ export async function overrideRequestPricing(req, res) {
       adminId: resolveAdminId(req),
       actionType: "overrideRequestPricing",
       targetId: requestId,
+      metadata: override,
+    });
+    await appendRequestTimeline({
+      pool,
+      requestId,
+      eventType: "fare_overridden",
+      title: "Fare Overridden",
+      status: requestRow.status,
+      description: reason || null,
+      actorId: resolveAdminId(req),
       metadata: override,
     });
 

@@ -20,6 +20,11 @@ import {
   overrideRequestPricing,
 } from "../controllers/requestController.js";
 import {
+  getAdminRequestAssignmentCandidates,
+  getAdminRequestDetails,
+  getAdminTechnicianDetails,
+} from "../controllers/adminDetailsController.js";
+import {
   getTechnicians,
   getTechnicianLoginActivity,
   toggleTechnicianVisibility,
@@ -95,14 +100,20 @@ router.use((req, res, next) => {
 router.get("/dashboard", getDashboard);
 
 router.get("/requests", getRequests);
+router.get("/requests/:requestId", getAdminRequestDetails);
+router.get("/requests/:requestId/candidates", getAdminRequestAssignmentCandidates);
 router.post("/assign", assignRequest);
+router.post("/requests/:requestId/assign", assignRequest);
 router.post("/escalate", escalateRequest);
+router.post("/requests/:requestId/escalate", escalateRequest);
 router.post("/requests/high-priority", markHighPriority);
 router.post("/requests/pricing-override", overrideRequestPricing);
+router.post("/requests/:requestId/fare", overrideRequestPricing);
 router.post("/close", closeRequest);
 router.post("/requests/close", closeRequest);
 
 router.get("/technicians", getTechnicians);
+router.get("/technicians/:id", getAdminTechnicianDetails);
 router.get("/technician/:technicianId/login-activity", getTechnicianLoginActivity);
 router.post("/technician/toggle", toggleTechnicianVisibility);
 router.post("/technician/note", addTechnicianNote);
