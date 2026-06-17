@@ -179,3 +179,49 @@ export async function replaceTechnicianPricingRows(connectionOrPool, technicianI
 
   return normalizedEntries;
 }
+
+export async function replaceTechnicianFleetVehicles(connectionOrPool, technicianId, entries) {
+  const normalizedTechnicianId = toTechnicianId(technicianId);
+  if (!normalizedTechnicianId) {
+    throw new Error("technician_id is invalid.");
+  }
+
+  await connectionOrPool.execute("DELETE FROM technician_fleet_vehicles WHERE technician_id = ?", [normalizedTechnicianId]);
+
+  const fleetsToInsert = new Set();
+  
+  // Custom simple parser since normalizeTechnicianPricingEntries flattens it out
+  const parseJson = (value, fallback) => {
+    if (typeof value === "string") {
+      try { return JSON.parse(value); } catch { return fallback; }
+    }
+    return value || fallback;
+  };
+  
+  const parsed = parseJson(entries, []);
+  const list = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === "object" ? Object.values(parsed) : []);
+
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    if (Array.isArray(entry.towing_fleet_types)) {
+      for (const type of entry.towing_fleet_types) {
+        if (type && typeof type === "string") fleetsToInsert.add(type.trim());
+      }
+    }
+  }
+
+  if (fleetsToInsert.size > 0) {
+    const placeholders = Array.from(fleetsToInsert).map(() => "(?, ?, ?, ?)").join(", ");
+    const params = Array.from(fleetsToInsert).flatMap((type) => [
+      normalizedTechnicianId,
+      type,
+      "TBD",
+      "available"
+    ]);
+
+    await connectionOrPool.execute(
+      `INSERT INTO technician_fleet_vehicles (technician_id, vehicle_type, vehicle_number, status) VALUES ${placeholders}`,
+      params
+    );
+  }
+}

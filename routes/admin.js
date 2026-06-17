@@ -8,7 +8,7 @@ import { getAdminCredentials, signAdminToken, verifyAdmin } from "../middleware/
 import { getFrontendUrl } from "../config/network.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../services/serviceNormalization.js";
 import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
-import { replaceTechnicianPricingRows } from "../services/technicianPricingStore.js";
+import { replaceTechnicianPricingRows, replaceTechnicianFleetVehicles } from "../services/technicianPricingStore.js";
 import { runDispatchMatrixAudit } from "../services/dispatchMatrixAudit.js";
 import * as adminServicesController from "../controllers/adminServicesController.js";
 import { getDashboard, getAdminAuditLogs } from "../controllers/adminController.js";
@@ -798,6 +798,7 @@ router.put("/technician/:id/pricing", async (req, res) => {
     }
 
     await replaceTechnicianServicePricingRows(conn, technicianId, normalizedEntries);
+    await replaceTechnicianFleetVehicles(conn, technicianId, serviceCostsInput);
     await conn.execute(
       "UPDATE technicians SET service_costs = ? WHERE id = ?",
       [JSON.stringify(normalizedEntries), technicianId]
@@ -897,6 +898,7 @@ router.put("/update-technician/:id", async (req, res) => {
 
     if (serviceCostsInput != null) {
       await replaceTechnicianServicePricingRows(conn, technicianId, serviceCostsNormalized);
+      await replaceTechnicianFleetVehicles(conn, technicianId, serviceCostsInput);
     }
 
     await conn.commit();

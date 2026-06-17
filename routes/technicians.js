@@ -17,6 +17,8 @@ import {
 import { estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
 import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js";
+import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
+import { replaceTechnicianPricingRows, replaceTechnicianFleetVehicles } from "../services/technicianPricingStore.js";
 import {
   getTechnicianWalletSummary,
   getTechnicianWalletTransactionHistory,
@@ -979,6 +981,19 @@ router.post("/register", async (req, res) => {
         req.body.longitude || null
       ]
     );
+
+    const insertedId = result[0].insertId;
+
+    try {
+      if (req.body.pricing_config || req.body.service_costs) {
+        const payloadToSync = req.body.pricing_config || req.body.service_costs;
+        const normalizedEntries = normalizeTechnicianPricingEntries(payloadToSync);
+        await replaceTechnicianPricingRows(pool, insertedId, normalizedEntries);
+        await replaceTechnicianFleetVehicles(pool, insertedId, payloadToSync);
+      }
+    } catch (pricingError) {
+      console.error("[Register] Failed to sync technician pricing", pricingError);
+    }
 
     // Notification Logic
     const title = "New Technician Application";
