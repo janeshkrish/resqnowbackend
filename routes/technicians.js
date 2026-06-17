@@ -1,4 +1,4 @@
-﻿
+
 import { Router } from "express";
 import { socketService } from "../services/socket.js";
 import bcrypt from "bcryptjs";
@@ -33,6 +33,8 @@ import {
   markTechnicianLogout,
 } from "../services/technicianActivityService.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
+import * as technicianPricingController from "../controllers/technicianPricingController.js";
+
 
 const router = Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -3088,6 +3090,10 @@ router.get("/:id/approval-audit", verifyAdmin, async (req, res) => {
     return res.status(500).json({ error: err.message || "Failed to fetch approval audit trail." });
   }
 });
+// --- Technician Service Pricing ---
+router.get("/pricing-template", technicianPricingController.getPricingTemplate);
+router.get("/service-pricing", verifyTechnician, technicianPricingController.getTechnicianServicePricing);
+router.post("/service-pricing", verifyTechnician, technicianPricingController.saveTechnicianPricing);
+router.get("/:technicianId/service-pricing", verifyAdmin, technicianPricingController.getTechnicianServicePricing);
 
 export default router;
-

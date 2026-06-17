@@ -10,6 +10,7 @@ import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../service
 import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
 import { replaceTechnicianPricingRows } from "../services/technicianPricingStore.js";
 import { runDispatchMatrixAudit } from "../services/dispatchMatrixAudit.js";
+import * as adminServicesController from "../controllers/adminServicesController.js";
 import { getDashboard, getAdminAuditLogs } from "../controllers/adminController.js";
 import {
   getRequests,
@@ -147,6 +148,29 @@ router.get("/complaints", getComplaints);
 router.post("/complaints/assign", assignComplaint);
 router.post("/complaints/resolve", resolveComplaint);
 router.post("/complaints/internal-note", addComplaintInternalNote);
+
+// --- Service Configuration ---
+router.get("/services", adminServicesController.getServices);
+router.post("/services", adminServicesController.createService);
+router.put("/services/:id", adminServicesController.updateService);
+router.delete("/services/:id", adminServicesController.deleteService);
+
+router.get("/vehicle-categories", adminServicesController.getVehicleCategories);
+router.post("/vehicle-categories", adminServicesController.createVehicleCategory);
+router.delete("/vehicle-categories/:id", adminServicesController.deleteVehicleCategory);
+
+router.get("/vehicle-subcategories", adminServicesController.getVehicleSubcategories);
+router.post("/vehicle-subcategories", adminServicesController.createVehicleSubcategory);
+router.delete("/vehicle-subcategories/:id", adminServicesController.deleteVehicleSubcategory);
+
+router.get("/pricing-fields", adminServicesController.getPricingFields);
+router.post("/pricing-fields", adminServicesController.createPricingField);
+router.delete("/pricing-fields/:id", adminServicesController.deletePricingField);
+
+router.get("/fleets", adminServicesController.getFleets);
+router.post("/fleets", adminServicesController.createFleet);
+router.delete("/fleets/:id", adminServicesController.deleteFleet);
+
 
 const ADMIN_NOTIFICATION_TYPE_PLACEHOLDERS = ADMIN_NOTIFICATION_TYPE_FILTER_VALUES
   .map(() => "?")

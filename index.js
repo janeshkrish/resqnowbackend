@@ -102,6 +102,14 @@ async function bootstrapDatabase() {
     updateServiceRequestsTableSchema,
     updatePaymentsTableSchema,
     updateUsersTableSchema,
+    ensureServiceMasterTable,
+    ensureVehicleCategoryMasterTable,
+    ensureVehicleSubcategoryMasterTable,
+    ensureServiceVehicleMappingTable,
+    ensureServicePricingFieldMasterTable,
+    ensureTowingFleetMasterTable,
+    ensureTechnicianServicePricingTable,
+    seedInitialServiceConfig,
   } = await import("./db.js");
 
   const ensureSteps = [
@@ -137,6 +145,13 @@ async function bootstrapDatabase() {
     ensureTechnicianLoginSessionsTable,
     ensureTechnicianActivityAlertsTable,
     ensureJobMonitoringAlertsTable,
+    ensureServiceMasterTable,
+    ensureVehicleCategoryMasterTable,
+    ensureVehicleSubcategoryMasterTable,
+    ensureServiceVehicleMappingTable,
+    ensureServicePricingFieldMasterTable,
+    ensureTowingFleetMasterTable,
+    ensureTechnicianServicePricingTable,
   ];
 
   for (const ensureStep of ensureSteps) {
@@ -153,6 +168,8 @@ async function bootstrapDatabase() {
   for (const updateStep of updateSteps) {
     await updateStep();
   }
+
+  await seedInitialServiceConfig();
 
   const { getPool } = await import("./db.js");
   const { backfillMarketplaceWalletCredits } = await import("./services/marketplaceWalletService.js");

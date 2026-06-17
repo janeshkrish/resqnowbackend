@@ -1463,6 +1463,189 @@ export async function updateUsersTableSchema() {
   await addColumnIfNotExists(p, 'users', 'settings JSON');
 }
 
+// --- Dynamic Service Configuration Tables ---
 
+const SERVICE_MASTER_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS service_master (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    service_name VARCHAR(255) NOT NULL,
+    service_slug VARCHAR(255) UNIQUE,
+    description TEXT,
+    icon VARCHAR(255),
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+)
+`.trim();
 
+export async function ensureServiceMasterTable() {
+  const p = await getPool();
+  await p.execute(SERVICE_MASTER_TABLE_SQL);
+}
 
+const VEHICLE_CATEGORY_MASTER_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS vehicle_category_master (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    category_name VARCHAR(100),
+    description TEXT,
+    active BOOLEAN DEFAULT TRUE
+)
+`.trim();
+
+export async function ensureVehicleCategoryMasterTable() {
+  const p = await getPool();
+  await p.execute(VEHICLE_CATEGORY_MASTER_TABLE_SQL);
+}
+
+const VEHICLE_SUBCATEGORY_MASTER_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS vehicle_subcategory_master (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    vehicle_category_id BIGINT,
+    subcategory_name VARCHAR(255),
+    active BOOLEAN DEFAULT TRUE
+)
+`.trim();
+
+export async function ensureVehicleSubcategoryMasterTable() {
+  const p = await getPool();
+  await p.execute(VEHICLE_SUBCATEGORY_MASTER_TABLE_SQL);
+}
+
+const SERVICE_VEHICLE_MAPPING_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS service_vehicle_mapping (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    service_id BIGINT,
+    vehicle_category_id BIGINT
+)
+`.trim();
+
+export async function ensureServiceVehicleMappingTable() {
+  const p = await getPool();
+  await p.execute(SERVICE_VEHICLE_MAPPING_TABLE_SQL);
+}
+
+const SERVICE_PRICING_FIELD_MASTER_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS service_pricing_field_master (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    service_id BIGINT,
+    field_key VARCHAR(255),
+    field_label VARCHAR(255),
+    field_type VARCHAR(50),
+    required BOOLEAN DEFAULT TRUE,
+    sort_order INT DEFAULT 0
+)
+`.trim();
+
+export async function ensureServicePricingFieldMasterTable() {
+  const p = await getPool();
+  await p.execute(SERVICE_PRICING_FIELD_MASTER_TABLE_SQL);
+}
+
+const TOWING_FLEET_MASTER_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS towing_fleet_master (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    fleet_name VARCHAR(255),
+    description TEXT,
+    active BOOLEAN DEFAULT TRUE
+)
+`.trim();
+
+export async function ensureTowingFleetMasterTable() {
+  const p = await getPool();
+  await p.execute(TOWING_FLEET_MASTER_TABLE_SQL);
+}
+
+const TECHNICIAN_SERVICE_PRICING_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS technician_service_pricing (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    technician_id INT,
+    service_id BIGINT,
+    vehicle_category_id BIGINT,
+    vehicle_subcategory_id BIGINT NULL,
+    fleet_id BIGINT NULL,
+    pricing_json JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (technician_id) REFERENCES technicians(id)
+)
+`.trim();
+
+export async function ensureTechnicianServicePricingTable() {
+  const p = await getPool();
+  await p.execute(TECHNICIAN_SERVICE_PRICING_TABLE_SQL);
+}
+
+export async function seedInitialServiceConfig() {
+  const p = await getPool();
+  
+  // Seed Vehicle Categories
+  const [catRows] = await p.query("SELECT COUNT(*) as count FROM vehicle_category_master");
+  if (catRows[0].count === 0) {
+    await p.query("INSERT INTO vehicle_category_master (category_name) VALUES ('Bike'), ('Car'), ('Commercial'), ('EV')");
+  }
+  
+  // Seed Services
+  const [svcRows] = await p.query("SELECT COUNT(*) as count FROM service_master");
+  if (svcRows[0].count === 0) {
+    const defaultServices = [
+      "Flat Tire Repair",
+      "Battery Jumpstart",
+      "Towing Services",
+      "Mechanical Issues",
+      "Fuel Delivery",
+      "Lockout Assistance",
+      "EV Portable Charger",
+      "Winching Services"
+    ];
+    for (const svc of defaultServices) {
+      await p.execute("INSERT INTO service_master (service_name, service_slug) VALUES (?, ?)", [svc, svc.toLowerCase().replace(/ /g, '_')]);
+    }
+  }
+
+  // Seed Vehicle Subcategories
+  const [subcatRows] = await p.query("SELECT COUNT(*) as count FROM vehicle_subcategory_master");
+  if (subcatRows[0].count === 0) {
+    const cats = await p.query("SELECT id, category_name FROM vehicle_category_master");
+    for (const cat of cats[0]) {
+      let subcats = [];
+      if (cat.category_name === 'Bike') subcats = ['Scooter', 'Commuter Bike', 'Sports Bike', 'Premium Bike'];
+      if (cat.category_name === 'Car') subcats = ['Hatchback', 'Sedan', 'SUV', 'Luxury'];
+      if (cat.category_name === 'Commercial') subcats = ['Mini Truck', 'Truck', 'Bus', 'Trailer'];
+      if (cat.category_name === 'EV') subcats = ['EV Bike', 'EV Car', 'EV Commercial'];
+      
+      for (const sc of subcats) {
+        await p.execute("INSERT INTO vehicle_subcategory_master (vehicle_category_id, subcategory_name) VALUES (?, ?)", [cat.id, sc]);
+      }
+    }
+  }
+
+  // Seed Towing Fleets
+  const [fleetRows] = await p.query("SELECT COUNT(*) as count FROM towing_fleet_master");
+  if (fleetRows[0].count === 0) {
+    const defaultFleets = ["Flatbed Trucks", "Front Lift Trucks", "Heavy Duty Wreckers"];
+    for (const f of defaultFleets) {
+      await p.execute("INSERT INTO towing_fleet_master (fleet_name) VALUES (?)", [f]);
+    }
+  }
+
+  // Seed Pricing Fields (Simplified for default ones)
+  const [pfRows] = await p.query("SELECT COUNT(*) as count FROM service_pricing_field_master");
+  if (pfRows[0].count === 0) {
+     const svcs = await p.query("SELECT id, service_name FROM service_master");
+     for (const s of svcs[0]) {
+       let fields = [];
+       if (s.service_name === 'Flat Tire Repair') fields = [{k: 'visit_charge', l: 'Visit Charge'}, {k: 'free_distance', l: 'Free Distance'}, {k: 'cost_per_km', l: 'Cost Per KM'}, {k: 'tube_tyre_price', l: 'Tube Tyre Price'}, {k: 'tubeless_tyre_price', l: 'Tubeless Tyre Price'}];
+       else if (s.service_name === 'Battery Jumpstart') fields = [{k: 'jumpstart_charge', l: 'Jumpstart Charge'}, {k: 'visit_charge', l: 'Visit Charge'}];
+       else if (s.service_name === 'Towing Services') fields = [{k: 'base_charge', l: 'Base Charge'}, {k: 'free_distance', l: 'Free Distance'}, {k: 'cost_per_km', l: 'Cost Per KM'}];
+       else if (s.service_name === 'Mechanical Issues') fields = [{k: 'service_charge', l: 'Service Charge'}, {k: 'visit_charge', l: 'Visit Charge'}];
+       else if (s.service_name === 'Fuel Delivery') fields = [{k: 'delivery_charge', l: 'Delivery Charge'}];
+       else if (s.service_name === 'Lockout Assistance') fields = [{k: 'unlock_charge', l: 'Unlock Charge'}, {k: 'visit_charge', l: 'Visit Charge'}];
+       else if (s.service_name === 'EV Portable Charger') fields = [{k: 'charging_support_fee', l: 'Charging Support Fee'}, {k: 'visit_charge', l: 'Visit Charge'}];
+       else if (s.service_name === 'Winching Services') fields = [{k: 'recovery_fee', l: 'Recovery Fee'}, {k: 'visit_charge', l: 'Visit Charge'}];
+       
+       for (const f of fields) {
+         await p.execute("INSERT INTO service_pricing_field_master (service_id, field_key, field_label, field_type) VALUES (?, ?, ?, 'Number')", [s.id, f.k, f.l]);
+       }
+     }
+  }
+}
