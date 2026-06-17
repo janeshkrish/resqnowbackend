@@ -2918,6 +2918,12 @@ router.post("/me/verify-dues", verifyTechnician, async (req, res) => {
 });
 
 
+// --- Technician Service Pricing ---
+router.get("/pricing-template", technicianPricingController.getPricingTemplate);
+router.get("/service-pricing", verifyTechnician, technicianPricingController.getTechnicianServicePricing);
+router.post("/service-pricing", verifyTechnician, technicianPricingController.saveTechnicianPricing);
+router.get("/:technicianId/service-pricing", verifyAdmin, technicianPricingController.getTechnicianServicePricing);
+
 // ============================================
 // WILDCARD ROUTES (Must be last)
 // ============================================
@@ -3090,10 +3096,4 @@ router.get("/:id/approval-audit", verifyAdmin, async (req, res) => {
     return res.status(500).json({ error: err.message || "Failed to fetch approval audit trail." });
   }
 });
-// --- Technician Service Pricing ---
-router.get("/pricing-template", technicianPricingController.getPricingTemplate);
-router.get("/service-pricing", verifyTechnician, technicianPricingController.getTechnicianServicePricing);
-router.post("/service-pricing", verifyTechnician, technicianPricingController.saveTechnicianPricing);
-router.get("/:technicianId/service-pricing", verifyAdmin, technicianPricingController.getTechnicianServicePricing);
-
 export default router;
