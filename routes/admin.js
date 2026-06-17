@@ -801,7 +801,7 @@ router.put("/technician/:id/pricing", async (req, res) => {
     await replaceTechnicianFleetVehicles(conn, technicianId, serviceCostsInput);
     await conn.execute(
       "UPDATE technicians SET service_costs = ? WHERE id = ?",
-      [JSON.stringify(normalizedEntries), technicianId]
+      [JSON.stringify(serviceCostsInput), technicianId]
     );
 
     await conn.commit();
@@ -890,7 +890,7 @@ router.put("/update-technician/:id", async (req, res) => {
         primaryService,
         JSON.stringify(specialties),
         JSON.stringify(pricing && typeof pricing === "object" ? pricing : {}),
-        JSON.stringify(Array.isArray(serviceCostsNormalized) ? serviceCostsNormalized : []),
+        JSON.stringify(Array.isArray(serviceCostsInput) ? serviceCostsInput : []),
         JSON.stringify(documents && typeof documents === "object" ? documents : {}),
         technicianId
       ]
