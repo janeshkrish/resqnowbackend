@@ -14,6 +14,11 @@ import {
   normalizeVehicleTypes,
   normalizeServiceCosts,
 } from "../services/serviceNormalization.js";
+import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
+import {
+  indexTechnicianPricingRows,
+  resolveTechnicianDisplayPrice,
+} from "../services/technicianPriceDisplay.js";
 import { estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
 import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js";
@@ -2062,6 +2067,37 @@ router.get("/nearby", async (req, res) => {
 
     // Fetch all approved and active technicians
     const rows = await db.query("SELECT * FROM technicians WHERE status = 'approved' AND is_active = TRUE");
+    const technicianIds = rows
+      .map((row) => Number(row.id))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    const normalizedPricingRows = technicianIds.length > 0
+      ? await db.query(
+          `SELECT
+             technician_id,
+             service_domain,
+             vehicle_type,
+             visit_charge,
+             service_charge,
+             extra_km_charge,
+             labour_min,
+             labour_max,
+             delivery_charge,
+             price_2w_min,
+             price_2w_max,
+             price_4w_min,
+             price_4w_max,
+             base_price,
+             free_km,
+             per_km_price,
+             night_charge,
+             night_type,
+             metadata
+           FROM technician_services
+           WHERE technician_id IN (${technicianIds.map(() => "?").join(", ")})`,
+          technicianIds
+        )
+      : [];
+    const pricingRowsByTechnician = indexTechnicianPricingRows(normalizedPricingRows);
 
     const technicians = rows
       .map(row => {
@@ -2091,115 +2127,21 @@ router.get("/nearby", async (req, res) => {
       })
       .filter(t => t.isWithinRange)
       .map(t => {
-        // Dynamic Price Mapping based on selected service_type and optional vehicle_type
-        // Do NOT provide a generic default price. If a price is not configured for the service+vehicle, leave it null.
-        let displayPrice = null;
-
-        if (serviceType && t.pricing && typeof t.pricing === 'object') {
-          const pricingKeys = Object.keys(t.pricing);
-          // Match service key fuzzily (e.g., 'towing' matches 'towing', 'towing_assistance')
-          const matchedKey = pricingKeys.find(key => {
-            const domain = canonicalizeServiceDomain(key);
-            return domain === serviceType || domain.includes(serviceType) || serviceType.includes(domain);
-          });
-
-          if (matchedKey) {
-            const svcVal = t.pricing[matchedKey];
-            console.log(`[DEBUG] Technician ${t.name} matched pricing key ${matchedKey} => `, svcVal);
-
-            // If svcVal is a flat number/string (older/simple form like pricing.towing = 1200), accept it as base price
-            if (svcVal !== undefined && svcVal !== null && (typeof svcVal === 'number' || (typeof svcVal === 'string' && String(svcVal).trim() !== '' && !Number.isNaN(Number(svcVal))))) {
-              displayPrice = Number(svcVal);
-            } else if (svcVal && typeof svcVal === 'object') {
-              // svcVal is expected to be an object keyed by vehicle type (e.g., { car: { baseCharge: '300', perKm: '10' } })
-              // If vehicle type specified, try to pick that entry
-              let vehiclePricing = null;
-              if (requestedVehicleType) {
-                const vKeys = Object.keys(svcVal);
-                const matchedVKey = vKeys.find(k => {
-                  const canonical = canonicalizeVehicleFamily(k);
-                  return canonical === requestedVehicleType || canonical.includes(requestedVehicleType) || requestedVehicleType.includes(canonical);
-                });
-                if (matchedVKey) vehiclePricing = svcVal[matchedVKey];
-              }
-
-              // If vehiclePricing not found and svcVal has only one vehicle key, use that as fallback
-              if (!vehiclePricing) {
-                const vKeys = Object.keys(svcVal);
-                if (vKeys.length === 1) {
-                  vehiclePricing = svcVal[vKeys[0]];
-                }
-              }
-
-              if (vehiclePricing && typeof vehiclePricing === 'object') {
-                // Look for possible base charge keys
-                const baseCandidates = ['baseCharge', 'base_charge', 'base charge', 'Base Charge', 'price', 'amount', 'base'];
-                for (const k of baseCandidates) {
-                  if (vehiclePricing[k] !== undefined && vehiclePricing[k] !== null && String(vehiclePricing[k]).trim() !== '') {
-                    const n = Number(vehiclePricing[k]);
-                    if (!Number.isNaN(n)) {
-                      displayPrice = n;
-                      break;
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        // If not found in pricing, check 'service_costs' array/object saved by the wizard
-        if ((displayPrice === null || displayPrice === undefined) && t.service_costs) {
-          try {
-            if (Array.isArray(t.service_costs)) {
-              const matched = t.service_costs.find(s => {
-                if (!s) return false;
-                const name = canonicalizeServiceDomain(s.service_domain || s.service_name || s.service);
-                return serviceType && (name === serviceType || name.includes(serviceType) || serviceType.includes(name));
-              });
-              if (matched) {
-                const candidates = ['base_charge', 'baseCharge', 'visit_charge', 'service_charge', 'price', 'amount'];
-                for (const k of candidates) {
-                  if (matched[k] !== undefined && matched[k] !== null && String(matched[k]).trim() !== '') {
-                    const n = Number(matched[k]);
-                    if (!Number.isNaN(n)) { displayPrice = n; break; }
-                  }
-                }
-              }
-            } else if (t.service_costs && typeof t.service_costs === 'object') {
-              const keys = Object.keys(t.service_costs);
-              const key = keys.find(k => {
-                const domain = canonicalizeServiceDomain(k);
-                return domain === serviceType || domain.includes(serviceType) || serviceType.includes(domain);
-              });
-              if (key) {
-                const entry = t.service_costs[key];
-                if (entry && typeof entry === 'object') {
-                  const candidates = ['base_charge', 'baseCharge', 'visit_charge', 'service_charge', 'price', 'amount'];
-                  for (const k of candidates) {
-                    if (entry[k] !== undefined && entry[k] !== null && String(entry[k]).trim() !== '') {
-                      const n = Number(entry[k]);
-                      if (!Number.isNaN(n)) { displayPrice = n; break; }
-                    }
-                  }
-                } else if (entry !== undefined && entry !== null && (typeof entry === 'number' || (typeof entry === 'string' && String(entry).trim() !== '' && !Number.isNaN(Number(entry))))) {
-                  displayPrice = Number(entry);
-                }
-              }
-            }
-          } catch (err) {
-            console.log(`[DEBUG] Error parsing service_costs for ${t.name}: `, err);
-          }
-        }
-
-        // Debug-log pricing sources for easier troubleshooting
-        console.log(`[PRICE DEBUG] ${t.name} -> price=${displayPrice}, pricing = ${JSON.stringify(t.pricing)}, service_costs = ${JSON.stringify(t.service_costs)} `);
+        const storedRows = pricingRowsByTechnician.get(Number(t.id)) || [];
+        const candidateRows = storedRows.length > 0
+          ? storedRows
+          : normalizeTechnicianPricingEntries(t.service_costs);
+        const resolvedPrice = resolveTechnicianDisplayPrice(candidateRows, {
+          serviceType,
+          vehicleType: requestedVehicleType,
+        });
 
         return {
           ...t,
-          price: displayPrice, // may be null if not configured
-          base_price: displayPrice, // backward compatible
-          currency
+          price: resolvedPrice?.price ?? null,
+          base_price: resolvedPrice?.price ?? null,
+          price_breakdown: resolvedPrice?.breakdown ?? null,
+          currency,
         };
       });
 
@@ -2937,6 +2879,12 @@ const mapTechnicianServicePricingRows = (rows = []) =>
     price_2w_max: toMoneyOrNull(row.price_2w_max),
     price_4w_min: toMoneyOrNull(row.price_4w_min),
     price_4w_max: toMoneyOrNull(row.price_4w_max),
+    base_price: toMoneyOrNull(row.base_price),
+    free_km: toMoneyOrNull(row.free_km),
+    per_km_price: toMoneyOrNull(row.per_km_price),
+    night_charge: toMoneyOrNull(row.night_charge),
+    night_type: row.night_type || null,
+    metadata: parseObject(row.metadata),
   }));
 
 router.get("/:id", verifyAdmin, async (req, res) => {
@@ -2961,7 +2909,13 @@ router.get("/:id", verifyAdmin, async (req, res) => {
          price_2w_min,
          price_2w_max,
          price_4w_min,
-         price_4w_max
+         price_4w_max,
+         base_price,
+         free_km,
+         per_km_price,
+         night_charge,
+         night_type,
+         metadata
        FROM technician_services
        WHERE technician_id = ?
        ORDER BY service_domain ASC, vehicle_type ASC, updated_at DESC, id DESC`,
@@ -2969,7 +2923,15 @@ router.get("/:id", verifyAdmin, async (req, res) => {
     );
 
     const technician = rowToTechnician(row);
-    if (Array.isArray(serviceRows) && serviceRows.length > 0) {
+    const hasProfileServiceCosts =
+      (Array.isArray(technician.service_costs) && technician.service_costs.length > 0) ||
+      (
+        technician.service_costs &&
+        typeof technician.service_costs === "object" &&
+        !Array.isArray(technician.service_costs) &&
+        Object.keys(technician.service_costs).length > 0
+      );
+    if (!hasProfileServiceCosts && Array.isArray(serviceRows) && serviceRows.length > 0) {
       const pricingRows = mapTechnicianServicePricingRows(serviceRows);
       technician.service_costs = pricingRows;
       technician.services_pricing = pricingRows;

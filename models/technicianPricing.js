@@ -79,6 +79,26 @@ const normalizeStoredVehicleType = (value) => {
 
 const isPlainObject = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 
+const getFlatTirePuncturePrices = (row) => {
+  const subcategories = isPlainObject(row?.subcategories) ? row.subcategories : {};
+  const selectedSubcategories = Array.isArray(row?.selected_subcategories)
+    ? row.selected_subcategories.map((value) => String(value || "").trim()).filter(Boolean)
+    : Object.keys(subcategories);
+
+  const prices = [];
+  selectedSubcategories.forEach((subcategoryId) => {
+    const subcategory = subcategories[subcategoryId];
+    if (!isPlainObject(subcategory)) return;
+
+    [subcategory.tube_tyre_price, subcategory.tubeless_price].forEach((value) => {
+      const price = toNullableNumber(value);
+      if (price != null && price >= 0) prices.push(price);
+    });
+  });
+
+  return prices;
+};
+
 const getDirectVehiclePricingMap = (row) => {
   if (!isPlainObject(row)) return {};
 
@@ -222,8 +242,14 @@ const normalizeTechnicianPricingEntry = (input) => {
       storedServiceDomain === "towing" ? null : row.baseCharge
     )
   );
+  const flatTirePuncturePrices = storedServiceDomain === "flat-tire"
+    ? getFlatTirePuncturePrices(row)
+    : [];
+  const flatTireMinimumPrice = flatTirePuncturePrices.length > 0
+    ? Math.min(...flatTirePuncturePrices)
+    : null;
   const serviceCharge = toNullableNumber(
-    firstPresent(row.service_charge, row.serviceCharge, row.amount, row.price)
+    firstPresent(row.service_charge, row.serviceCharge, row.amount, row.price, flatTireMinimumPrice)
   );
   const nightCharge = toNullableNumber(firstPresent(row.night_charge, row.nightCharge));
   const nightType = normalizeNightType(
