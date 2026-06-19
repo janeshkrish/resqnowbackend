@@ -1,0 +1,30 @@
+# ResQNow backend code ownership.
+# GitHub uses this file to request required reviews when branch protection is enabled.
+
+* @janeshkrish
+
+/README.md @janeshkrish
+/LICENSE.md @janeshkrish
+/SECURITY.md @janeshkrish
+/CONTRIBUTING.md @janeshkrish
+/CODEOWNERS @janeshkrish
+
+/package.json @janeshkrish
+/package-lock.json @janeshkrish
+/Dockerfile @janeshkrish
+/db.js @janeshkrish
+/index.js @janeshkrish
+/loadEnv.js @janeshkrish
+/schema.sql @janeshkrish
+
+/config/ @janeshkrish
+/controllers/ @janeshkrish
+/middleware/ @janeshkrish
+/models/ @janeshkrish
+/repositories/ @janeshkrish
+/routes/ @janeshkrish
+/scripts/ @janeshkrish
+/services/ @janeshkrish
+/tests/ @janeshkrish
+/utils/ @janeshkrish
+/workers/ @janeshkrish
