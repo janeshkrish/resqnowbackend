@@ -8,7 +8,12 @@ import { getAdminCredentials, signAdminToken, verifyAdmin } from "../middleware/
 import { getFrontendUrl } from "../config/network.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../services/serviceNormalization.js";
 import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
+<<<<<<< HEAD
 import { replaceTechnicianPricingRows, replaceTechnicianFleetVehicles } from "../services/technicianPricingStore.js";
+=======
+import { replaceTechnicianPricingRows } from "../services/technicianPricingStore.js";
+import { normalizeTechnicianServiceConfiguration } from "../services/adminTechnicianServiceConfiguration.js";
+>>>>>>> f8e554909c48e2d2e4c3eaa9850dcefdd2a307d3
 import { runDispatchMatrixAudit } from "../services/dispatchMatrixAudit.js";
 import * as adminServicesController from "../controllers/adminServicesController.js";
 import { getDashboard, getAdminAuditLogs } from "../controllers/adminController.js";
@@ -785,23 +790,55 @@ router.put("/technician/:id/pricing", async (req, res) => {
     return res.status(400).json({ error: "service_costs is required." });
   }
 
-  const normalizedEntries = normalizeServiceCostEntries(serviceCostsInput);
   const pool = await db.getPool();
   const conn = await pool.getConnection();
 
   try {
     await conn.beginTransaction();
-    const [existingRows] = await conn.query("SELECT id FROM technicians WHERE id = ? LIMIT 1", [technicianId]);
+    const [existingRows] = await conn.query(
+      "SELECT id, specialties, service_type FROM technicians WHERE id = ? LIMIT 1",
+      [technicianId]
+    );
     if (!Array.isArray(existingRows) || existingRows.length === 0) {
       await conn.rollback();
       return res.status(404).json({ error: "Technician not found." });
     }
 
+<<<<<<< HEAD
     await replaceTechnicianServicePricingRows(conn, technicianId, normalizedEntries);
     await replaceTechnicianFleetVehicles(conn, technicianId, serviceCostsInput);
     await conn.execute(
       "UPDATE technicians SET service_costs = ? WHERE id = ?",
       [JSON.stringify(serviceCostsInput), technicianId]
+=======
+    const existing = existingRows[0];
+    const existingServices = normalizeStringArray(safeJsonParse(existing.specialties, []));
+    const derivedServices = normalizeServiceCostEntries(serviceCostsInput)
+      .map((entry) => entry.service_domain)
+      .filter(Boolean);
+    const servicesInput = req.body?.services != null
+      ? req.body.services
+      : existingServices.length > 0
+        ? existingServices
+        : derivedServices;
+    const configuration = normalizeTechnicianServiceConfiguration({
+      services: servicesInput,
+      serviceCosts: serviceCostsInput,
+      existingPrimaryService: existing.service_type,
+    });
+
+    await replaceTechnicianServicePricingRows(conn, technicianId, configuration.serviceCosts);
+    await conn.execute(
+      `UPDATE technicians
+          SET specialties = ?, service_type = ?, service_costs = ?
+        WHERE id = ?`,
+      [
+        JSON.stringify(configuration.services),
+        configuration.primaryService,
+        JSON.stringify(configuration.serviceCosts),
+        technicianId,
+      ]
+>>>>>>> f8e554909c48e2d2e4c3eaa9850dcefdd2a307d3
     );
 
     await conn.commit();
@@ -809,7 +846,9 @@ router.put("/technician/:id/pricing", async (req, res) => {
       success: true,
       message: "Technician pricing updated successfully.",
       technician_id: technicianId,
-      service_costs: normalizedEntries,
+      services: configuration.services,
+      service_type: configuration.primaryService,
+      service_costs: configuration.serviceCosts,
     });
   } catch (err) {
     await conn.rollback();
