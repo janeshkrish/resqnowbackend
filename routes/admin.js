@@ -8,12 +8,8 @@ import { getAdminCredentials, signAdminToken, verifyAdmin } from "../middleware/
 import { getFrontendUrl } from "../config/network.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../services/serviceNormalization.js";
 import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
-<<<<<<< HEAD
 import { replaceTechnicianPricingRows, replaceTechnicianFleetVehicles } from "../services/technicianPricingStore.js";
-=======
-import { replaceTechnicianPricingRows } from "../services/technicianPricingStore.js";
 import { normalizeTechnicianServiceConfiguration } from "../services/adminTechnicianServiceConfiguration.js";
->>>>>>> f8e554909c48e2d2e4c3eaa9850dcefdd2a307d3
 import { runDispatchMatrixAudit } from "../services/dispatchMatrixAudit.js";
 import * as adminServicesController from "../controllers/adminServicesController.js";
 import { getDashboard, getAdminAuditLogs } from "../controllers/adminController.js";
@@ -804,13 +800,6 @@ router.put("/technician/:id/pricing", async (req, res) => {
       return res.status(404).json({ error: "Technician not found." });
     }
 
-<<<<<<< HEAD
-    await replaceTechnicianServicePricingRows(conn, technicianId, normalizedEntries);
-    await replaceTechnicianFleetVehicles(conn, technicianId, serviceCostsInput);
-    await conn.execute(
-      "UPDATE technicians SET service_costs = ? WHERE id = ?",
-      [JSON.stringify(serviceCostsInput), technicianId]
-=======
     const existing = existingRows[0];
     const existingServices = normalizeStringArray(safeJsonParse(existing.specialties, []));
     const derivedServices = normalizeServiceCostEntries(serviceCostsInput)
@@ -838,7 +827,6 @@ router.put("/technician/:id/pricing", async (req, res) => {
         JSON.stringify(configuration.serviceCosts),
         technicianId,
       ]
->>>>>>> f8e554909c48e2d2e4c3eaa9850dcefdd2a307d3
     );
 
     await conn.commit();

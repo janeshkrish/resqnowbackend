@@ -22,7 +22,6 @@ import {
 import { estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
 import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js";
-import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
 import { replaceTechnicianPricingRows, replaceTechnicianFleetVehicles } from "../services/technicianPricingStore.js";
 import {
   getTechnicianWalletSummary,
