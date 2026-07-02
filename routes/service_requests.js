@@ -629,6 +629,7 @@ router.post("/", verifyUser, async (req, res) => {
                         id: String(newRequestId),
                         jobId: String(newRequestId),
                         requestId: String(newRequestId),
+                        isTowing: isTowingServiceType(canonicalServiceType),
                         customerName: req.body.contact_name || "Customer",
                         serviceType: canonicalServiceType,
                         locationDistance: Number.isFinite(directDistanceKm) ? `${directDistanceKm.toFixed(1)} km` : "Nearby",
@@ -689,6 +690,7 @@ router.post("/", verifyUser, async (req, res) => {
         res.json({
             id: newRequestId,
             user_id: userId,
+            isTowing: isTowingServiceType(canonicalServiceType),
             service_type: canonicalServiceType,
             canonical_service_type: canonicalServiceType,
             status: initialStatus,
@@ -1325,7 +1327,15 @@ router.patch("/:id/cancel", verifyUser, async (req, res) => {
             socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'cancelled' });
 
             const [updatedRows] = await pool.query('SELECT * FROM service_requests WHERE id = ?', [requestId]);
-            return res.json({ success: true, request: updatedRows[0] });
+            return res.json({
+                success: true,
+                request: updatedRows[0]
+                    ? {
+                        ...updatedRows[0],
+                        ...buildTowingRouteResponseFields(updatedRows[0]),
+                    }
+                    : null,
+            });
         } catch (txErr) {
             await conn.rollback();
             console.error('Cancel transaction error:', txErr);

@@ -85,10 +85,13 @@ const safeParseObject = (value) => {
     }
 };
 
-const hasTowingRouteData = (row) =>
-    isTowingServiceType(row?.service_type) ||
-    row?.drop_address != null ||
-    row?.route_distance_km != null;
+const serializeServiceRequestRow = (row) =>
+    row
+        ? {
+            ...row,
+            isTowing: isTowingServiceType(row.service_type),
+        }
+        : null;
 
 async function resolveTechnicianPaymentAmount({ requestRow, technicianProfile = null, connection = null }) {
     if (!requestRow?.technician_id) {
@@ -261,7 +264,7 @@ async function buildServiceRequestPaymentQuote({
 }
 
 async function resolveRequestBaseAmount(requestRow, pricingConfig) {
-    if (hasTowingRouteData(requestRow)) {
+    if (isTowingServiceType(requestRow?.service_type)) {
         const stored = toPositiveMoney(requestRow?.amount ?? requestRow?.service_charge);
         if (stored != null) return stored;
     }
@@ -631,7 +634,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
             connection: conn,
         });
         const resolvedTechnicianAmount = technicianAmount ?? breakdown.baseAmount;
-        const isTowingRequest = hasTowingRouteData(request);
+        const isTowingRequest = isTowingServiceType(request?.service_type);
         const paidRequestStatus = isTowingRequest ? "payment_pending" : "completed";
 
         const requestWasPaid = (
@@ -1524,7 +1527,7 @@ router.post('/confirm', verifyUser, async (req, res) => {
                 payment_id: razorpay_payment_id,
                 immediateFinalization: true,
                 duplicate: finalized.duplicate,
-                request: updatedRows[0] || null,
+                request: serializeServiceRequestRow(updatedRows[0]),
                 message: "Payment verified and finalized successfully."
             });
         }
@@ -1616,7 +1619,7 @@ router.post('/cash', verifyUser, async (req, res) => {
             },
             connection: pool,
         }) ?? breakdown.baseAmount;
-        const isTowingRequest = hasTowingRouteData(requestRow);
+        const isTowingRequest = isTowingServiceType(requestRow?.service_type);
         const paidRequestStatus = isTowingRequest ? "payment_pending" : "completed";
 
         const conn = await pool.getConnection();
@@ -1781,7 +1784,7 @@ router.post('/cash', verifyUser, async (req, res) => {
             socketService.notifyUser(userId, 'job:status_update', { requestId, status: paidRequestStatus });
 
             const [updatedRows] = await pool.query('SELECT * FROM service_requests WHERE id = ?', [requestId]);
-            res.json({ success: true, request: updatedRows[0] });
+            res.json({ success: true, request: serializeServiceRequestRow(updatedRows[0]) });
 
         } catch (txErr) {
             await conn.rollback();
@@ -1826,6 +1829,7 @@ router.get('/diagnostics/overview', verifyAdmin, async (req, res) => {
                 sr.payment_status AS request_payment_status,
                 sr.payment_method AS request_payment_method,
                 sr.amount AS request_base_amount,
+                sr.service_type,
                 sr.updated_at AS request_updated_at,
                 u.full_name AS customer_name,
                 u.email AS customer_email,
@@ -1873,7 +1877,11 @@ router.get('/diagnostics/overview', verifyAdmin, async (req, res) => {
                 ),
                 payment_method_consistent: !row.request_payment_method || String(row.request_payment_method) === String(row.payment_method)
             };
-            return { ...row, checks };
+            return {
+                ...row,
+                isTowing: isTowingServiceType(row.service_type),
+                checks,
+            };
         });
 
         res.json({
@@ -1894,7 +1902,7 @@ router.get('/diagnostics/request/:requestId', verifyAdmin, async (req, res) => {
         const pool = await getPool();
 
         const [requestRows] = await pool.query(
-            `SELECT id, user_id, technician_id, status, payment_status, payment_method, amount, created_at, updated_at
+            `SELECT id, user_id, technician_id, service_type, status, payment_status, payment_method, amount, created_at, updated_at
              FROM service_requests WHERE id = ? LIMIT 1`,
             [requestId]
         );
@@ -1927,7 +1935,7 @@ router.get('/diagnostics/request/:requestId', verifyAdmin, async (req, res) => {
             [requestId]
         );
 
-        const request = requestRows[0];
+        const request = serializeServiceRequestRow(requestRows[0]);
         const latestPayment = paymentRows[0] || null;
         const latestInvoice = invoiceRows[0] || null;
 

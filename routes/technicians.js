@@ -261,11 +261,6 @@ const roundMoney = (value) => {
   return Math.round((parsed + Number.EPSILON) * 100) / 100;
 };
 
-const hasTowingRouteData = (row) =>
-  isTowingServiceType(row?.service_type) ||
-  row?.drop_address != null ||
-  row?.route_distance_km != null;
-
 const toNullableObject = (value) => {
   const parsed = parseObject(value);
   return Object.keys(parsed).length > 0 ? parsed : null;
@@ -284,6 +279,7 @@ const buildTechnicianRouteFields = (row = {}) => {
   );
 
   return {
+    isTowing: isTowingServiceType(row?.service_type),
     drop_address: dropAddress,
     dropAddress,
     drop_latitude: dropLatitude,
@@ -577,7 +573,7 @@ function resolveBroadcastTechnicianStatus(row) {
 }
 
 async function resolveTechnicianJobAmount(jobRow, technicianProfile, _pricingConfig = null) {
-  if (hasTowingRouteData(jobRow)) {
+  if (isTowingServiceType(jobRow?.service_type)) {
     const stored = toPositiveMoney(
       jobRow?.technician_estimated_earning ??
       jobRow?.technicianEstimatedEarning ??
@@ -668,6 +664,7 @@ function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
   return {
     id,
     requestId: id,
+    isTowing: isTowingServiceType(jobRow.service_type),
     customerName,
     serviceType,
     vehicleDetails,
@@ -2437,7 +2434,10 @@ router.get("/me/active-job-legacy", verifyTechnician, async (req, res) => {
       return res.json(null);
     }
 
-    res.json(rows[0]);
+    res.json({
+      ...rows[0],
+      ...buildTechnicianRouteFields(rows[0]),
+    });
   } catch (err) {
     console.error("Fetch active job error:", err);
     res.status(500).json({ error: "Failed to fetch active job" });

@@ -40,6 +40,8 @@ const safeParseObject = (value) => {
 };
 
 const buildTowingDispatchFields = (row = {}) => {
+    if (!isTowingServiceType(row?.service_type)) return {};
+
     const dropAddress = row.dropAddress || row.drop_address || row?.dropLocation?.address || "";
     const dropLat = Number(row.drop_latitude ?? row.dropLat ?? row?.dropLocation?.lat);
     const dropLng = Number(row.drop_longitude ?? row.dropLng ?? row?.dropLocation?.lng);
@@ -314,6 +316,7 @@ export const jobDispatchService = {
             const resolvedOfferAmount = toPositiveMoney(earningEstimate?.amount) ?? 0;
             const offerPayload = {
                 requestId: jobRequest.id,
+                isTowing: isTowingServiceType(jobRequest.service_type),
                 serviceType: jobRequest.service_type,
                 vehicleType: jobRequest.vehicle_type,
                 location: { lat: jobRequest.location_lat, lng: jobRequest.location_lng },
@@ -528,6 +531,11 @@ export const jobDispatchService = {
                 await conn.commit();
             }
 
+            acceptedJob = {
+                ...acceptedJob,
+                isTowing: isTowingServiceType(sourceJob?.service_type),
+            };
+
         } catch (err) {
             try { await conn.rollback(); } catch { /* ignore rollback errors */ }
             throw err;
@@ -617,6 +625,7 @@ export const jobDispatchService = {
                     jobId: String(requestId),
                     requestId: String(requestId),
                     status: "accepted",
+                    isTowing: isTowingServiceType(sourceJob?.service_type),
                     customerName,
                     serviceType: sourceJob?.service_type,
                     locationDistance,

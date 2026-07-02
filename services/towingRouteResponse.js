@@ -27,8 +27,9 @@ const buildDropLocationPayload = (row) => {
 };
 
 export const buildTowingRouteResponseFields = (row) => {
-  if (!isTowingServiceType(row?.service_type)) {
-    return {};
+  const isTowing = isTowingServiceType(row?.service_type);
+  if (!isTowing) {
+    return { isTowing };
   }
 
   const routeMetadata = safeParseObject(row?.route_metadata_json) || safeParseObject(row?.routeMetadata);
@@ -38,6 +39,7 @@ export const buildTowingRouteResponseFields = (row) => {
   );
 
   return {
+    isTowing,
     drop_address: row?.drop_address || null,
     dropLocation: buildDropLocationPayload(row),
     pickupPlaceId: routeMetadata?.pickupPlaceId || routeMetadata?.placeIds?.pickup || routeMetadata?.googlePlaceIds?.pickup || null,

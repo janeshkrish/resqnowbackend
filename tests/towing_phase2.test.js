@@ -17,7 +17,21 @@ test("towing service detection covers towing aliases", () => {
   assert.equal(isTowingServiceType("car-battery"), false);
 });
 
-test("towing route response fields are only emitted for towing requests", () => {
+test("payment and technician routes do not infer towing from route data", async () => {
+  const [paymentsSource, techniciansSource] = await Promise.all([
+    readFile(new URL("../routes/payments.js", import.meta.url), "utf8"),
+    readFile(new URL("../routes/technicians.js", import.meta.url), "utf8"),
+  ]);
+
+  assert.doesNotMatch(paymentsSource, /const hasTowingRouteData/);
+  assert.doesNotMatch(techniciansSource, /const hasTowingRouteData/);
+  assert.doesNotMatch(
+    `${paymentsSource}\n${techniciansSource}`,
+    /isTowingServiceType\([^)]*\)\s*\|\|\s*[^;]*(drop_address|route_distance_km)/
+  );
+});
+
+test("towing route response fields expose an explicit service-type-only flag", () => {
   const routeRow = {
     service_type: "car-battery",
     drop_address: "Workshop drop",
@@ -26,13 +40,14 @@ test("towing route response fields are only emitted for towing requests", () => 
     route_distance_km: 12.4,
   };
 
-  assert.deepEqual(buildTowingRouteResponseFields(routeRow), {});
+  assert.deepEqual(buildTowingRouteResponseFields(routeRow), { isTowing: false });
 
   const towingFields = buildTowingRouteResponseFields({
     ...routeRow,
     service_type: "car-towing",
   });
 
+  assert.equal(towingFields.isTowing, true);
   assert.equal(towingFields.drop_address, "Workshop drop");
   assert.equal(towingFields.routeDistanceKm, 12.4);
 });

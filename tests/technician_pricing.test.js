@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
+import { estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 
 const flatTireDocument = [
   {
@@ -161,5 +162,36 @@ test("drops pricing entries for services removed by the admin", async () => {
   assert.deepEqual(
     result.serviceCosts.map((entry) => entry.service_domain),
     ["battery"]
+  );
+});
+
+test("non-towing payout remains technician-specific at offer and accept time", async () => {
+  const request = { service_type: "car-battery", vehicle_type: "car" };
+  const lowerPricedTechnician = {
+    service_costs: [
+      {
+        service_domain: "battery",
+        vehicle_type: "car",
+        service_charge: 320,
+      },
+    ],
+  };
+  const higherPricedTechnician = {
+    service_costs: [
+      {
+        service_domain: "battery",
+        vehicle_type: "car",
+        service_charge: 475,
+      },
+    ],
+  };
+
+  assert.equal(
+    await estimateTechnicianPayoutAsync(request, lowerPricedTechnician),
+    320
+  );
+  assert.equal(
+    await estimateTechnicianPayoutAsync(request, higherPricedTechnician),
+    475
   );
 });

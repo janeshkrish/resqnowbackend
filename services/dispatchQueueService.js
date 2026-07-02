@@ -3,6 +3,7 @@ import { Queue, QueueEvents, Worker } from "bullmq";
 import { getPool } from "../db.js";
 import { jobDispatchService } from "./jobDispatchService.js";
 import { socketService } from "./socket.js";
+import { isTowingServiceType } from "./towingServiceType.js";
 
 export const DISPATCH_QUEUE_NAME = "job-dispatch-queue";
 const NEW_JOB_EVENT = "new-job";
@@ -208,11 +209,34 @@ function buildOfferPayload(requestRow, candidateTech) {
   const dropLat = Number(requestRow.drop_latitude);
   const dropLng = Number(requestRow.drop_longitude);
   const pricingBreakdown = safeParseObject(requestRow.pricing_breakdown_json);
+  const isTowing = isTowingServiceType(requestRow.service_type);
+  const towingFields = isTowing
+    ? {
+        dropLocation: requestRow.drop_address
+          ? {
+              lat: Number.isFinite(dropLat) ? dropLat : null,
+              lng: Number.isFinite(dropLng) ? dropLng : null,
+              address: String(requestRow.drop_address || ""),
+            }
+          : null,
+        dropAddress: requestRow.drop_address || null,
+        routeDistanceKm: requestRow.route_distance_km == null ? null : Number(requestRow.route_distance_km),
+        estimatedDuration: requestRow.estimated_duration == null ? null : Number(requestRow.estimated_duration),
+        routeMetadata: safeParseObject(requestRow.route_metadata_json),
+        pricingBreakdown,
+        finalEstimatedPrice:
+          requestRow.final_price ??
+          requestRow.estimated_price ??
+          pricingBreakdown?.final_estimated_price ??
+          null,
+      }
+    : {};
 
   return {
     id: String(requestRow.id),
     requestId: String(requestRow.id),
     jobId: String(requestRow.id),
+    isTowing,
     userId: requestRow.user_id != null ? String(requestRow.user_id) : undefined,
     customerName: String(requestRow.contact_name || DEFAULT_CUSTOMER_NAME),
     serviceType: String(requestRow.service_type || "Roadside Assistance"),
@@ -223,19 +247,7 @@ function buildOfferPayload(requestRow, candidateTech) {
       address: String(requestRow.address || ""),
     },
     address: String(requestRow.address || ""),
-    dropLocation: requestRow.drop_address
-      ? {
-          lat: Number.isFinite(dropLat) ? dropLat : null,
-          lng: Number.isFinite(dropLng) ? dropLng : null,
-          address: String(requestRow.drop_address || ""),
-        }
-      : null,
-    dropAddress: requestRow.drop_address || null,
-    routeDistanceKm: requestRow.route_distance_km == null ? null : Number(requestRow.route_distance_km),
-    estimatedDuration: requestRow.estimated_duration == null ? null : Number(requestRow.estimated_duration),
-    routeMetadata: safeParseObject(requestRow.route_metadata_json),
-    pricingBreakdown,
-    finalEstimatedPrice: requestRow.final_price ?? requestRow.estimated_price ?? pricingBreakdown?.final_estimated_price ?? null,
+    ...towingFields,
     amount: Number(requestRow.amount || 0),
     priceAmount: Number(requestRow.amount || 0),
     distance: distanceText,
