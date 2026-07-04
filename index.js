@@ -44,7 +44,11 @@ import {
   startOperationsCommandCenterMonitor,
   stopOperationsCommandCenterMonitor,
 } from "./services/operationsCommandCenterService.js";
-import { startDispatchQueueWorker, stopDispatchQueueWorker } from "./services/dispatchQueueService.js";
+import {
+  recoverRecentPendingDispatchJobs,
+  startDispatchQueueWorker,
+  stopDispatchQueueWorker,
+} from "./services/dispatchQueueService.js";
 import {
   startTechnicianActivityMonitor,
   stopTechnicianActivityMonitor,
@@ -371,7 +375,12 @@ async function startServer() {
       dbState.lastCheckedAt = new Date().toISOString();
 
       if (shouldRunEmbeddedDispatchWorker()) {
-        await startDispatchQueueWorker();
+        const dispatchWorkerStarted = await startDispatchQueueWorker();
+        if (!dispatchWorkerStarted) {
+          throw new Error("Dispatch queue worker failed to start.");
+        }
+        const recovery = await recoverRecentPendingDispatchJobs();
+        console.log("[Dispatch Queue] Startup recovery:", recovery);
       } else {
         console.log("[Dispatch Queue] Embedded worker disabled (DISPATCH_WORKER_EMBEDDED=false).");
       }
@@ -381,7 +390,7 @@ async function startServer() {
       dbState.ready = false;
       dbState.lastCheckedAt = new Date().toISOString();
       dbState.lastError = error?.message || String(error);
-      console.error("[STARTUP] Database bootstrap failed. Server will continue running with readiness=false.", error?.stack || error);
+      console.error("[STARTUP] Application bootstrap failed. Server will continue running with readiness=false.", error?.stack || error);
     }
   } catch (error) {
     dbState.ready = false;

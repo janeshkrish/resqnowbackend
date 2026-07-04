@@ -2,7 +2,11 @@ import "../loadEnv.js";
 
 import { validateEnvironmentOrThrow, logEnvironmentSummary } from "../config/envValidation.js";
 import { closePool, getPool } from "../db.js";
-import { startDispatchQueueWorker, stopDispatchQueueWorker } from "../services/dispatchQueueService.js";
+import {
+  recoverRecentPendingDispatchJobs,
+  startDispatchQueueWorker,
+  stopDispatchQueueWorker,
+} from "../services/dispatchQueueService.js";
 
 let shuttingDown = false;
 
@@ -34,6 +38,8 @@ async function main() {
     throw new Error("Dispatch queue worker failed to start.");
   }
 
+  const recovery = await recoverRecentPendingDispatchJobs();
+  console.log("[Dispatch Worker] Startup recovery:", recovery);
   console.log(`[Dispatch Worker] Running. pid=${process.pid}`);
 }
 

@@ -13,6 +13,18 @@ const DISPATCH_WORKER_CONCURRENCY = Math.max(1, Number(process.env.DISPATCH_WORK
 const DISPATCH_OFFER_TIMEOUT_MS = Math.max(1000, Number(process.env.DISPATCH_OFFER_TIMEOUT_MS || 10000));
 const DISPATCH_RETRY_DELAY_MS = Math.max(500, Number(process.env.DISPATCH_RETRY_DELAY_MS || 1500));
 const DISPATCH_MAX_RETRIES = Math.max(1, Number(process.env.DISPATCH_MAX_RETRIES || 40));
+const DISPATCH_REDIS_CONNECT_TIMEOUT_MS = Math.max(
+  500,
+  Number(process.env.DISPATCH_REDIS_CONNECT_TIMEOUT_MS || 5000)
+);
+const DISPATCH_RECOVERY_WINDOW_MINUTES = Math.max(
+  1,
+  Number(process.env.DISPATCH_RECOVERY_WINDOW_MINUTES || 30)
+);
+const DISPATCH_RECOVERY_LIMIT = Math.max(
+  1,
+  Number(process.env.DISPATCH_RECOVERY_LIMIT || 100)
+);
 const DEFAULT_CUSTOMER_NAME = "Customer";
 
 let queue = null;
@@ -31,13 +43,18 @@ export function isDispatchQueueEnabled() {
   return Boolean(redisUrl());
 }
 
-function createRedisConnection(label) {
+function createRedisConnection(label, options = {}) {
   const url = redisUrl();
+  const failFast = options.failFast === true;
   const connection = new IORedis(url, {
-    maxRetriesPerRequest: null,
+    maxRetriesPerRequest: failFast ? 1 : null,
     enableReadyCheck: false,
     lazyConnect: true,
+    connectTimeout: DISPATCH_REDIS_CONNECT_TIMEOUT_MS,
     connectionName: `resqnow_${label}`,
+    ...(failFast && {
+      retryStrategy: (attempt) => (attempt <= 1 ? 250 : null),
+    }),
   });
 
   connection.on("connect", () => {
@@ -57,9 +74,18 @@ function createRedisConnection(label) {
 
 async function getProducerConnection() {
   if (producerConnection) return producerConnection;
-  producerConnection = createRedisConnection("dispatch_producer");
-  await producerConnection.connect();
-  return producerConnection;
+  const connection = createRedisConnection("dispatch_producer", { failFast: true });
+  producerConnection = connection;
+  try {
+    await connection.connect();
+    return connection;
+  } catch (error) {
+    if (producerConnection === connection) {
+      producerConnection = null;
+    }
+    connection.disconnect();
+    throw error;
+  }
 }
 
 async function getWorkerConnection() {
@@ -89,6 +115,15 @@ async function getDispatchQueue() {
     },
   });
   return queue;
+}
+
+export async function hasRegisteredDispatchWorker(queueLike) {
+  if (!queueLike || typeof queueLike.getWorkersCount !== "function") {
+    return false;
+  }
+
+  const workerCount = Number(await queueLike.getWorkersCount());
+  return Number.isFinite(workerCount) && workerCount > 0;
 }
 
 function asPositiveInt(value) {
@@ -503,6 +538,14 @@ export async function enqueueDispatchJob(payload, options = {}) {
     const q = await getDispatchQueue();
     if (!q) return { queued: false, reason: "queue_unavailable" };
 
+    const hasActiveWorker = await hasRegisteredDispatchWorker(q);
+    if (!hasActiveWorker) {
+      console.error(
+        `[Dispatch Queue] No registered worker for requestId=${normalizedPayload.jobId}. Using direct fallback.`
+      );
+      return { queued: false, reason: "no_active_dispatch_worker" };
+    }
+
     const delayMs = Math.max(0, Number(options.delayMs || 0));
     console.log(
       `[Dispatch Queue] Adding job requestId=${normalizedPayload.jobId} retryCount=${normalizedPayload.retryCount} delayMs=${delayMs}`
@@ -522,6 +565,67 @@ export async function enqueueDispatchJob(payload, options = {}) {
     );
     return { queued: false, reason: "enqueue_failed" };
   }
+}
+
+export async function recoverRecentPendingDispatchJobs(options = {}) {
+  if (!isDispatchQueueEnabled() && !options.enqueue) {
+    return { scanned: 0, queued: 0, failed: 0, reason: "redis_not_configured" };
+  }
+
+  const maxAgeMinutes = Math.floor(Math.max(
+    1,
+    Number(options.maxAgeMinutes || DISPATCH_RECOVERY_WINDOW_MINUTES)
+  ));
+  const limit = Math.floor(Math.max(
+    1,
+    Number(options.limit || DISPATCH_RECOVERY_LIMIT)
+  ));
+  const pool = options.pool || (await getPool());
+  const enqueue = options.enqueue || enqueueDispatchJob;
+  const [rows] = await pool.query(
+    `SELECT sr.id, sr.user_id
+     FROM service_requests sr
+     WHERE LOWER(COALESCE(sr.status, '')) = 'pending'
+       AND sr.technician_id IS NULL
+       AND sr.created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+       AND NOT EXISTS (
+         SELECT 1
+         FROM dispatch_offers offer
+         WHERE offer.service_request_id = sr.id
+           AND LOWER(COALESCE(offer.status, '')) = 'pending'
+           AND (offer.expires_at IS NULL OR offer.expires_at > NOW())
+       )
+     ORDER BY sr.created_at ASC
+     LIMIT ?`,
+    [maxAgeMinutes, limit]
+  );
+
+  let queued = 0;
+  let failed = 0;
+  for (const row of rows || []) {
+    const result = await enqueue({
+      jobId: row.id,
+      userId: row.user_id,
+      retryCount: 0,
+      attemptedTechnicianIds: [],
+      source: "startup_recovery",
+    });
+    if (result?.queued) {
+      queued += 1;
+    } else {
+      failed += 1;
+      console.error(
+        `[Dispatch Queue] Startup recovery failed requestId=${row.id} reason=${result?.reason || "unknown"}`
+      );
+    }
+  }
+
+  return {
+    scanned: (rows || []).length,
+    queued,
+    failed,
+    maxAgeMinutes,
+  };
 }
 
 export async function startDispatchQueueWorker() {

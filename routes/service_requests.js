@@ -581,8 +581,10 @@ router.post("/", verifyUser, async (req, res) => {
             }
         }
 
-        // 3. Trigger Direct Notify or queue-driven dispatch (async)
-        (async () => {
+        // 3. Persist the dispatch handoff before confirming request creation.
+        // This prevents a process restart/suspension from leaving a committed
+        // service request without a queued job or direct fallback offer.
+        await (async () => {
             const runDirectFallbackDispatch = async (fallbackReason) => {
                 console.warn(
                     `[Dispatch Trace] requestId=${newRequestId} fallback=direct reason=${fallbackReason}`
