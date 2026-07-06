@@ -178,28 +178,33 @@ function setAndroidApkHeaders(res, fileName, fileSize = null) {
 
 /**
  * GET /api/public/stats
- * Returns public statistics for the About Us page.
+ * Returns live public statistics from the primary database.
  */
 router.get("/stats", async (req, res) => {
     try {
         const pool = await db.getPool();
 
-        // Count registered users
-        const [userRows] = await pool.query("SELECT COUNT(*) as count FROM users");
-        const users = userRows[0]?.count || 0;
+        const [[userRows], [techRows], [incidentRows], [serviceRows]] = await Promise.all([
+            pool.query("SELECT COUNT(*) AS count FROM users"),
+            pool.query("SELECT COUNT(*) AS count FROM technicians WHERE LOWER(COALESCE(status, '')) = 'approved'"),
+            pool.query("SELECT COUNT(*) AS count FROM service_requests"),
+            pool.query(
+                "SELECT COUNT(*) AS count FROM service_requests WHERE LOWER(COALESCE(status, '')) IN ('completed', 'paid')"
+            ),
+        ]);
 
-        // Count verified technicians
-        const [techRows] = await pool.query("SELECT COUNT(*) as count FROM technicians WHERE status = 'approved'");
-        const technicians = techRows[0]?.count || 0;
+        const users = Number(userRows[0]?.count || 0);
+        const technicians = Number(techRows[0]?.count || 0);
+        const incidents = Number(incidentRows[0]?.count || 0);
+        const completedServices = Number(serviceRows[0]?.count || 0);
 
-        // Count completed service requests
-        const [serviceRows] = await pool.query("SELECT COUNT(*) as count FROM service_requests WHERE status = 'completed'");
-        const completedServices = serviceRows[0]?.count || 0;
-
+        res.set("Cache-Control", "no-store, no-cache, must-revalidate");
         res.json({
             users,
             technicians,
-            completedServices
+            incidents,
+            completedServices,
+            generatedAt: new Date().toISOString(),
         });
     } catch (error) {
         console.error("[Public Stats] Error:", error);
