@@ -308,7 +308,7 @@ function parseRoutePoints(query) {
 }
 
 /**
- * GET /api/public/route?points=lat,lng;lat,lng
+ * GET /api/public/route?points=lat,lng;lat,lng&vehicleMode=car
  * Returns road geometry from the configured OSRM-compatible route provider.
  */
 router.get("/route", routeLimiter, async (req, res) => {
@@ -316,6 +316,7 @@ router.get("/route", routeLimiter, async (req, res) => {
         const route = await getRoute({
             points: parseRoutePoints(req.query),
             overview: req.query.overview || "full",
+            vehicleMode: req.query.vehicleMode || req.query.vehicle_mode || "car",
         });
         return res.json(route);
     } catch (error) {

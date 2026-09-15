@@ -32,17 +32,31 @@ function setCached(key, value) {
   return value;
 }
 
-function getOsrmBaseUrl() {
+export function normalizeRouteVehicleMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (/bike|motorcycle|scooter|two.?wheel/.test(normalized)) return "two-wheeler";
+  if (/tow|truck|flatbed|commercial|heavy/.test(normalized)) return "commercial-tow";
+  return "car";
+}
+
+function getOsrmBaseUrl(vehicleMode) {
+  const mode = normalizeRouteVehicleMode(vehicleMode);
+  const modeSpecificUrl = mode === "two-wheeler"
+    ? process.env.OSRM_TWO_WHEELER_ROUTE_URL
+    : mode === "commercial-tow"
+      ? process.env.OSRM_COMMERCIAL_ROUTE_URL
+      : process.env.OSRM_CAR_ROUTE_URL;
   return String(
-    process.env.OSRM_ROUTE_URL ||
+    modeSpecificUrl ||
+      process.env.OSRM_ROUTE_URL ||
       process.env.OSRM_URL ||
       "https://router.project-osrm.org/route/v1/driving"
   ).replace(/\/+$/, "");
 }
 
-function buildCacheKey(points, overview) {
+function buildCacheKey(points, overview, vehicleMode) {
   const rounded = points.map((point) => [Number(point.lat.toFixed(5)), Number(point.lng.toFixed(5))]);
-  return `osrm:${overview}:${JSON.stringify(rounded)}`;
+  return `osrm:${vehicleMode}:${overview}:${JSON.stringify(rounded)}`;
 }
 
 function coordinatesToPolyline(coordinates = []) {
@@ -80,13 +94,14 @@ async function withRouteRetry(operation) {
   throw lastError;
 }
 
-function normalizeOsrmRoute(route, points) {
+export function normalizeOsrmRoute(route, _points, vehicleMode = "car") {
   const distanceMeters = Number(route?.distance || 0);
   const durationSeconds = Number(route?.duration || 0);
   const coordinates = Array.isArray(route?.geometry?.coordinates)
     ? route.geometry.coordinates
-    : points.map((point) => [point.lng, point.lat]);
-  if (distanceMeters <= 0 || durationSeconds <= 0) {
+    : [];
+  const polyline = coordinatesToPolyline(coordinates);
+  if (distanceMeters <= 0 || durationSeconds <= 0 || polyline.length < 3) {
     throw new RouteServiceError(
       "Unable to calculate a road route for these locations. Please adjust the pickup or drop location.",
       502,
@@ -96,6 +111,7 @@ function normalizeOsrmRoute(route, points) {
 
   const distanceKm = roundMoney(distanceMeters / 1000);
   const durationMinutes = Math.max(1, Math.round(durationSeconds / 60));
+  const normalizedVehicleMode = normalizeRouteVehicleMode(vehicleMode);
   return {
     provider: "osrm",
     source: "osrm",
@@ -108,12 +124,14 @@ function normalizeOsrmRoute(route, points) {
       type: "LineString",
       coordinates,
     },
-    polyline: coordinatesToPolyline(coordinates),
+    polyline,
+    vehicleMode: normalizedVehicleMode,
+    vehicle_mode: normalizedVehicleMode,
     trafficAware: false,
     traffic_aware: false,
     tollDetected: false,
     toll_detected: false,
-    summary: "OSRM driving route",
+    summary: `OSRM ${normalizedVehicleMode} route`,
     warnings: [],
     calculatedAt: new Date().toISOString(),
   };
@@ -122,13 +140,14 @@ function normalizeOsrmRoute(route, points) {
 export async function getRoute(input = {}) {
   const points = normalizeRoutePoints(input.points || []);
   const overview = String(input.overview || "full").trim().toLowerCase() === "simplified" ? "simplified" : "full";
-  const cacheKey = buildCacheKey(points, overview);
+  const vehicleMode = normalizeRouteVehicleMode(input.vehicleMode ?? input.vehicle_mode);
+  const cacheKey = buildCacheKey(points, overview, vehicleMode);
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
   const coordinateParam = points.map((point) => `${point.lng},${point.lat}`).join(";");
   try {
-    const response = await withRouteRetry(() => axios.get(`${getOsrmBaseUrl()}/${coordinateParam}`, {
+    const response = await withRouteRetry(() => axios.get(`${getOsrmBaseUrl(vehicleMode)}/${coordinateParam}`, {
       timeout: ROUTE_TIMEOUT_MS,
       params: {
         overview,
@@ -142,7 +161,7 @@ export async function getRoute(input = {}) {
     if (!route) {
       throw new RouteServiceError("Route provider did not return a route.", 502, "route_unavailable");
     }
-    return setCached(cacheKey, normalizeOsrmRoute(route, points));
+    return setCached(cacheKey, normalizeOsrmRoute(route, points, vehicleMode));
   } catch (error) {
     if (error instanceof RouteServiceError) throw error;
     console.warn("[Route Service] OSRM lookup failed:", error?.message || error);
