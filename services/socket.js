@@ -2,7 +2,7 @@ import { Server } from "socket.io";
 import { isOriginAllowed } from "../config/network.js";
 import { notificationService } from "./notificationService.js";
 
-class SocketService {
+export class SocketService {
   constructor() {
     this.io = null;
     this.activeTechnicians = new Map();
@@ -45,12 +45,7 @@ class SocketService {
         const technicianId = data.technicianId ? String(data.technicianId) : null;
         if (!technicianId) return;
 
-        this.io.to(`technician_${technicianId}`).emit("location_update", data);
-        this.io.emit(`technician:${technicianId}:location`, data);
-
-        if (data.requestId) {
-          this.io.to(`request_${String(data.requestId)}`).emit("location_update", data);
-        }
+        this.publishTechnicianLocation(data);
       });
 
       socket.on("disconnect", () => {
@@ -91,6 +86,19 @@ class SocketService {
   notifyAllTechnicians(event, data) {
     if (!this.io) return;
     this.io.emit(event, data);
+  }
+
+  publishTechnicianLocation(data = {}, event = "location_update") {
+    if (!this.io) return;
+    const technicianId = data.technicianId ? String(data.technicianId) : null;
+    if (!technicianId) return;
+
+    this.io.to(`technician_${technicianId}`).emit("location_update", data);
+    this.io.emit(`technician:${technicianId}:location`, data);
+
+    if (data.requestId) {
+      this.io.to(`request_${String(data.requestId)}`).emit(event, data);
+    }
   }
 
   broadcast(event, data) {
