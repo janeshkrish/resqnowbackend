@@ -93,7 +93,6 @@ test("publishes an enriched location only to its technician and request rooms", 
 
   assert.deepEqual(emitted, [
     { room: "technician_tech-1", event: "location_update", payload },
-    { room: "global", event: "technician:tech-1:location", payload },
     { room: "request_request-1", event: "technician:location_update", payload },
   ]);
 });

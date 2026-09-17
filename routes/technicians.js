@@ -33,12 +33,6 @@ import {
 } from "../services/marketplaceWithdrawalService.js";
 import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPaymentService.js";
 import { isTowingServiceType } from "../services/towingServiceType.js";
-import { getRoute, normalizeRouteVehicleMode } from "../services/routeService.js";
-import {
-  buildTechnicianLocationPayload,
-  resolveLiveTrackingDestination,
-  shouldRefreshLiveTrackingRoute,
-} from "../services/liveTrackingRouteMetrics.js";
 import { getLiveTrackingRuntime } from "../services/liveTrackingRuntime.js";
 import { isLiveTrackingStatus } from "../services/liveTrackingIngestion.js";
 import {
@@ -53,7 +47,6 @@ import * as technicianPricingController from "../controllers/technicianPricingCo
 const router = Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
 const RAZORPAY_KEY_SECRET = String(process.env.RAZORPAY_KEY_SECRET || "");
-const liveRouteMetricRequestAt = new Map();
 let legacyTrackingSequenceId = 0;
 const hasRazorpayConfig = Boolean(
   RAZORPAY_KEY_ID &&
@@ -103,18 +96,24 @@ function trackingHttpStatus(code) {
   return 400;
 }
 
-async function handleLiveTrackingRecovery(req, res) {
+export async function handleLiveTrackingRecovery(req, res, {
+  findJobId = findLegacyTrackingJobId,
+  getRuntime = getLiveTrackingRuntime,
+  publishAcceptedTracking = (result) => socketService.publishAcceptedTracking(result),
+  markHeartbeat = markTechnicianHeartbeat,
+  nextSequence = nextLegacyTrackingSequenceId,
+} = {}) {
   try {
     const body = req.body || {};
     const lat = body.lat ?? body.latitude;
     const lng = body.lng ?? body.longitude;
     const jobId = String(body.jobId ?? body.requestId ?? '').trim() ||
-      await findLegacyTrackingJobId(req.technicianId);
+      await findJobId(req.technicianId);
     if (!jobId) {
       return res.status(409).json({ error: 'No active job is available for tracking.', code: 'NO_ACTIVE_JOB' });
     }
 
-    const result = await getLiveTrackingRuntime().ingestion.ingest({
+    const result = await getRuntime().ingestion.ingest({
       identity: { id: String(req.technicianId), role: 'technician' },
       payload: {
         version: 1,
@@ -126,7 +125,7 @@ async function handleLiveTrackingRecovery(req, res) {
         heading: body.heading ?? null,
         accuracy: body.accuracy ?? null,
         recordedAt: body.recordedAt || new Date().toISOString(),
-        sequenceId: body.sequenceId ?? nextLegacyTrackingSequenceId(),
+        sequenceId: body.sequenceId ?? nextSequence(),
       },
       source: 'rest',
     });
@@ -134,8 +133,8 @@ async function handleLiveTrackingRecovery(req, res) {
       return res.status(trackingHttpStatus(result.code)).json({ error: 'Location update rejected.', code: result.code });
     }
 
-    await socketService.publishAcceptedTracking(result);
-    void markTechnicianHeartbeat({
+    await publishAcceptedTracking(result);
+    void markHeartbeat({
       technicianId: req.technicianId,
       source: req.get('x-client-platform') || 'web',
       metadata: {
@@ -1850,171 +1849,9 @@ router.patch("/me/status", verifyTechnician, async (req, res) => {
 });
 
 router.patch("/me/location", verifyTechnician, async (req, res) => {
+  // REST is recovery-only; it deliberately delegates to the same canonical
+  // validation, Redis current-state, history, and publication path as v1 Socket.IO.
   return handleLiveTrackingRecovery(req, res);
-
-  /*
-   * Retained below temporarily while the deployed REST response envelope is
-   * verified. The return above makes this legacy competing persistence path
-   * unreachable; it will be removed once the v1 recovery test covers the
-   * mounted route.
-   */
-  try {
-    const { latitude, longitude } = req.body;
-    const parsedLat = Number(latitude);
-    const parsedLng = Number(longitude);
-
-    if (!Number.isFinite(parsedLat) || !Number.isFinite(parsedLng)) {
-      return res.status(400).json({ error: "Latitude and longitude are required." });
-    }
-
-    const pool = await db.getPool();
-    const conn = await pool.getConnection();
-    let activeRequest = null;
-    try {
-      await conn.beginTransaction();
-      await conn.execute(
-        `UPDATE technicians
-         SET latitude = ?,
-             longitude = ?,
-             current_lat = ?,
-             current_lng = ?,
-             last_location_update = NOW()
-         WHERE id = ?`,
-        [parsedLat, parsedLng, parsedLat, parsedLng, req.technicianId]
-      );
-
-      const [rows] = await conn.query(
-        "SELECT current_job_id FROM technicians WHERE id = ? LIMIT 1",
-        [req.technicianId]
-      );
-      let currentJobId = rows?.[0]?.current_job_id ? Number(rows[0].current_job_id) : null;
-      if (!Number.isInteger(currentJobId)) {
-        const [activeRows] = await conn.query(
-          `SELECT id
-           FROM service_requests
-           WHERE technician_id = ?
-            AND LOWER(COALESCE(status, '')) IN (
-               'assigned',
-               'accepted',
-               'en_route_pickup',
-               'arrived_pickup',
-               'vehicle_loaded',
-               'enroute_drop',
-               'arrived_drop',
-               'service_completed',
-               'processing',
-               'service_started',
-               'en-route',
-               'on-the-way',
-               'arrived',
-               'in_progress',
-               'in-progress',
-               'awaiting_payment',
-               'payment_pending'
-             )
-           ORDER BY updated_at DESC
-           LIMIT 1`,
-          [req.technicianId]
-        );
-        currentJobId = activeRows?.[0]?.id ? Number(activeRows[0].id) : null;
-      }
-
-      if (Number.isInteger(currentJobId)) {
-        const [requestRows] = await conn.query(
-          `SELECT id, service_type, vehicle_type, status,
-                  location_lat, location_lng, customer_location_lat, customer_location_lng,
-                  drop_latitude, drop_longitude
-           FROM service_requests
-           WHERE id = ?
-           LIMIT 1`,
-          [currentJobId]
-        );
-        activeRequest = requestRows?.[0] || null;
-      }
-
-      await conn.execute(
-        `INSERT INTO technician_location_history (technician_id, service_request_id, latitude, longitude)
-         VALUES (?, ?, ?, ?)`,
-        [req.technicianId, Number.isInteger(currentJobId) ? currentJobId : null, parsedLat, parsedLng]
-      );
-      await conn.commit();
-    } catch (error) {
-      await conn.rollback();
-      throw error;
-    } finally {
-      conn.release();
-    }
-
-    const requestId = activeRequest?.id != null ? String(activeRequest.id) : undefined;
-    const locationUpdatedAt = new Date().toISOString();
-    const locationPayload = buildTechnicianLocationPayload({
-      technicianId: req.technicianId,
-      requestId,
-      latitude: parsedLat,
-      longitude: parsedLng,
-      locationUpdatedAt,
-    });
-    socketService.publishTechnicianLocation(locationPayload);
-
-    const destination = resolveLiveTrackingDestination(activeRequest || {});
-    const routeMetricRequestedAt = Date.now();
-    if (
-      requestId &&
-      destination &&
-      shouldRefreshLiveTrackingRoute(liveRouteMetricRequestAt.get(requestId), routeMetricRequestedAt)
-    ) {
-      liveRouteMetricRequestAt.set(requestId, routeMetricRequestedAt);
-      const vehicleMode = isTowingServiceType(activeRequest?.service_type)
-        ? "commercial-tow"
-        : normalizeRouteVehicleMode(activeRequest?.vehicle_type);
-
-      // Keep the technician's GPS PATCH responsive. The enriched event is sent
-      // after the road-route service resolves, while the coordinate event above
-      // keeps the customer marker moving immediately.
-      void getRoute({
-        points: [
-          { lat: parsedLat, lng: parsedLng },
-          destination,
-        ],
-        overview: "simplified",
-        vehicleMode,
-      })
-        .then((route) => {
-          socketService.publishTechnicianLocation(
-            buildTechnicianLocationPayload({
-              technicianId: req.technicianId,
-              requestId,
-              latitude: parsedLat,
-              longitude: parsedLng,
-              locationUpdatedAt,
-              route,
-            }),
-            "technician:location_update",
-          );
-        })
-        .catch(() => {
-          // The request-scoped GPS update was already delivered; clients retain
-          // their road-route and Haversine fallbacks when a provider is unavailable.
-        });
-    }
-
-    void markTechnicianHeartbeat({
-      technicianId: req.technicianId,
-      source: req.get("x-client-platform") || "web",
-      metadata: {
-        latitude: parsedLat,
-        longitude: parsedLng,
-      },
-      createSessionIfMissing: false,
-    }).catch((trackingError) => {
-      console.error("[Technician me/location heartbeat] failed:", trackingError?.message || trackingError);
-    });
-
-
-    return res.json({ success: true });
-  } catch (err) {
-    return res.status(500).json({ error: err.message || "Failed to update location." });
-  }
 });
 
 router.get("/me/active-job", verifyTechnician, async (req, res) => {
