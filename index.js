@@ -1,4 +1,5 @@
 import "./loadEnv.js";
+import 'dotenv/config';
 import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -37,6 +38,11 @@ import {
 } from "./config/network.js";
 import { validateEnvironmentOrThrow, logEnvironmentSummary } from "./config/envValidation.js";
 import { socketService } from "./services/socket.js";
+import {
+  closeLiveTrackingRuntime,
+  getLiveTrackingRuntime,
+} from "./services/liveTrackingRuntime.js";
+import { createLiveTrackingPublisher } from "./services/liveTrackingPublisher.js";
 import { verifyMailerConnection } from "./services/mailer.js";
 import { closePool } from "./db.js";
 import { reconcileTechnicianAvailability } from "./services/technicianStateService.js";
@@ -309,7 +315,16 @@ function createApp() {
 
 const app = createApp();
 const httpServer = createServer(app);
-socketService.init(httpServer);
+const liveTrackingRuntime = getLiveTrackingRuntime();
+const liveTrackingPublisher = createLiveTrackingPublisher({
+  store: liveTrackingRuntime.store,
+  publishLocation: (location) => socketService.publishTrackingLocation(location),
+});
+socketService.init(httpServer, {
+  trackingIngestion: liveTrackingRuntime.ingestion,
+  socketAdapter: liveTrackingRuntime.socketAdapter,
+  onTrackingAccepted: (result) => liveTrackingPublisher.publishAccepted(result),
+});
 
 httpServer.on("error", (err) => {
   console.error("HTTP server error:", err?.stack || err);
@@ -338,6 +353,7 @@ async function shutdown(signal) {
     stopTechnicianActivityMonitor();
     stopOperationsCommandCenterMonitor();
     await stopDispatchQueueWorker();
+    await closeLiveTrackingRuntime();
     await closePool();
     clearTimeout(forceExitTimer);
     process.exit(err ? 1 : 0);

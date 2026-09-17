@@ -39,6 +39,8 @@ import {
   resolveLiveTrackingDestination,
   shouldRefreshLiveTrackingRoute,
 } from "../services/liveTrackingRouteMetrics.js";
+import { getLiveTrackingRuntime } from "../services/liveTrackingRuntime.js";
+import { isLiveTrackingStatus } from "../services/liveTrackingIngestion.js";
 import {
   markTechnicianHeartbeat,
   markTechnicianLogin,
@@ -52,6 +54,7 @@ const router = Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
 const RAZORPAY_KEY_SECRET = String(process.env.RAZORPAY_KEY_SECRET || "");
 const liveRouteMetricRequestAt = new Map();
+let legacyTrackingSequenceId = 0;
 const hasRazorpayConfig = Boolean(
   RAZORPAY_KEY_ID &&
   RAZORPAY_KEY_SECRET &&
@@ -72,6 +75,85 @@ const ensureRazorpayConfigured = (res) => {
   });
   return false;
 };
+
+function nextLegacyTrackingSequenceId() {
+  const timestampSequence = Date.now() * 1000;
+  legacyTrackingSequenceId = Math.max(timestampSequence, legacyTrackingSequenceId + 1);
+  return legacyTrackingSequenceId;
+}
+
+async function findLegacyTrackingJobId(technicianId) {
+  const pool = await db.getPool();
+  const [rows] = await pool.execute(
+    `SELECT id, status
+     FROM service_requests
+     WHERE technician_id = ?
+     ORDER BY updated_at DESC
+     LIMIT 10`,
+    [technicianId],
+  );
+  const request = rows.find((row) => isLiveTrackingStatus(row.status));
+  return request?.id != null ? String(request.id) : null;
+}
+
+function trackingHttpStatus(code) {
+  if (code === 'FORBIDDEN') return 403;
+  if (code === 'NO_ACTIVE_JOB') return 409;
+  if (code === 'STORE_UNAVAILABLE') return 503;
+  return 400;
+}
+
+async function handleLiveTrackingRecovery(req, res) {
+  try {
+    const body = req.body || {};
+    const lat = body.lat ?? body.latitude;
+    const lng = body.lng ?? body.longitude;
+    const jobId = String(body.jobId ?? body.requestId ?? '').trim() ||
+      await findLegacyTrackingJobId(req.technicianId);
+    if (!jobId) {
+      return res.status(409).json({ error: 'No active job is available for tracking.', code: 'NO_ACTIVE_JOB' });
+    }
+
+    const result = await getLiveTrackingRuntime().ingestion.ingest({
+      identity: { id: String(req.technicianId), role: 'technician' },
+      payload: {
+        version: 1,
+        technicianId: String(req.technicianId),
+        jobId,
+        lat,
+        lng,
+        speed: body.speed ?? null,
+        heading: body.heading ?? null,
+        accuracy: body.accuracy ?? null,
+        recordedAt: body.recordedAt || new Date().toISOString(),
+        sequenceId: body.sequenceId ?? nextLegacyTrackingSequenceId(),
+      },
+      source: 'rest',
+    });
+    if (!result.ok) {
+      return res.status(trackingHttpStatus(result.code)).json({ error: 'Location update rejected.', code: result.code });
+    }
+
+    await socketService.publishAcceptedTracking(result);
+    void markTechnicianHeartbeat({
+      technicianId: req.technicianId,
+      source: req.get('x-client-platform') || 'web',
+      metadata: {
+        latitude: result.location.lat,
+        longitude: result.location.lng,
+        sequenceId: result.location.sequenceId,
+      },
+      createSessionIfMissing: false,
+    }).catch((trackingError) => {
+      console.error('[Technician live tracking heartbeat] failed:', trackingError?.message || trackingError);
+    });
+
+    return res.json({ success: true, location: result.location });
+  } catch (error) {
+    console.error('[Technician live tracking recovery] failed:', error?.message || error);
+    return res.status(503).json({ error: 'Live tracking is temporarily unavailable.', code: 'STORE_UNAVAILABLE' });
+  }
+}
 
 const DEFAULT_TECHNICIAN_SETTINGS = Object.freeze({
   appearance: {
@@ -1768,6 +1850,14 @@ router.patch("/me/status", verifyTechnician, async (req, res) => {
 });
 
 router.patch("/me/location", verifyTechnician, async (req, res) => {
+  return handleLiveTrackingRecovery(req, res);
+
+  /*
+   * Retained below temporarily while the deployed REST response envelope is
+   * verified. The return above makes this legacy competing persistence path
+   * unreachable; it will be removed once the v1 recovery test covers the
+   * mounted route.
+   */
   try {
     const { latitude, longitude } = req.body;
     const parsedLat = Number(latitude);

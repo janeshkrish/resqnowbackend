@@ -19,6 +19,40 @@ redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
 return { 'accepted', ARGV[1] }
 `;
 
+const CLAIM_HISTORY_SAMPLE_SCRIPT = `
+-- history-sample
+local existingJson = redis.call('GET', KEYS[1])
+local next = cjson.decode(ARGV[1])
+
+local function radians(value)
+  return value * math.pi / 180
+end
+
+local function distanceMeters(left, right)
+  local earthRadius = 6371000
+  local latDelta = radians(right.lat - left.lat)
+  local lngDelta = radians(right.lng - left.lng)
+  local x = lngDelta * math.cos(radians((left.lat + right.lat) / 2))
+  return earthRadius * math.sqrt(latDelta ^ 2 + x ^ 2)
+end
+
+if existingJson then
+  local existing = cjson.decode(existingJson)
+  local elapsed = next.recordedAtMs - existing.recordedAtMs
+  if elapsed < tonumber(ARGV[3]) and distanceMeters(existing, next) < tonumber(ARGV[4]) then
+    return { 'not_due' }
+  end
+end
+
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return { 'claimed' }
+`;
+
+const HISTORY_SAMPLE_TTL_SECONDS = 6 * 60 * 60;
+const HISTORY_SAMPLE_MIN_INTERVAL_MS = 15_000;
+const HISTORY_SAMPLE_MIN_DISTANCE_METERS = 50;
+const ROUTE_METRIC_REFRESH_INTERVAL_MS = 5_000;
+
 export class TrackingStoreError extends Error {
   constructor(message, cause) {
     super(message, { cause });
@@ -29,6 +63,14 @@ export class TrackingStoreError extends Error {
 
 export function liveTrackingKey(technicianId) {
   return `live-tracking:technician:${String(technicianId)}`;
+}
+
+export function liveTrackingHistorySampleKey(technicianId, jobId) {
+  return `live-tracking:history-sample:${String(technicianId)}:${String(jobId)}`;
+}
+
+export function liveTrackingRouteMetricKey(requestId) {
+  return `live-tracking:route-metric:${String(requestId)}`;
 }
 
 function parseStoredLocation(value) {
@@ -94,7 +136,45 @@ export function createLiveTrackingStore(redis) {
       if (!location || String(location.jobId) !== String(requestId)) return null;
       return location;
     },
+
+    async claimHistorySample(location) {
+      try {
+        const result = await redis.eval(
+          CLAIM_HISTORY_SAMPLE_SCRIPT,
+          1,
+          liveTrackingHistorySampleKey(location.technicianId, location.jobId),
+          JSON.stringify(location),
+          String(HISTORY_SAMPLE_TTL_SECONDS),
+          String(HISTORY_SAMPLE_MIN_INTERVAL_MS),
+          String(HISTORY_SAMPLE_MIN_DISTANCE_METERS),
+        );
+        return Array.isArray(result) && String(result[0]) === 'claimed';
+      } catch (error) {
+        throw new TrackingStoreError('Live tracking Redis storage is unavailable.', error);
+      }
+    },
+
+    async claimRouteMetricRefresh(requestId) {
+      try {
+        const result = await redis.set(
+          liveTrackingRouteMetricKey(requestId),
+          '1',
+          'PX',
+          ROUTE_METRIC_REFRESH_INTERVAL_MS,
+          'NX',
+        );
+        return result === 'OK';
+      } catch (error) {
+        throw new TrackingStoreError('Live tracking Redis storage is unavailable.', error);
+      }
+    },
   };
 }
 
-export { WRITE_IF_NEWER_SCRIPT };
+export {
+  CLAIM_HISTORY_SAMPLE_SCRIPT,
+  HISTORY_SAMPLE_MIN_DISTANCE_METERS,
+  HISTORY_SAMPLE_MIN_INTERVAL_MS,
+  ROUTE_METRIC_REFRESH_INTERVAL_MS,
+  WRITE_IF_NEWER_SCRIPT,
+};

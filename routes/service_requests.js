@@ -4,6 +4,7 @@ import { getPool } from "../db.js";
 import crypto from 'crypto';
 import { verifyUser, verifyTechnician } from "../middleware/auth.js";
 import { socketService } from "../services/socket.js";
+import { getLiveTrackingRuntime } from "../services/liveTrackingRuntime.js";
 import * as mail from "../services/mailer.js";
 import Razorpay from "razorpay";
 import { generateInvoicePDF } from "../services/invoiceService.js";
@@ -1423,6 +1424,29 @@ router.get("/:id", verifyUser, async (req, res) => {
             ...buildTowingRouteResponseFields(row),
             ...paymentDetails,
         };
+
+        if (request.technician) {
+            const liveLocation = await getLiveTrackingRuntime().ingestion.getRecoverySnapshot({
+                technicianId: row.technician_id,
+                requestId,
+            });
+            if (liveLocation) {
+                request.technician.location = {
+                    lat: liveLocation.lat,
+                    lng: liveLocation.lng,
+                    recordedAt: liveLocation.recordedAt,
+                    sequenceId: liveLocation.sequenceId,
+                    speed: liveLocation.speed,
+                    heading: liveLocation.heading,
+                    accuracy: liveLocation.accuracy,
+                };
+                request.technician.recordedAt = liveLocation.recordedAt;
+                request.technician.sequenceId = liveLocation.sequenceId;
+                request.technician.speed = liveLocation.speed;
+                request.technician.heading = liveLocation.heading;
+                request.technician.accuracy = liveLocation.accuracy;
+            }
+        }
 
         res.json(request);
     } catch (err) {

@@ -29,6 +29,20 @@ class InMemoryRedisEvalBoundary {
 
   async eval(_script, _keyCount, key, serializedLocation, ttlSeconds) {
     const next = JSON.parse(serializedLocation);
+    if (_script.includes('history-sample')) {
+      const existing = this.values.get(key)?.value;
+      if (existing) {
+        const elapsedMs = next.recordedAtMs - existing.recordedAtMs;
+        const approximateDistanceMeters = Math.hypot(
+          next.lat - existing.lat,
+          next.lng - existing.lng,
+        ) * 111_000;
+        if (elapsedMs < 15_000 && approximateDistanceMeters < 50) return ['not_due'];
+      }
+      this.values.set(key, { value: next, ttlSeconds: Number(ttlSeconds) });
+      return ['claimed'];
+    }
+
     const existing = this.values.get(key)?.value;
     if (existing) {
       const isOlder = next.recordedAtMs < existing.recordedAtMs ||
@@ -48,6 +62,12 @@ class InMemoryRedisEvalBoundary {
 
   async ttl(key) {
     return this.values.get(key)?.ttlSeconds ?? -2;
+  }
+
+  async set(key, value, _expiryMode, ttlMilliseconds, condition) {
+    if (condition === 'NX' && this.values.has(key)) return null;
+    this.values.set(key, { value, ttlSeconds: Number(ttlMilliseconds) / 1000 });
+    return 'OK';
   }
 }
 
@@ -81,4 +101,20 @@ test('returns a current location only to the matching request', async () => {
 
   assert.equal((await store.getForRequest('7', '44')).jobId, '44');
   assert.equal(await store.getForRequest('7', '45'), null);
+});
+
+test('claims a MySQL history sample only after enough time or travel', async () => {
+  const store = createLiveTrackingStore(new InMemoryRedisEvalBoundary());
+  const first = location();
+
+  assert.equal(await store.claimHistorySample(first), true);
+  assert.equal(await store.claimHistorySample(location({ sequenceId: 1002, recordedAtMs: first.recordedAtMs + 1_000 })), false);
+  assert.equal(await store.claimHistorySample(location({ sequenceId: 1003, recordedAtMs: first.recordedAtMs + 16_000 })), true);
+});
+
+test('claims one route-metric refresh per request within the throttle interval', async () => {
+  const store = createLiveTrackingStore(new InMemoryRedisEvalBoundary());
+
+  assert.equal(await store.claimRouteMetricRefresh('44'), true);
+  assert.equal(await store.claimRouteMetricRefresh('44'), false);
 });

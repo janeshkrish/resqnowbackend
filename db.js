@@ -482,15 +482,34 @@ CREATE TABLE IF NOT EXISTS technician_location_history (
   service_request_id INT NULL,
   latitude DECIMAL(10, 8) NOT NULL,
   longitude DECIMAL(11, 8) NOT NULL,
+  recorded_at DATETIME(3) NULL,
+  received_at DATETIME(3) NULL,
+  sequence_id BIGINT NULL,
+  accuracy_m DECIMAL(8, 2) NULL,
+  speed_mps DECIMAL(8, 3) NULL,
+  heading_degrees DECIMAL(7, 3) NULL,
   captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_tech_location_history_tech_time (technician_id, captured_at),
-  INDEX idx_tech_location_history_request_time (service_request_id, captured_at)
+  INDEX idx_tech_location_history_request_time (service_request_id, captured_at),
+  INDEX idx_tech_location_history_request_recorded (service_request_id, recorded_at)
 )
 `.trim();
 
 export async function ensureTechnicianLocationHistoryTable() {
   const p = await getPool();
   await p.execute(TECHNICIAN_LOCATION_HISTORY_TABLE_SQL);
+  await addColumnIfNotExists(p, 'technician_location_history', 'recorded_at DATETIME(3) NULL');
+  await addColumnIfNotExists(p, 'technician_location_history', 'received_at DATETIME(3) NULL');
+  await addColumnIfNotExists(p, 'technician_location_history', 'sequence_id BIGINT NULL');
+  await addColumnIfNotExists(p, 'technician_location_history', 'accuracy_m DECIMAL(8, 2) NULL');
+  await addColumnIfNotExists(p, 'technician_location_history', 'speed_mps DECIMAL(8, 3) NULL');
+  await addColumnIfNotExists(p, 'technician_location_history', 'heading_degrees DECIMAL(7, 3) NULL');
+  await addIndexIfNotExists(
+    p,
+    'technician_location_history',
+    'idx_tech_location_history_request_recorded',
+    'service_request_id, recorded_at',
+  );
 }
 
 const TECHNICIAN_LOGIN_SESSIONS_TABLE_SQL = `

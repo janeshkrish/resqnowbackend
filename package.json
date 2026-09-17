@@ -13,6 +13,7 @@
     "worker:dispatch": "node workers/dispatchWorker.js"
   },
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "axios": "^1.13.4",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.70.4",
@@ -33,6 +34,7 @@
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
-    "@capacitor/assets": "^3.0.5"
+    "@capacitor/assets": "^3.0.5",
+    "socket.io-client": "^4.8.3"
   }
 }
