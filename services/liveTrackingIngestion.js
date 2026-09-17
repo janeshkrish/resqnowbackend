@@ -4,7 +4,7 @@ import {
   distanceMeters,
   parseTrackingLocation,
 } from './liveTrackingContract.js';
-import { TrackingStoreError } from './liveTrackingStore.js';
+import { liveTrackingKey, TrackingStoreError } from './liveTrackingStore.js';
 import { isLiveTrackingDiagnosticsEnabled, logLiveTrackingDiagnostic } from './liveTrackingDiagnostics.js';
 
 const LIVE_TRACKING_STATUSES = new Set([
@@ -101,7 +101,7 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
   return {
     async ingest({ identity, payload, source }) {
       if (String(identity?.role || '').toLowerCase() !== 'technician' || !identity?.id) {
-        logLiveTrackingDiagnostic('ingestion_rejected', { code: 'FORBIDDEN', role: identity?.role || null });
+        logLiveTrackingDiagnostic('[RT-INGEST]', 'ingestion_rejected', { code: 'FORBIDDEN', role: identity?.role || null });
         return { ok: false, code: 'FORBIDDEN' };
       }
 
@@ -115,7 +115,7 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
         );
       } catch (error) {
         if (error instanceof TrackingError) {
-          logLiveTrackingDiagnostic('ingestion_rejected', { code: error.code, technicianId: String(identity.id) });
+          logLiveTrackingDiagnostic('[RT-INGEST]', 'ingestion_rejected', { code: error.code, technicianId: String(identity.id) });
           return { ok: false, code: error.code };
         }
         throw error;
@@ -140,7 +140,7 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
       }
 
       if (!job || !isLiveTrackingStatus(job.status)) {
-        logLiveTrackingDiagnostic('ingestion_rejected', {
+        logLiveTrackingDiagnostic('[RT-INGEST]', 'ingestion_rejected', {
           code: 'NO_ACTIVE_JOB', technicianId: String(identity.id), jobId: parsed.jobId,
         });
         return { ok: false, code: 'NO_ACTIVE_JOB' };
@@ -154,9 +154,23 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
         throw error;
       }
 
+      logLiveTrackingDiagnostic('[RT-INGEST]', 'ingestion_evaluating', {
+        requestId: parsed.jobId,
+        technicianId: String(identity.id),
+        sequenceId: parsed.sequenceId,
+        lat: parsed.lat,
+        lng: parsed.lng,
+        recordedAt: parsed.recordedAt,
+        redisKey: liveTrackingKey(identity.id),
+        previousLat: previous?.lat ?? null,
+        previousLng: previous?.lng ?? null,
+        previousSequenceId: previous?.sequenceId ?? null,
+        previousRecordedAt: previous?.recordedAt ?? null,
+      });
+
       const decision = locationDecision(previous, parsed);
       if (decision) {
-        logLiveTrackingDiagnostic('ingestion_rejected', {
+        logLiveTrackingDiagnostic('[RT-INGEST]', 'ingestion_rejected', {
           code: decision, technicianId: String(identity.id), jobId: parsed.jobId,
           sequenceId: parsed.sequenceId, lat: parsed.lat, lng: parsed.lng,
         });
@@ -181,7 +195,7 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
         throw error;
       }
       if (!writeResult.accepted) {
-        logLiveTrackingDiagnostic('ingestion_rejected', {
+        logLiveTrackingDiagnostic('[RT-INGEST]', 'ingestion_rejected', {
           code: writeResult.code || 'OUT_OF_ORDER', technicianId: String(identity.id), jobId: parsed.jobId,
           sequenceId: parsed.sequenceId, lat: parsed.lat, lng: parsed.lng,
         });
@@ -194,7 +208,7 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
             store.getForTechnician(identity.id),
             store.getTtlForTechnician?.(identity.id),
           ]);
-          logLiveTrackingDiagnostic('ingestion_accepted', {
+          logLiveTrackingDiagnostic('[RT-INGEST]', 'ingestion_accepted', {
             technicianId: acceptedLocation.technicianId,
             requestId: acceptedLocation.requestId,
             sequenceId: acceptedLocation.sequenceId,
@@ -205,9 +219,10 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
             redisLng: redisLocation?.lng ?? null,
             redisSequenceId: redisLocation?.sequenceId ?? null,
             redisTtlSeconds: redisTtlSeconds ?? null,
+            redisKey: liveTrackingKey(identity.id),
           });
         } catch (error) {
-          logLiveTrackingDiagnostic('redis_inspection_failed', { message: error?.message || String(error) });
+          logLiveTrackingDiagnostic('[RT-INGEST]', 'redis_inspection_failed', { message: error?.message || String(error) });
         }
       }
 

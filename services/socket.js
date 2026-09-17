@@ -116,7 +116,7 @@ export class SocketService {
 
     this.io.on("connection", (socket) => {
       console.log(`[Socket] connected ${socket.id}`);
-      logLiveTrackingDiagnostic('socket_connected', {
+      logLiveTrackingDiagnostic('[RT-BACKEND-IN]', 'socket_connected', {
         socketId: socket.id,
         role: socket.data.identity?.role || null,
         identityId: socket.data.identity?.id || null,
@@ -152,7 +152,7 @@ export class SocketService {
             ? await this.accessControl.getTrackingRequest(socket.data.identity, normalizedRequestId)
             : null;
           if (!trackingRequest) {
-            logLiveTrackingDiagnostic('subscription_rejected', {
+            logLiveTrackingDiagnostic('[RT-BACKEND-IN]', 'subscription_rejected', {
               socketId: socket.id,
               role: socket.data.identity?.role || null,
               identityId: socket.data.identity?.id || null,
@@ -171,7 +171,7 @@ export class SocketService {
               requestId: normalizedRequestId,
             });
           }
-          logLiveTrackingDiagnostic('subscription_accepted', {
+          logLiveTrackingDiagnostic('[RT-BACKEND-IN]', 'subscription_accepted', {
             socketId: socket.id,
             role: socket.data.identity?.role || null,
             identityId: socket.data.identity?.id || null,
@@ -191,7 +191,7 @@ export class SocketService {
       });
 
       socket.on("tracking:location:v1", (data = {}, acknowledgement = () => {}) => {
-        logLiveTrackingDiagnostic('location_received', {
+        logLiveTrackingDiagnostic('[RT-BACKEND-IN]', 'location_received', {
           socketId: socket.id,
           role: socket.data.identity?.role || null,
           technicianId: socket.data.identity?.id || null,
@@ -210,7 +210,7 @@ export class SocketService {
           payload: data,
           source: 'socket',
         }).then(async (result) => {
-          logLiveTrackingDiagnostic(result.ok ? 'location_accepted' : 'location_rejected', {
+          logLiveTrackingDiagnostic('[RT-BACKEND-IN]', result.ok ? 'location_accepted' : 'location_rejected', {
             socketId: socket.id,
             technicianId: socket.data.identity?.id || null,
             requestId: result.location?.requestId ?? data?.jobId ?? null,
@@ -220,7 +220,7 @@ export class SocketService {
           if (result.ok) await this.publishAcceptedTracking(result);
           acknowledgement(result);
         }).catch((error) => {
-          logLiveTrackingDiagnostic('location_handler_failure', {
+          logLiveTrackingDiagnostic('[RT-BACKEND-IN]', 'location_handler_failure', {
             socketId: socket.id,
             technicianId: socket.data.identity?.id || null,
             message: error?.message || String(error),
@@ -284,13 +284,14 @@ export class SocketService {
   publishTrackingLocation(location) {
     if (!this.io || !location?.requestId) return;
     const room = `request_${String(location.requestId)}`;
-    logLiveTrackingDiagnostic('room_emission', {
+    logLiveTrackingDiagnostic('[RT-ROOM-EMIT]', 'room_emission', {
       room,
       requestId: String(location.requestId),
       technicianId: location.technicianId ?? null,
       sequenceId: location.sequenceId ?? null,
       lat: location.lat ?? null,
       lng: location.lng ?? null,
+      roomSocketCount: this.io.sockets.adapter.rooms.get(room)?.size ?? null,
     });
     this.io.to(room).emit('tracking:location:v1', location);
     this.io.to(room).emit('technician:location_update', location);
