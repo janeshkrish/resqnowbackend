@@ -5,6 +5,7 @@ import {
   parseTrackingLocation,
 } from './liveTrackingContract.js';
 import { TrackingStoreError } from './liveTrackingStore.js';
+import { isLiveTrackingDiagnosticsEnabled, logLiveTrackingDiagnostic } from './liveTrackingDiagnostics.js';
 
 const LIVE_TRACKING_STATUSES = new Set([
   'assigned',
@@ -100,6 +101,7 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
   return {
     async ingest({ identity, payload, source }) {
       if (String(identity?.role || '').toLowerCase() !== 'technician' || !identity?.id) {
+        logLiveTrackingDiagnostic('ingestion_rejected', { code: 'FORBIDDEN', role: identity?.role || null });
         return { ok: false, code: 'FORBIDDEN' };
       }
 
@@ -112,7 +114,10 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
           nowMs,
         );
       } catch (error) {
-        if (error instanceof TrackingError) return { ok: false, code: error.code };
+        if (error instanceof TrackingError) {
+          logLiveTrackingDiagnostic('ingestion_rejected', { code: error.code, technicianId: String(identity.id) });
+          return { ok: false, code: error.code };
+        }
         throw error;
       }
 
@@ -135,6 +140,9 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
       }
 
       if (!job || !isLiveTrackingStatus(job.status)) {
+        logLiveTrackingDiagnostic('ingestion_rejected', {
+          code: 'NO_ACTIVE_JOB', technicianId: String(identity.id), jobId: parsed.jobId,
+        });
         return { ok: false, code: 'NO_ACTIVE_JOB' };
       }
 
@@ -147,7 +155,13 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
       }
 
       const decision = locationDecision(previous, parsed);
-      if (decision) return { ok: false, code: decision };
+      if (decision) {
+        logLiveTrackingDiagnostic('ingestion_rejected', {
+          code: decision, technicianId: String(identity.id), jobId: parsed.jobId,
+          sequenceId: parsed.sequenceId, lat: parsed.lat, lng: parsed.lng,
+        });
+        return { ok: false, code: decision };
+      }
 
       const receivedAt = new Date(nowMs).toISOString();
       const acceptedLocation = {
@@ -167,7 +181,34 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
         throw error;
       }
       if (!writeResult.accepted) {
+        logLiveTrackingDiagnostic('ingestion_rejected', {
+          code: writeResult.code || 'OUT_OF_ORDER', technicianId: String(identity.id), jobId: parsed.jobId,
+          sequenceId: parsed.sequenceId, lat: parsed.lat, lng: parsed.lng,
+        });
         return { ok: false, code: writeResult.code || 'OUT_OF_ORDER' };
+      }
+
+      if (isLiveTrackingDiagnosticsEnabled()) {
+        try {
+          const [redisLocation, redisTtlSeconds] = await Promise.all([
+            store.getForTechnician(identity.id),
+            store.getTtlForTechnician?.(identity.id),
+          ]);
+          logLiveTrackingDiagnostic('ingestion_accepted', {
+            technicianId: acceptedLocation.technicianId,
+            requestId: acceptedLocation.requestId,
+            sequenceId: acceptedLocation.sequenceId,
+            lat: acceptedLocation.lat,
+            lng: acceptedLocation.lng,
+            recordedAt: acceptedLocation.recordedAt,
+            redisLat: redisLocation?.lat ?? null,
+            redisLng: redisLocation?.lng ?? null,
+            redisSequenceId: redisLocation?.sequenceId ?? null,
+            redisTtlSeconds: redisTtlSeconds ?? null,
+          });
+        } catch (error) {
+          logLiveTrackingDiagnostic('redis_inspection_failed', { message: error?.message || String(error) });
+        }
       }
 
       try {

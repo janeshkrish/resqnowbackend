@@ -131,6 +131,15 @@ export function createLiveTrackingStore(redis) {
       }
     },
 
+    async getTtlForTechnician(technicianId) {
+      if (typeof redis.ttl !== 'function') return null;
+      try {
+        return await redis.ttl(liveTrackingKey(technicianId));
+      } catch (error) {
+        throw new TrackingStoreError('Live tracking Redis storage is unavailable.', error);
+      }
+    },
+
     async getForRequest(technicianId, requestId) {
       const location = await this.getForTechnician(technicianId);
       if (!location || String(location.jobId) !== String(requestId)) return null;

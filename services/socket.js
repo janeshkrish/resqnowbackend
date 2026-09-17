@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import { isOriginAllowed } from "../config/network.js";
 import { getPool } from "../db.js";
 import { notificationService } from "./notificationService.js";
+import { logLiveTrackingDiagnostic } from './liveTrackingDiagnostics.js';
 
 function getJwtSecret() {
   const secret = String(process.env.JWT_SECRET || '').trim();
@@ -115,6 +116,11 @@ export class SocketService {
 
     this.io.on("connection", (socket) => {
       console.log(`[Socket] connected ${socket.id}`);
+      logLiveTrackingDiagnostic('socket_connected', {
+        socketId: socket.id,
+        role: socket.data.identity?.role || null,
+        identityId: socket.data.identity?.id || null,
+      });
 
       socket.on("join_technician_room", (technicianId, acknowledgement = () => {}) => {
         const identity = socket.data.identity;
@@ -146,10 +152,18 @@ export class SocketService {
             ? await this.accessControl.getTrackingRequest(socket.data.identity, normalizedRequestId)
             : null;
           if (!trackingRequest) {
+            logLiveTrackingDiagnostic('subscription_rejected', {
+              socketId: socket.id,
+              role: socket.data.identity?.role || null,
+              identityId: socket.data.identity?.id || null,
+              requestId: normalizedRequestId,
+              code: 'FORBIDDEN',
+            });
             acknowledgement({ ok: false, code: 'FORBIDDEN' });
             return;
           }
-          socket.join(`request_${normalizedRequestId}`);
+          const room = `request_${normalizedRequestId}`;
+          socket.join(room);
           let location = null;
           if (this.trackingIngestion && trackingRequest.technicianId) {
             location = await this.trackingIngestion.getRecoverySnapshot({
@@ -157,6 +171,14 @@ export class SocketService {
               requestId: normalizedRequestId,
             });
           }
+          logLiveTrackingDiagnostic('subscription_accepted', {
+            socketId: socket.id,
+            role: socket.data.identity?.role || null,
+            identityId: socket.data.identity?.id || null,
+            requestId: normalizedRequestId,
+            room,
+            recoverySequenceId: location?.sequenceId ?? null,
+          });
           acknowledgement({ ok: true, location });
         } catch {
           acknowledgement({ ok: false, code: 'STORE_UNAVAILABLE' });
@@ -169,6 +191,16 @@ export class SocketService {
       });
 
       socket.on("tracking:location:v1", (data = {}, acknowledgement = () => {}) => {
+        logLiveTrackingDiagnostic('location_received', {
+          socketId: socket.id,
+          role: socket.data.identity?.role || null,
+          technicianId: socket.data.identity?.id || null,
+          requestId: data?.jobId ?? data?.requestId ?? null,
+          sequenceId: data?.sequenceId ?? null,
+          lat: data?.lat ?? null,
+          lng: data?.lng ?? null,
+          recordedAt: data?.recordedAt ?? null,
+        });
         if (!this.trackingIngestion) {
           acknowledgement({ ok: false, code: 'STORE_UNAVAILABLE' });
           return;
@@ -178,9 +210,23 @@ export class SocketService {
           payload: data,
           source: 'socket',
         }).then(async (result) => {
+          logLiveTrackingDiagnostic(result.ok ? 'location_accepted' : 'location_rejected', {
+            socketId: socket.id,
+            technicianId: socket.data.identity?.id || null,
+            requestId: result.location?.requestId ?? data?.jobId ?? null,
+            sequenceId: result.location?.sequenceId ?? data?.sequenceId ?? null,
+            code: result.code ?? null,
+          });
           if (result.ok) await this.publishAcceptedTracking(result);
           acknowledgement(result);
-        }).catch(() => acknowledgement({ ok: false, code: 'STORE_UNAVAILABLE' }));
+        }).catch((error) => {
+          logLiveTrackingDiagnostic('location_handler_failure', {
+            socketId: socket.id,
+            technicianId: socket.data.identity?.id || null,
+            message: error?.message || String(error),
+          });
+          acknowledgement({ ok: false, code: 'STORE_UNAVAILABLE' });
+        });
       });
 
       socket.on("disconnect", () => {
@@ -238,6 +284,14 @@ export class SocketService {
   publishTrackingLocation(location) {
     if (!this.io || !location?.requestId) return;
     const room = `request_${String(location.requestId)}`;
+    logLiveTrackingDiagnostic('room_emission', {
+      room,
+      requestId: String(location.requestId),
+      technicianId: location.technicianId ?? null,
+      sequenceId: location.sequenceId ?? null,
+      lat: location.lat ?? null,
+      lng: location.lng ?? null,
+    });
     this.io.to(room).emit('tracking:location:v1', location);
     this.io.to(room).emit('technician:location_update', location);
   }
