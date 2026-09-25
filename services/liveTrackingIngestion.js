@@ -173,6 +173,8 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
         logLiveTrackingDiagnostic('[RT-INGEST]', 'ingestion_rejected', {
           code: decision, technicianId: String(identity.id), jobId: parsed.jobId,
           sequenceId: parsed.sequenceId, lat: parsed.lat, lng: parsed.lng,
+          source: String(source || 'unknown'),
+          gpsToBackendMs: nowMs - parsed.recordedAtMs,
         });
         return { ok: false, code: decision };
       }
@@ -203,6 +205,7 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
       }
 
       if (isLiveTrackingDiagnosticsEnabled()) {
+        const redisAcceptedAtMs = toNowMs(now);
         try {
           const [redisLocation, redisTtlSeconds] = await Promise.all([
             store.getForTechnician(identity.id),
@@ -220,6 +223,12 @@ export function createLiveTrackingIngestion({ getPool, store, now = () => Date.n
             redisSequenceId: redisLocation?.sequenceId ?? null,
             redisTtlSeconds: redisTtlSeconds ?? null,
             redisKey: liveTrackingKey(identity.id),
+            source: acceptedLocation.source,
+            receivedAt,
+            redisAcceptedAt: new Date(redisAcceptedAtMs).toISOString(),
+            // The GPS timestamp comes from the technician's device clock.
+            gpsToBackendMs: nowMs - parsed.recordedAtMs,
+            backendToRedisMs: redisAcceptedAtMs - nowMs,
           });
         } catch (error) {
           logLiveTrackingDiagnostic('[RT-INGEST]', 'redis_inspection_failed', { message: error?.message || String(error) });

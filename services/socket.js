@@ -284,6 +284,7 @@ export class SocketService {
   publishTrackingLocation(location) {
     if (!this.io || !location?.requestId) return;
     const room = `request_${String(location.requestId)}`;
+    const receivedAtMs = Date.parse(String(location.receivedAt ?? ''));
     logLiveTrackingDiagnostic('[RT-ROOM-EMIT]', 'room_emission', {
       room,
       requestId: String(location.requestId),
@@ -292,6 +293,9 @@ export class SocketService {
       lat: location.lat ?? null,
       lng: location.lng ?? null,
       roomSocketCount: this.io.sockets.adapter.rooms.get(room)?.size ?? null,
+      receivedAt: location.receivedAt ?? null,
+      backendToEmitMs: Number.isFinite(receivedAtMs) ? Date.now() - receivedAtMs : null,
+      routeMetrics: location.durationMinutes != null,
     });
     this.io.to(room).emit('tracking:location:v1', location);
     this.io.to(room).emit('technician:location_update', location);

@@ -125,3 +125,55 @@ test('samples MySQL history only when the store grants the sample claim', async 
 
   assert.equal(calls.filter(({ sql }) => sql.includes('INSERT INTO technician_location_history')).length, 1);
 });
+
+function withDiagnostics(t) {
+  const previousSetting = process.env.LIVE_TRACKING_DIAGNOSTICS;
+  process.env.LIVE_TRACKING_DIAGNOSTICS = 'true';
+  t.after(() => {
+    if (previousSetting === undefined) delete process.env.LIVE_TRACKING_DIAGNOSTICS;
+    else process.env.LIVE_TRACKING_DIAGNOSTICS = previousSetting;
+  });
+  const info = t.mock.method(console, 'info', () => {});
+  return (event) => info.mock.calls
+    .map(({ arguments: [prefix, details] }) => ({ prefix, ...details }))
+    .filter((entry) => entry.event === event);
+}
+
+test('reports GPS-to-backend and backend-to-Redis latency for an accepted fix', async (t) => {
+  const logged = withDiagnostics(t);
+  const { ingestion } = createHarness();
+
+  const result = await ingestion.ingest({ identity: { id: '7', role: 'technician' }, payload: payload(), source: 'socket' });
+
+  assert.equal(result.ok, true);
+  const [entry] = logged('ingestion_accepted');
+  assert.equal(entry.prefix, '[RT-INGEST]');
+  assert.equal(entry.source, 'socket');
+  assert.equal(entry.receivedAt, NOW.toISOString());
+  assert.equal(entry.redisAcceptedAt, NOW.toISOString());
+  assert.equal(entry.gpsToBackendMs, 30_000);
+  assert.equal(entry.backendToRedisMs, 0);
+});
+
+test('reports the rejection reason and GPS age for a rejected fix without logging secrets', async (t) => {
+  const logged = withDiagnostics(t);
+  const previous = {
+    ...payload(),
+    technicianId: '7',
+    requestId: '44',
+    recordedAtMs: Date.parse('2026-09-17T09:59:29.000Z'),
+  };
+  const { ingestion } = createHarness({ previous });
+
+  await ingestion.ingest({
+    identity: { id: '7', role: 'technician', email: 'tech@example.com' },
+    payload: payload({ lat: 13.9716, sequenceId: 1002 }),
+    source: 'rest',
+  });
+
+  const [entry] = logged('ingestion_rejected');
+  assert.equal(entry.code, 'IMPLAUSIBLE_MOVEMENT');
+  assert.equal(entry.source, 'rest');
+  assert.equal(entry.gpsToBackendMs, 30_000);
+  assert.equal(JSON.stringify(entry).includes('tech@example.com'), false);
+});

@@ -142,3 +142,42 @@ test('delivers accepted tracking only to an authorised request subscriber', asyn
   assert.equal(acknowledgement.ok, true);
   assert.deepEqual(await ownerEvent, location);
 });
+
+test('keeps both room events for installed clients and reports backend-to-emit latency', (t) => {
+  const previousSetting = process.env.LIVE_TRACKING_DIAGNOSTICS;
+  process.env.LIVE_TRACKING_DIAGNOSTICS = 'true';
+  t.after(() => {
+    if (previousSetting === undefined) delete process.env.LIVE_TRACKING_DIAGNOSTICS;
+    else process.env.LIVE_TRACKING_DIAGNOSTICS = previousSetting;
+  });
+  const info = t.mock.method(console, 'info', () => {});
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-09-25T10:00:00.400Z') });
+  const emitted = [];
+  const socketService = new SocketService();
+  socketService.io = {
+    sockets: { adapter: { rooms: new Map([['request_44', new Set(['a', 'b'])]]) } },
+    to(room) {
+      return { emit: (event, payload) => emitted.push({ room, event, payload }) };
+    },
+  };
+  const location = {
+    technicianId: '7',
+    requestId: '44',
+    sequenceId: 1001,
+    lat: 12.97,
+    lng: 77.59,
+    receivedAt: '2026-09-25T10:00:00.100Z',
+  };
+
+  socketService.publishTrackingLocation(location);
+
+  // technician:location_update stays until installed APK clients listen to tracking:location:v1.
+  assert.deepEqual(emitted, [
+    { room: 'request_44', event: 'tracking:location:v1', payload: location },
+    { room: 'request_44', event: 'technician:location_update', payload: location },
+  ]);
+  const [, details] = info.mock.calls.find(({ arguments: [prefix] }) => prefix === '[RT-ROOM-EMIT]').arguments;
+  assert.equal(details.backendToEmitMs, 300);
+  assert.equal(details.roomSocketCount, 2);
+  assert.equal(details.routeMetrics, false);
+});
