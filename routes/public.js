@@ -11,6 +11,8 @@ import {
     searchLocations,
 } from "../services/locationProviderService.js";
 import { getRoute, normalizeRouteServiceError } from "../services/routeService.js";
+import { FuelPriceError, getFuelPriceService } from "../services/fuelPriceService.js";
+import { getServicePrices } from "../services/servicePrices.js";
 
 const router = Router();
 
@@ -33,6 +35,14 @@ const reverseGeocodeLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many reverse geocode requests. Please try again shortly." },
+});
+
+const fuelPriceLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.FUEL_PRICE_RATE_LIMIT_PER_MINUTE || 30),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many fuel price requests. Please try again shortly." },
 });
 
 const routeLimiter = rateLimit({
@@ -287,6 +297,59 @@ router.get("/reverse-geocode", reverseGeocodeLimiter, async (req, res) => {
     } catch (error) {
         const normalized = normalizeLocationProviderError(error);
         return res.status(normalized.statusCode).json(normalized.payload);
+    }
+});
+
+/**
+ * GET /api/public/fuel-prices?lat=..&lng=..  (or ?city=..&state=..)
+ * Today's petrol, diesel, CNG and EV charging prices for the customer's area, with the
+ * change since the previous day on record. `available: false` when no prices are loaded.
+ */
+router.get("/fuel-prices", fuelPriceLimiter, async (req, res) => {
+    const hasCoordinates = req.query.lat != null && (req.query.lng ?? req.query.lon) != null;
+    if (!hasCoordinates && !req.query.state) {
+        return res.status(400).json({ error: "Pass lat and lng, or city and state.", code: "fuel_location_required" });
+    }
+
+    try {
+        const result = await getFuelPriceService().getPrices({
+            lat: hasCoordinates ? req.query.lat : undefined,
+            lng: hasCoordinates ? (req.query.lng ?? req.query.lon) : undefined,
+            city: req.query.city,
+            district: req.query.district,
+            state: req.query.state,
+        });
+        res.set("Cache-Control", "public, max-age=300");
+        return res.json(result);
+    } catch (error) {
+        if (error instanceof FuelPriceError) {
+            return res.status(error.statusCode).json({ error: error.message, code: error.code });
+        }
+        if (error?.name === "LocationProviderError") {
+            const normalized = normalizeLocationProviderError(error);
+            return res.status(normalized.statusCode).json(normalized.payload);
+        }
+        console.error("[Fuel Prices] Error:", error);
+        return res.status(500).json({ error: "Failed to load fuel prices.", code: "fuel_prices_failed" });
+    }
+});
+
+/**
+ * GET /api/public/service-prices?vehicle=car
+ * "Starts from" price per service: the cheapest approved technician's rate for that vehicle,
+ * including checkout fees, plus the average and how many technicians offer it.
+ */
+router.get("/service-prices", async (req, res) => {
+    try {
+        const result = await getServicePrices({ vehicle: req.query.vehicle });
+        res.set("Cache-Control", "public, max-age=300");
+        return res.json(result);
+    } catch (error) {
+        if (error?.statusCode === 400) {
+            return res.status(400).json({ error: error.message, code: "invalid_vehicle" });
+        }
+        console.error("[Service Prices] Error:", error);
+        return res.status(500).json({ error: "Failed to load service prices.", code: "service_prices_failed" });
     }
 });
 

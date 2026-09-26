@@ -189,7 +189,7 @@ const resolveVehicleSpecificServicePrice = (row, vehicle) => {
   return null;
 };
 
-const calculateTechnicianServiceRowPayout = (row, vehicle) => {
+export const calculateTechnicianServiceRowPayout = (row, vehicle) => {
   if (!row) return null;
   const visitCharge = toNum(row.visit_charge) || 0;
   const deliveryCharge = toNum(row.delivery_charge) || 0;
@@ -303,7 +303,7 @@ function readDomainScopedAmount(source, domain, vehicle, depth = 0, visited = ne
   return null;
 }
 
-function fromTechnicianPricing(tech, domain, vehicle) {
+export function fromTechnicianPricing(tech, domain, vehicle) {
   const serviceCosts = safeParse(tech?.service_costs);
   const pricing = safeParse(tech?.pricing);
 

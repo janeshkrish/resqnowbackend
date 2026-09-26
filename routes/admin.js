@@ -11,6 +11,7 @@ import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.j
 import { replaceTechnicianPricingRows, replaceTechnicianFleetVehicles } from "../services/technicianPricingStore.js";
 import { normalizeTechnicianServiceConfiguration } from "../services/adminTechnicianServiceConfiguration.js";
 import { runDispatchMatrixAudit } from "../services/dispatchMatrixAudit.js";
+import { FuelPriceError, getFuelPriceService } from "../services/fuelPriceService.js";
 import * as adminServicesController from "../controllers/adminServicesController.js";
 import { getDashboard, getAdminAuditLogs } from "../controllers/adminController.js";
 import {
@@ -1667,6 +1668,50 @@ router.delete("/users/:id", async (req, res) => {
     if (conn) {
       conn.release();
     }
+  }
+});
+
+// --- Fuel prices shown on the customer home screen ---
+// GET /api/admin/fuel-prices?state=Tamil Nadu&area=Coimbatore&days=14
+router.get("/fuel-prices", async (req, res) => {
+  try {
+    const rows = await getFuelPriceService().listPrices({ state: req.query.state, area: req.query.area, days: req.query.days });
+    return res.json({ prices: rows });
+  } catch (err) {
+    console.error("[Admin fuel prices] list failed:", err?.message || err);
+    return res.status(500).json({ message: "Failed to load fuel prices" });
+  }
+});
+
+// PUT /api/admin/fuel-prices
+// { state: "Tamil Nadu", area: "Coimbatore", effectiveDate?: "2026-09-26",
+//   prices: { petrol: 100.9, diesel: 92.48, cng: 89.5, ev: 18 } }
+// Leave `area` empty to set a state-wide price used where no area price exists.
+router.put("/fuel-prices", async (req, res) => {
+  try {
+    const saved = await getFuelPriceService().saveManualPrices(req.body || {});
+    return res.json({ message: "Fuel prices saved", ...saved });
+  } catch (err) {
+    if (err instanceof FuelPriceError) {
+      return res.status(err.statusCode).json({ message: err.message, code: err.code });
+    }
+    console.error("[Admin fuel prices] save failed:", err?.message || err);
+    return res.status(500).json({ message: "Failed to save fuel prices" });
+  }
+});
+
+// POST /api/admin/fuel-prices/sync  — pull today's petrol/diesel prices from the provider now.
+// Uses 2 requests of the provider quota; the daily automatic sync skips days already synced.
+router.post("/fuel-prices/sync", async (req, res) => {
+  try {
+    const result = await getFuelPriceService().syncProviderPrices({ force: req.query.force === "true" });
+    return res.json(result);
+  } catch (err) {
+    const status = err?.response?.status;
+    console.error("[Admin fuel prices] sync failed:", status || "", err?.message || err);
+    return res.status(502).json({
+      message: status === 401 || status === 403 ? "Fuel price provider rejected the API key" : "Fuel price provider request failed",
+    });
   }
 });
 

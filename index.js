@@ -59,6 +59,7 @@ import {
   startTechnicianActivityMonitor,
   stopTechnicianActivityMonitor,
 } from "./services/technicianActivityService.js";
+import { startFuelPriceSync, stopFuelPriceSync } from "./services/fuelPriceService.js";
 
 const PORT = Number(process.env.PORT || 5000);
 const HOST = "0.0.0.0";
@@ -351,6 +352,7 @@ async function shutdown(signal) {
       console.error("[SHUTDOWN] Error while closing HTTP server:", err?.message || err);
     }
     stopTechnicianActivityMonitor();
+    stopFuelPriceSync();
     stopOperationsCommandCenterMonitor();
     await stopDispatchQueueWorker();
     await closeLiveTrackingRuntime();
@@ -402,6 +404,7 @@ async function startServer() {
       }
       startOperationsCommandCenterMonitor();
       startTechnicianActivityMonitor();
+      startFuelPriceSync();
     } catch (error) {
       dbState.ready = false;
       dbState.lastCheckedAt = new Date().toISOString();
