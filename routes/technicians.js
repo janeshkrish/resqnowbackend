@@ -35,6 +35,7 @@ import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPay
 import { isTowingServiceType } from "../services/towingServiceType.js";
 import { getLiveTrackingRuntime } from "../services/liveTrackingRuntime.js";
 import { isLiveTrackingStatus } from "../services/liveTrackingIngestion.js";
+import { toPublicNearbyTechnician } from "../services/publicTechnician.js";
 import {
   markTechnicianHeartbeat,
   markTechnicianLogin,
@@ -2191,7 +2192,8 @@ router.get("/nearby", async (req, res) => {
     ranked.sort((a, b) => b.score - a.score);
 
     // AI Recommended tag for top 2
-    const results = ranked.map((t, index) => ({
+    // Customers only get the public profile; the rest of the record stays server-side.
+    const results = ranked.map((t, index) => toPublicNearbyTechnician({
       ...t,
       aiRecommended: index < 2
     }));

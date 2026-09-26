@@ -13,6 +13,7 @@ import {
 import { getRoute, normalizeRouteServiceError } from "../services/routeService.js";
 import { FuelPriceError, getFuelPriceService } from "../services/fuelPriceService.js";
 import { getServicePrices } from "../services/servicePrices.js";
+import { EvChargingError, getEvChargingService, getFuelStationService } from "../services/evChargingService.js";
 
 const router = Router();
 
@@ -43,6 +44,14 @@ const fuelPriceLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many fuel price requests. Please try again shortly." },
+});
+
+const evStationsLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.EV_SEARCH_RATE_LIMIT_PER_MINUTE || 30),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many EV charging searches. Please try again shortly." },
 });
 
 const routeLimiter = rateLimit({
@@ -350,6 +359,60 @@ router.get("/service-prices", async (req, res) => {
         }
         console.error("[Service Prices] Error:", error);
         return res.status(500).json({ error: "Failed to load service prices.", code: "service_prices_failed" });
+    }
+});
+
+/**
+ * GET /api/public/ev-stations?lat=..&lng=..&radius=5000
+ * Nearby EV charging stations from Mappls, nearest first. Only fields Mappls returns are
+ * included; live charger availability is not known and is reported as "unknown".
+ */
+router.get("/ev-stations", evStationsLimiter, async (req, res) => {
+    if (req.query.lat == null || (req.query.lng ?? req.query.lon) == null) {
+        return res.status(400).json({ error: "Pass lat and lng.", code: "ev_location_required" });
+    }
+
+    try {
+        const result = await getEvChargingService().findStations({
+            lat: req.query.lat,
+            lng: req.query.lng ?? req.query.lon,
+            radiusMeters: req.query.radius,
+        });
+        res.set("Cache-Control", "private, max-age=120");
+        return res.json(result);
+    } catch (error) {
+        if (error instanceof EvChargingError) {
+            return res.status(error.statusCode).json({ error: error.message, code: error.code });
+        }
+        console.error("[EV Radar] Error:", error?.message || error);
+        return res.status(500).json({ error: "EV charging stations are temporarily unavailable.", code: "ev_search_failed" });
+    }
+});
+
+/**
+ * GET /api/public/fuel-stations?lat=..&lng=..&radius=5000
+ * Nearby petrol pumps and CNG stations from Mappls, nearest first, with the brand when the
+ * name shows it. Prices are city-wide; the client reads them from /fuel-prices.
+ */
+router.get("/fuel-stations", evStationsLimiter, async (req, res) => {
+    if (req.query.lat == null || (req.query.lng ?? req.query.lon) == null) {
+        return res.status(400).json({ error: "Pass lat and lng.", code: "fuel_location_required" });
+    }
+
+    try {
+        const result = await getFuelStationService().findStations({
+            lat: req.query.lat,
+            lng: req.query.lng ?? req.query.lon,
+            radiusMeters: req.query.radius,
+        });
+        res.set("Cache-Control", "private, max-age=120");
+        return res.json(result);
+    } catch (error) {
+        if (error instanceof EvChargingError) {
+            return res.status(error.statusCode).json({ error: error.message, code: error.code });
+        }
+        console.error("[Fuel Radar] Error:", error?.message || error);
+        return res.status(500).json({ error: "Fuel stations are temporarily unavailable.", code: "fuel_search_failed" });
     }
 });
 
