@@ -3,6 +3,7 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import { getPool as databaseGetPool } from '../db.js';
 import { createLiveTrackingIngestion } from './liveTrackingIngestion.js';
 import { createLiveTrackingStore } from './liveTrackingStore.js';
+import { createTrafficEtaService } from './trafficEtaService.js';
 
 function createRedisClient(redisUrl, createRedis) {
   const client = createRedis(redisUrl, {
@@ -28,10 +29,13 @@ export function createLiveTrackingRuntime({
   const subscriberClient = stateClient.duplicate();
   const store = createLiveTrackingStore(stateClient);
   const ingestion = createLiveTrackingIngestion({ getPool, store });
+  // Separate eta:v1:* keys on the same client; inactive unless TRAFFIC_ETA_ENABLED=true.
+  const trafficEta = createTrafficEtaService({ redis: stateClient });
 
   return {
     ingestion,
     store,
+    trafficEta,
     socketAdapter: createAdapter(publisherClient, subscriberClient),
     async close() {
       await Promise.allSettled([

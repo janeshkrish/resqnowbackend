@@ -320,6 +320,7 @@ const liveTrackingRuntime = getLiveTrackingRuntime();
 const liveTrackingPublisher = createLiveTrackingPublisher({
   store: liveTrackingRuntime.store,
   publishLocation: (location) => socketService.publishTrackingLocation(location),
+  trafficEta: liveTrackingRuntime.trafficEta,
 });
 socketService.init(httpServer, {
   trackingIngestion: liveTrackingRuntime.ingestion,
