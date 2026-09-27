@@ -378,7 +378,8 @@ router.get("/ev-stations", evStationsLimiter, async (req, res) => {
             lng: req.query.lng ?? req.query.lon,
             radiusMeters: req.query.radius,
         });
-        res.set("Cache-Control", "private, max-age=120");
+        // While pins are still being placed the radar asks again, so that answer must not be cached.
+        res.set("Cache-Control", result.positionsPending ? "no-store" : "private, max-age=120");
         return res.json(result);
     } catch (error) {
         if (error instanceof EvChargingError) {
@@ -405,7 +406,8 @@ router.get("/fuel-stations", evStationsLimiter, async (req, res) => {
             lng: req.query.lng ?? req.query.lon,
             radiusMeters: req.query.radius,
         });
-        res.set("Cache-Control", "private, max-age=120");
+        // While pins are still being placed the radar asks again, so that answer must not be cached.
+        res.set("Cache-Control", result.positionsPending ? "no-store" : "private, max-age=120");
         return res.json(result);
     } catch (error) {
         if (error instanceof EvChargingError) {
