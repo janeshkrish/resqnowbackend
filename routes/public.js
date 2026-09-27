@@ -14,6 +14,7 @@ import { getRoute, normalizeRouteServiceError } from "../services/routeService.j
 import { FuelPriceError, getFuelPriceService } from "../services/fuelPriceService.js";
 import { getServicePrices } from "../services/servicePrices.js";
 import { EvChargingError, getEvChargingService, getFuelStationService } from "../services/evChargingService.js";
+import { getVehiclePhotoService } from "../services/vehiclePhotoService.js";
 
 const router = Router();
 
@@ -52,6 +53,14 @@ const evStationsLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many EV charging searches. Please try again shortly." },
+});
+
+const vehiclePhotoLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.VEHICLE_PHOTO_RATE_LIMIT_PER_MINUTE || 60),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many vehicle photo requests. Please try again shortly." },
 });
 
 const routeLimiter = rateLimit({
@@ -416,6 +425,22 @@ router.get("/fuel-stations", evStationsLimiter, async (req, res) => {
         console.error("[Fuel Radar] Error:", error?.message || error);
         return res.status(500).json({ error: "Fuel stations are temporarily unavailable.", code: "fuel_search_failed" });
     }
+});
+
+/**
+ * GET /api/public/vehicle-photo?make=Tata%20Motors&model=Nexon
+ * A representative photo of the model from its Wikipedia article, with its credit,
+ * or { photo: null } when there is no suitable free photo.
+ */
+router.get("/vehicle-photo", vehiclePhotoLimiter, async (req, res) => {
+    const make = String(req.query.make || "").trim().slice(0, 80);
+    const model = String(req.query.model || "").trim().slice(0, 80);
+    if (!make || !model) {
+        return res.status(400).json({ error: "Pass make and model.", code: "vehicle_photo_input_required" });
+    }
+    const photo = await getVehiclePhotoService().findPhoto({ make, model });
+    res.set("Cache-Control", photo ? "public, max-age=86400" : "public, max-age=3600");
+    return res.json({ photo });
 });
 
 function parseRoutePoints(query) {
