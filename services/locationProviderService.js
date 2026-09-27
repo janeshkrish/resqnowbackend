@@ -217,9 +217,10 @@ function getViewbox() {
   return String(process.env.LOCATION_SEARCH_VIEWBOX || "").trim();
 }
 
-async function searchWithNominatim({ query, limit, lat, lng }) {
+async function searchWithNominatim({ query, limit, lat, lng, viewbox: areaViewbox, bounded }) {
   const baseUrl = String(process.env.NOMINATIM_BASE_URL || "https://nominatim.openstreetmap.org").replace(/\/+$/, "");
-  const viewbox = getViewbox();
+  // A caller can limit one search to an area; otherwise the configured viewbox applies.
+  const viewbox = areaViewbox || getViewbox();
   const params = {
     q: query,
     format: "jsonv2",
@@ -231,7 +232,7 @@ async function searchWithNominatim({ query, limit, lat, lng }) {
   };
   if (viewbox) {
     params.viewbox = viewbox;
-    params.bounded = Number(process.env.LOCATION_SEARCH_BOUNDED || 0) ? 1 : 0;
+    params.bounded = (areaViewbox ? bounded : Number(process.env.LOCATION_SEARCH_BOUNDED || 0)) ? 1 : 0;
   }
   if (lat != null && lng != null) {
     params.lat = lat;
@@ -291,12 +292,14 @@ export async function searchLocations(input = {}) {
   const provider = normalizeProviderName(input.provider);
   const lat = roundBias(input.lat ?? input.latitude);
   const lng = roundBias(input.lng ?? input.lon ?? input.longitude);
-  const cacheKey = buildCacheKey("search", { provider, query: query.toLowerCase(), limit, lat, lng });
+  const viewbox = typeof input.viewbox === "string" && input.viewbox.trim() ? input.viewbox.trim() : undefined;
+  const bounded = viewbox ? Boolean(input.bounded) : undefined;
+  const cacheKey = buildCacheKey("search", { provider, query: query.toLowerCase(), limit, lat, lng, viewbox, bounded });
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
   try {
-    const payload = { query, limit, lat, lng };
+    const payload = { query, limit, lat, lng, viewbox, bounded };
     const results =
       provider === "photon"
         ? await searchWithPhoton(payload)

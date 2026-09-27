@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { distanceMeters } from './liveTrackingContract.js';
+import { OSM_ATTRIBUTION, getStationPositioner } from './stationPositions.js';
 
 // Nearby EV charging stations and fuel pumps for the customer radar, from Mappls.
 // Mappls is called only from here with the server-side key; the browser gets
@@ -212,6 +213,8 @@ export function createEvChargingService({
   http = axios,
   now = () => Date.now(),
   warn = console.warn,
+  // Places stations Mappls leaves without coordinates (see stationPositions.js).
+  positions = null,
 } = {}) {
   const searchCache = new Map();
   const detailsCache = new Map();
@@ -323,11 +326,24 @@ export function createEvChargingService({
       stations = await inFlight.get(key);
     }
 
-    const located = (station) => station.latitude !== undefined && station.longitude !== undefined;
+    let pending = false;
+    if (positions) {
+      try {
+        const placed = await positions.place({ kind, center, radiusMeters: radius, stations });
+        stations = placed.stations;
+        pending = placed.pending;
+      } catch {
+        warn(`[Radar] Could not place ${kind} stations on the map; showing them without pins.`);
+      }
+    }
+
+    // Mappls coordinates are exact, so distance is measured from the customer.
+    // OpenStreetMap positions are approximate, so the Mappls distance is kept.
+    const exact = (station) => station.latitude !== undefined && station.longitude !== undefined && station.positionSource !== 'osm';
     const results = stations
       .map((station) => {
         const { providerDistanceMeters, ...rest } = station;
-        const distance = located(station)
+        const distance = exact(station)
           ? Math.round(distanceMeters(origin, { lat: station.latitude, lng: station.longitude }))
           : providerDistanceMeters;
         return withoutUndefined({
@@ -342,13 +358,17 @@ export function createEvChargingService({
       })
       .sort((left, right) => (left.distance ?? Infinity) - (right.distance ?? Infinity));
 
-    return {
+    const fromOsm = results.some((station) => station.positionSource === 'osm');
+    return withoutUndefined({
       source: 'mappls',
       radiusMeters: radius,
       stations: results,
       total: results.length,
       located: results.filter((station) => station.latitude !== null).length,
-    };
+      // Some pins are still being looked up; ask again shortly for more.
+      positionsPending: pending || undefined,
+      positionsAttribution: fromOsm ? OSM_ATTRIBUTION : undefined,
+    });
   }
 
   return { findStations };
@@ -361,11 +381,11 @@ let evService = null;
 let fuelService = null;
 
 export function getEvChargingService() {
-  if (!evService) evService = createEvChargingService();
+  if (!evService) evService = createEvChargingService({ positions: getStationPositioner() });
   return evService;
 }
 
 export function getFuelStationService() {
-  if (!fuelService) fuelService = createFuelStationService();
+  if (!fuelService) fuelService = createFuelStationService({ positions: getStationPositioner() });
   return fuelService;
 }
