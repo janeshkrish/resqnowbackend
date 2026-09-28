@@ -4,6 +4,8 @@ import { estimateTechnicianPayoutAsync } from "./pricingEstimator.js";
 import { canonicalizeVehicleFamily } from "./serviceNormalization.js";
 import { fetchTechnicianPricingDefinition } from "./technicianPricingStore.js";
 import { isTowingServiceType } from "./towingServiceType.js";
+import { fleetPricingFor } from "./towingQuoteService.js";
+import { answerValue, readRequestDetails } from "./requestDetails.js";
 import { roundMoney } from "../utils/money.js";
 
 const toPositiveMoney = (value) => {
@@ -46,15 +48,17 @@ async function resolveTowingPricingDefinition({ request, technicianId, connectio
       connection,
     });
     if (definition?.technician_pricing) {
+      // The technician's price for the truck this job needs, when they set one.
+      const fleet = fleetPricingFor(definition.technician_pricing, request?.tow_truck_type ?? request?.towTruckType);
       return {
-        source: "technician",
+        source: fleet ? "technician_fleet" : "technician",
         service_type: definition.service_type,
         vehicle_type: definition.vehicle_type,
         technician_pricing: {
           ...definition.technician_pricing,
-          base_price: toPositiveMoney(definition.technician_pricing.base_price) ?? getServiceMatrixAmount("towing", resolveVehicleType(request), pricingConfig),
-          free_km: Number(definition.technician_pricing.free_km ?? rules.base_includes_km ?? 0),
-          per_km_price: toPositiveMoney(definition.technician_pricing.per_km_price) ?? rules.per_km_price,
+          base_price: fleet?.base_price ?? toPositiveMoney(definition.technician_pricing.base_price) ?? getServiceMatrixAmount("towing", resolveVehicleType(request), pricingConfig),
+          free_km: Number(fleet?.free_km ?? definition.technician_pricing.free_km ?? rules.base_includes_km ?? 0),
+          per_km_price: fleet?.per_km_price ?? toPositiveMoney(definition.technician_pricing.per_km_price) ?? rules.per_km_price,
           night_charge: Number(definition.technician_pricing.night_charge ?? rules.night_charge ?? 0),
           night_type: definition.technician_pricing.night_type || rules.night_type || "flat",
         },
@@ -167,8 +171,14 @@ export async function estimateTechnicianEarningForRequest({
         };
   }
 
+  const details = readRequestDetails(request?.request_details_json ?? request?.requestDetails);
   const payout = await estimateTechnicianPayoutAsync(
-    { service_type: request?.service_type, vehicle_type: request?.vehicle_type },
+    {
+      service_type: request?.service_type,
+      vehicle_type: request?.vehicle_type,
+      vehicle_subtype: request?.vehicle_subtype ?? request?.vehicleSubtype ?? null,
+      tyre_type: answerValue(details, "tyretype"),
+    },
     technician,
     { technicianId: normalizedTechnicianId }
   );

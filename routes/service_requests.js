@@ -22,6 +22,9 @@ import { buildTowingQuote, normalizeTowingQuoteError } from "../services/towingQ
 import { isTowingServiceType } from "../services/towingServiceType.js";
 import { buildTowingRouteResponseFields } from "../services/towingRouteResponse.js";
 import { estimateTechnicianEarningForRequest } from "../services/technicianEarningsService.js";
+import { answerValue, describeRequestDetails, sanitizeRequestDetails } from "../services/requestDetails.js";
+import { defaultTowTruckType, normalizeTowTruckType, normalizeVehicleSubtype } from "../services/vehicleClasses.js";
+import { buildTechnicianJobDetails } from "../services/technicianJobDetails.js";
 import {
     getTowingRealtimeEvent,
     mapRequestedTechnicianStatus,
@@ -314,7 +317,11 @@ router.post("/", verifyUser, async (req, res) => {
             dropLng,
             dropLongitude,
             drop_longitude,
-            technician_id
+            technician_id,
+            vehicle_brand,
+            vehicle_subtype,
+            tow_truck_type,
+            details
         } = req.body;
 
         console.log(`[Create Request] User: ${userId}, Service: ${service_type}, Lat: ${location_lat}, Lng: ${location_lng}`);
@@ -331,6 +338,14 @@ router.post("/", verifyUser, async (req, res) => {
             return res.status(400).json({ error: "Invalid service_type or vehicle_type for dispatch." });
         }
         const canonicalServiceType = `${inferredVehicle}-${inferredDomain}`;
+        const vehicleBrand = String(vehicle_brand || "").trim().slice(0, 100) || null;
+        const vehicleSubtype = normalizeVehicleSubtype(inferredVehicle, vehicle_subtype);
+        const requestDetails = sanitizeRequestDetails(details ?? req.body.request_details);
+        const towTruckType = inferredDomain === "towing"
+            ? normalizeTowTruckType(tow_truck_type) ||
+                defaultTowTruckType({ family: inferredVehicle, subtype: vehicleSubtype, canRoll: answerValue(requestDetails, "roll") })
+            : null;
+        const storedDescription = String(description || "").trim() || describeRequestDetails(requestDetails) || null;
 
         const pool = await getPool();
 
@@ -415,6 +430,9 @@ router.post("/", verifyUser, async (req, res) => {
                     serviceType: canonicalServiceType,
                     vehicleType: inferredVehicle,
                     vehicleModel: vehicle_model,
+                    vehicleBrand,
+                    vehicleSubtype,
+                    towTruckType,
                     pickupAddress: address,
                     pickupLat: location_lat,
                     pickupLng: location_lng,
@@ -479,6 +497,9 @@ router.post("/", verifyUser, async (req, res) => {
                     vehicle_type: inferredVehicle,
                     route_distance_km: routeDistanceKm,
                     amount: initialAmount,
+                    vehicle_subtype: vehicleSubtype,
+                    tow_truck_type: towTruckType,
+                    request_details_json: requestDetails,
                     technician_id: directTechnicianId,
                     scheduled_time: req.body.scheduled_time ?? req.body.scheduledTime ?? new Date(),
                 },
@@ -491,8 +512,8 @@ router.post("/", verifyUser, async (req, res) => {
 
         const [result] = await pool.execute(
             `INSERT INTO service_requests 
-      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_estimated_earning, technician_id, status, amount) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_estimated_earning, technician_id, status, amount, vehicle_brand, vehicle_subtype, tow_truck_type, request_details_json) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 userId,
                 canonicalServiceType,
@@ -502,7 +523,7 @@ router.post("/", verifyUser, async (req, res) => {
                 req.body.contact_name || null,
                 req.body.contact_email || null,
                 contact_phone || null,
-                description || null,
+                storedDescription,
                 location_lat || null,
                 location_lng || null,
                 location_lat || null,
@@ -519,7 +540,11 @@ router.post("/", verifyUser, async (req, res) => {
                 technicianEstimatedEarning,
                 directTechnicianId,
                 initialStatus,
-                initialAmount
+                initialAmount,
+                vehicleBrand,
+                vehicleSubtype,
+                towTruckType,
+                requestDetails ? JSON.stringify(requestDetails) : null
             ]
         );
 
@@ -607,6 +632,12 @@ router.post("/", verifyUser, async (req, res) => {
                     route_distance_km: routeDistanceKm,
                     estimated_duration: estimatedDuration,
                     pricing_breakdown_json: pricingBreakdownJson,
+                    vehicle_model: vehicle_model || null,
+                    vehicle_brand: vehicleBrand,
+                    vehicle_subtype: vehicleSubtype,
+                    tow_truck_type: towTruckType,
+                    request_details_json: requestDetails,
+                    description: storedDescription,
                     ...dispatchTowingFields
                 };
 
@@ -644,6 +675,14 @@ router.post("/", verifyUser, async (req, res) => {
                         },
                         address: pickupAddressForDb,
                         ...dispatchTowingFields,
+                        ...buildTechnicianJobDetails({
+                            vehicle_brand: vehicleBrand,
+                            vehicle_model,
+                            vehicle_subtype: vehicleSubtype,
+                            tow_truck_type: towTruckType,
+                            request_details_json: requestDetails,
+                        }),
+                        description: storedDescription,
                         amount: technicianOfferAmount,
                         priceAmount: technicianOfferAmount,
                         technicianEstimatedEarning,
@@ -802,6 +841,11 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 sr.service_type,
                 sr.vehicle_type,
                 sr.vehicle_model,
+                sr.vehicle_brand,
+                sr.vehicle_subtype,
+                sr.tow_truck_type,
+                sr.request_details_json,
+                sr.description,
                 sr.address,
                 sr.drop_address,
                 sr.drop_latitude,
@@ -926,6 +970,8 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 estimatedEarnings: resolvedOfferAmount,
                 earningsSource: earningEstimate?.source || null,
                 earningsBreakdown: earningEstimate?.breakdown || null,
+                description: row.description || null,
+                ...buildTechnicianJobDetails(row),
             },
         });
     } catch (err) {

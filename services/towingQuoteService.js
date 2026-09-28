@@ -12,6 +12,12 @@ import { computeServiceRequestPaymentAmounts } from "./serviceRequestPaymentServ
 import { roundMoney } from "../utils/money.js";
 import { getRoute } from "./routeService.js";
 import { isTowingServiceType } from "./towingServiceType.js";
+import {
+  defaultTowTruckType,
+  normalizeTowTruckType,
+  normalizeVehicleSubtype,
+  towingCategoryForSubtype,
+} from "./vehicleClasses.js";
 
 const MAX_DISTANCE_TAMPER_RATIO = 0.15;
 const MAX_DISTANCE_TAMPER_KM = 2;
@@ -83,8 +89,16 @@ function haversineKm(a, b) {
   return radiusKm * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
-function normalizeVehicleCategory({ vehicleType, vehicleModel, vehicleSubtype }) {
-  const text = `${vehicleType || ""} ${vehicleModel || ""} ${vehicleSubtype || ""}`.toLowerCase();
+const LUXURY_BRANDS = /\b(bmw|mercedes|audi|jaguar|volvo|lexus|porsche|land rover|mini|maserati|bentley|rolls royce|lamborghini|ferrari)\b/;
+
+export function normalizeVehicleCategory({ vehicleType, vehicleModel, vehicleSubtype, vehicleBrand }) {
+  const family = canonicalizeVehicleFamily(vehicleType);
+  const explicit = towingCategoryForSubtype(normalizeVehicleSubtype(family, vehicleSubtype));
+  if (explicit) {
+    const brand = String(vehicleBrand || "").toLowerCase();
+    return family === "car" && LUXURY_BRANDS.test(brand) ? "luxury_car" : explicit;
+  }
+  const text = `${vehicleType || ""} ${vehicleBrand || ""} ${vehicleModel || ""} ${vehicleSubtype || ""}`.toLowerCase();
   if (/\bscooter\b|scooty/.test(text)) return "scooter";
   if (/\bbike\b|\bmotorcycle\b|\btwo\s*wheeler\b|2w/.test(text)) return "bike";
   if (/\bluxury\b|\bpremium\b|\bbmw\b|\bmercedes\b|\baudi\b|\bjaguar\b|\bvolvo\b|\blexus\b/.test(text)) return "luxury_car";
@@ -233,7 +247,20 @@ async function computeMarketFactors({ pool, pickup, route, rules, emergency = fa
   };
 }
 
-async function resolveTechnicianPricing({ technicianId, serviceType, vehicleType, pricingConfig, rules }) {
+export function fleetPricingFor(technicianPricing, towTruckType) {
+  const fleet = technicianPricing?.fleet_pricing;
+  const entry = towTruckType && fleet && typeof fleet === "object" ? fleet[towTruckType] : null;
+  if (!entry || typeof entry !== "object") return null;
+  const base = toPositiveMoney(entry.base_charge ?? entry.base_price);
+  if (base == null) return null;
+  return {
+    base_price: base,
+    free_km: toFiniteNumber(entry.free_distance ?? entry.free_km),
+    per_km_price: toPositiveMoney(entry.per_km_charge ?? entry.per_km_price),
+  };
+}
+
+async function resolveTechnicianPricing({ technicianId, serviceType, vehicleType, pricingConfig, rules, towTruckType = null }) {
   const technicianIdNumber = Number(technicianId);
   if (Number.isInteger(technicianIdNumber) && technicianIdNumber > 0) {
     try {
@@ -243,15 +270,16 @@ async function resolveTechnicianPricing({ technicianId, serviceType, vehicleType
         vehicleType,
       });
       if (definition?.technician_pricing) {
+        const fleet = fleetPricingFor(definition.technician_pricing, towTruckType);
         return {
-          source: "technician",
+          source: fleet ? "technician_fleet" : "technician",
           service_type: definition.service_type,
           vehicle_type: definition.vehicle_type,
           technician_pricing: {
             ...definition.technician_pricing,
-            base_price: toPositiveMoney(definition.technician_pricing.base_price),
-            free_km: toFiniteNumber(definition.technician_pricing.free_km) ?? rules.base_includes_km,
-            per_km_price: toPositiveMoney(definition.technician_pricing.per_km_price) ?? rules.per_km_price,
+            base_price: fleet?.base_price ?? toPositiveMoney(definition.technician_pricing.base_price),
+            free_km: fleet?.free_km ?? toFiniteNumber(definition.technician_pricing.free_km) ?? rules.base_includes_km,
+            per_km_price: fleet?.per_km_price ?? toPositiveMoney(definition.technician_pricing.per_km_price) ?? rules.per_km_price,
             night_charge: toFiniteNumber(definition.technician_pricing.night_charge) ?? rules.night_charge,
             night_type: definition.technician_pricing.night_type || rules.night_type || "flat",
           },
@@ -281,6 +309,7 @@ function buildPricingBreakdown({
   route,
   rules,
   vehicleCategory,
+  towTruckType = null,
   marketFactors,
   paymentAmounts,
   pricingSource,
@@ -312,6 +341,7 @@ function buildPricingBreakdown({
     night_charge: roundMoney(engineResult.night_charge || 0),
     subtotal_before_factors: subtotalBeforeFactors,
     vehicle_category: vehicleCategory,
+    tow_truck_type: towTruckType,
     vehicle_multiplier: roundMoney(vehicleMultiplier),
     surge_multiplier: roundMoney(surgeMultiplier),
     weather_factor: roundMoney(weatherFactor),
@@ -358,11 +388,16 @@ export async function buildTowingQuote(input = {}) {
   const rawVehicle = input.vehicleType || input.vehicle_type || String(input.serviceType || "").split("-")[0];
   const broadVehicle = canonicalizeVehicleFamily(rawVehicle) || "car";
   const canonicalServiceType = `${broadVehicle}-towing`;
+  const vehicleSubtype = normalizeVehicleSubtype(broadVehicle, input.vehicleSubtype ?? input.vehicle_subtype);
   const vehicleCategory = normalizeVehicleCategory({
     vehicleType: rawVehicle,
     vehicleModel: input.vehicleModel ?? input.vehicle_model,
     vehicleSubtype: input.vehicleSubtype ?? input.vehicle_subtype,
+    vehicleBrand: input.vehicleBrand ?? input.vehicle_brand,
   });
+  const towTruckType =
+    normalizeTowTruckType(input.towTruckType ?? input.tow_truck_type) ||
+    defaultTowTruckType({ family: broadVehicle, subtype: vehicleSubtype, canRoll: input.canRoll ?? input.can_roll });
 
   const pool = input.pool || await getPool();
   const [pricingConfig, route] = await Promise.all([
@@ -381,6 +416,7 @@ export async function buildTowingQuote(input = {}) {
     vehicleType: broadVehicle,
     pricingConfig,
     rules,
+    towTruckType,
   });
 
   const engineResult = calculateFinalPrice(
@@ -413,6 +449,7 @@ export async function buildTowingQuote(input = {}) {
     route,
     rules,
     vehicleCategory,
+    towTruckType,
     marketFactors,
     paymentAmounts: { currency: pricingConfig.currency || "INR", platformFee: 0, paymentFee: 0, finalAmount: 0 },
     pricingSource: pricingDefinition.source,
@@ -426,6 +463,7 @@ export async function buildTowingQuote(input = {}) {
     route,
     rules,
     vehicleCategory,
+    towTruckType,
     marketFactors,
     paymentAmounts,
     pricingSource: pricingDefinition.source,
@@ -435,6 +473,8 @@ export async function buildTowingQuote(input = {}) {
     service_type: canonicalServiceType,
     vehicle_type: broadVehicle,
     vehicle_category: vehicleCategory,
+    vehicle_subtype: vehicleSubtype,
+    tow_truck_type: towTruckType,
     pickup,
     drop,
     distance_km: route.distanceKm,

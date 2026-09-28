@@ -33,6 +33,7 @@ import {
 } from "../services/marketplaceWithdrawalService.js";
 import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPaymentService.js";
 import { isTowingServiceType } from "../services/towingServiceType.js";
+import { buildTechnicianJobDetails } from "../services/technicianJobDetails.js";
 import { getLiveTrackingRuntime } from "../services/liveTrackingRuntime.js";
 import { isLiveTrackingStatus } from "../services/liveTrackingIngestion.js";
 import { toPublicNearbyTechnician } from "../services/publicTechnician.js";
@@ -732,7 +733,8 @@ function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
   const serviceType = toOptionalString(jobRow.service_type);
   const vehicleType = toOptionalString(jobRow.vehicle_type);
   const vehicleModel = toOptionalString(jobRow.vehicle_model);
-  const vehicleDetails = [vehicleType, vehicleModel].filter(Boolean).join(" ").trim() || null;
+  const jobDetails = buildTechnicianJobDetails(jobRow);
+  const vehicleDetails = jobDetails.vehicleLine || [vehicleType, vehicleModel].filter(Boolean).join(" ").trim() || null;
   const customerName = toOptionalString(jobRow.contact_name) || toOptionalString(jobRow.user_name);
   const phoneNumber = toOptionalPhone(jobRow.contact_phone) || toOptionalPhone(jobRow.user_phone);
   const pickupLatitude = toOptionalNumber(jobRow.customer_location_lat ?? jobRow.location_lat);
@@ -756,6 +758,7 @@ function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
     isTowing: isTowingServiceType(jobRow.service_type),
     customerName,
     serviceType,
+    ...jobDetails,
     vehicleDetails,
     phoneNumber,
     pickupLatitude,

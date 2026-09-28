@@ -1,6 +1,7 @@
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "./serviceNormalization.js";
 import { getPlatformPricingConfig, getServiceMatrixAmount } from "./platformPricing.js";
 import * as db from "../db.js";
+import { pricingSubcategoryFor } from "./vehicleClasses.js";
 
 const toNum = (v) => {
   const n = Number(v);
@@ -189,11 +190,32 @@ const resolveVehicleSpecificServicePrice = (row, vehicle) => {
   return null;
 };
 
-export const calculateTechnicianServiceRowPayout = (row, vehicle) => {
+/**
+ * A puncture price for this exact vehicle subcategory and tyre: technicians price tube and
+ * tubeless tyres per subcategory in onboarding. Not sure which tyre? The higher of the two,
+ * so the technician is never offered less than the job pays.
+ */
+export const resolveFlatTirePrice = (row, context = {}) => {
+  const subcategory = pricingSubcategoryFor(context.vehicleSubtype);
+  if (!row || !subcategory) return null;
+  const metadata = safeParse(row.metadata) || row;
+  const entry = metadata?.subcategories?.[subcategory];
+  if (!entry || typeof entry !== "object") return null;
+  const tube = toNum(entry.tube_tyre_price);
+  const tubeless = toNum(entry.tubeless_price);
+  if (context.tyreType === "tube") return tube ?? tubeless;
+  if (context.tyreType === "tubeless") return tubeless ?? tube;
+  const known = [tube, tubeless].filter((value) => value != null);
+  return known.length ? Math.max(...known) : null;
+};
+
+export const calculateTechnicianServiceRowPayout = (row, vehicle, context = {}) => {
   if (!row) return null;
   const visitCharge = toNum(row.visit_charge) || 0;
   const deliveryCharge = toNum(row.delivery_charge) || 0;
+  const isFlatTire = canonicalizeServiceDomain(row.service_domain) === "flat-tire";
   const coreServiceCharge =
+    (isFlatTire ? resolveFlatTirePrice(row, context) : null) ??
     resolveVehicleSpecificServicePrice(row, vehicle) ??
     toNum(row.service_charge) ??
     toNum(row.labour_min) ??
@@ -202,7 +224,7 @@ export const calculateTechnicianServiceRowPayout = (row, vehicle) => {
   return payout > 0 ? roundMoney(payout) : null;
 };
 
-async function fromTechnicianServicesTable({ technicianId, domain, vehicle }) {
+async function fromTechnicianServicesTable({ technicianId, domain, vehicle, context = {} }) {
   const normalizedTechId = toTechnicianId(technicianId);
   if (!technicianServicesLookupEnabled || !normalizedTechId || !domain || !vehicle) return null;
 
@@ -221,7 +243,7 @@ async function fromTechnicianServicesTable({ technicianId, domain, vehicle }) {
     );
 
     const row = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
-    return calculateTechnicianServiceRowPayout(row, vehicle);
+    return calculateTechnicianServiceRowPayout(row, vehicle, context);
   } catch (err) {
     const code = String(err?.code || "").toUpperCase();
     const message = String(err?.message || "");
@@ -316,7 +338,7 @@ export function fromTechnicianPricing(tech, domain, vehicle) {
 }
 
 export async function estimateTechnicianPayoutAsync(
-  { service_type, vehicle_type },
+  { service_type, vehicle_type, vehicle_subtype = null, tyre_type = null },
   tech = null,
   options = {}
 ) {
@@ -328,7 +350,8 @@ export async function estimateTechnicianPayoutAsync(
   const tableAmount = await fromTechnicianServicesTable({
     technicianId,
     domain,
-    vehicle
+    vehicle,
+    context: { vehicleSubtype: vehicle_subtype, tyreType: tyre_type },
   });
   if (tableAmount != null) return tableAmount;
 

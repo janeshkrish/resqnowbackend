@@ -11,7 +11,17 @@ const ALLOWED_MIME_TYPES = new Set([
     "image/jpeg",
     "image/png",
     "image/webp",
+    // Voice notes recorded in the request form.
+    "audio/webm",
+    "audio/ogg",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/aac",
+    "audio/x-m4a",
 ]);
+
+// Browsers send recordings as e.g. "audio/webm;codecs=opus"; the parameters don't matter here.
+const baseMimeType = (value) => String(value || "").split(";")[0].trim().toLowerCase();
 const SAFE_FILENAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
 function sanitizeFilename(name) {
@@ -25,10 +35,10 @@ const upload = multer({
     storage: storage,
     limits: { fileSize: MAX_UPLOAD_BYTES },
     fileFilter: (req, file, cb) => {
-        if (ALLOWED_MIME_TYPES.has(String(file.mimetype || "").toLowerCase())) {
+        if (ALLOWED_MIME_TYPES.has(baseMimeType(file.mimetype))) {
             return cb(null, true);
         }
-        cb(new Error("Unsupported file type. Allowed: PDF, DOC, DOCX, JPG, PNG, WEBP."));
+        cb(new Error("Unsupported file type. Allowed: PDF, DOC, DOCX, JPG, PNG, WEBP and voice notes."));
     }
 });
 

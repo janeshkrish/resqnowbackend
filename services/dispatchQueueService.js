@@ -4,6 +4,7 @@ import { getPool } from "../db.js";
 import { jobDispatchService } from "./jobDispatchService.js";
 import { socketService } from "./socket.js";
 import { isTowingServiceType } from "./towingServiceType.js";
+import { buildTechnicianJobDetails } from "./technicianJobDetails.js";
 
 export const DISPATCH_QUEUE_NAME = "job-dispatch-queue";
 const NEW_JOB_EVENT = "new-job";
@@ -166,6 +167,12 @@ async function fetchRequestRow(pool, jobId) {
         sr.user_id,
         sr.service_type,
         sr.vehicle_type,
+        sr.vehicle_model,
+        sr.vehicle_brand,
+        sr.vehicle_subtype,
+        sr.tow_truck_type,
+        sr.request_details_json,
+        sr.description,
         sr.address,
         sr.drop_address,
         sr.drop_latitude,
@@ -283,6 +290,8 @@ function buildOfferPayload(requestRow, candidateTech) {
     },
     address: String(requestRow.address || ""),
     ...towingFields,
+    ...buildTechnicianJobDetails(requestRow),
+    description: requestRow.description || null,
     amount: Number(requestRow.amount || 0),
     priceAmount: Number(requestRow.amount || 0),
     distance: distanceText,

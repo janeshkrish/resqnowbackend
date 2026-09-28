@@ -11,6 +11,7 @@ import { markTechnicianReserved } from "./technicianStateService.js";
 import { estimateTechnicianEarningForRequest } from "./technicianEarningsService.js";
 import { getRoute } from "./routeService.js";
 import { isTowingServiceType } from "./towingServiceType.js";
+import { buildTechnicianJobDetails } from "./technicianJobDetails.js";
 
 
 /**
@@ -323,6 +324,8 @@ export const jobDispatchService = {
                 address: jobRequest.address,
                 customerName: jobRequest.contact_name || "Valued Customer",
                 ...buildTowingDispatchFields(jobRequest),
+                ...buildTechnicianJobDetails(jobRequest),
+                description: jobRequest.description || null,
                 amount: resolvedOfferAmount,
                 priceAmount: resolvedOfferAmount,
                 technicianEstimatedEarning: resolvedOfferAmount,
@@ -630,6 +633,7 @@ export const jobDispatchService = {
                     serviceType: sourceJob?.service_type,
                     locationDistance,
                     ...buildTowingDispatchFields(sourceJob),
+                    ...buildTechnicianJobDetails(sourceJob),
                     priceAmount: assignedAmount ?? 0,
                     amount: assignedAmount ?? 0,
                     technicianEstimatedEarning: assignedAmount ?? 0,

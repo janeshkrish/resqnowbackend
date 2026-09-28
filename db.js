@@ -1440,6 +1440,10 @@ export async function updateServiceRequestsTableSchema() {
   await addColumnIfNotExists(p, 'service_requests', 'customer_location_lng DECIMAL(11, 8)');
   await addColumnIfNotExists(p, 'service_requests', 'assigned_vehicle_id BIGINT NULL');
   await addColumnIfNotExists(p, 'service_requests', 'assigned_employee_id BIGINT NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'vehicle_brand VARCHAR(100) NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'vehicle_subtype VARCHAR(50) NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'tow_truck_type VARCHAR(40) NULL');
+  await addColumnIfNotExists(p, 'service_requests', 'request_details_json JSON NULL');
 
   // Ensure status column can hold longer status strings like 'payment_pending'
   try {
