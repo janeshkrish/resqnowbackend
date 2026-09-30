@@ -38,6 +38,7 @@ import {
 } from "./config/network.js";
 import { validateEnvironmentOrThrow, logEnvironmentSummary } from "./config/envValidation.js";
 import { socketService } from "./services/socket.js";
+import { notificationService } from "./services/notificationService.js";
 import {
   closeLiveTrackingRuntime,
   getLiveTrackingRuntime,
@@ -300,6 +301,8 @@ function createApp() {
         lastCheckedAt: dbState.lastCheckedAt,
         lastError: dbState.lastError,
       },
+      // Whether job alerts can reach phones with the app closed (Firebase Admin credentials).
+      push: { configured: notificationService.isInitialized },
     };
     if (!dbState.ready) return res.status(503).json(payload);
     return res.json(payload);

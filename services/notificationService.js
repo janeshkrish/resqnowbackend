@@ -512,15 +512,29 @@ class NotificationService {
         "SELECT token FROM device_tokens WHERE user_id = ? AND user_type = ?",
         [userId, userType]
       );
-      if (!tokens || tokens.length === 0) return;
-
-      const registrationTokens = tokens.map((entry) => entry.token).filter(Boolean);
-      if (registrationTokens.length === 0) return;
+      const registrationTokens = (tokens || []).map((entry) => entry.token).filter(Boolean);
+      const isJobOffer = userType === "technician" && event === "job_offer";
+      if (registrationTokens.length === 0) {
+        if (isJobOffer) {
+          console.warn(
+            `[NotificationService] Technician ${userId} has no registered device; the job alert reaches only an open app.`
+          );
+        }
+        return;
+      }
 
       const response = await admin.messaging().sendEachForMulticast({
         ...payload,
         tokens: registrationTokens,
       });
+      if (isJobOffer) {
+        const failures = response.responses
+          .map((item) => item?.error?.code)
+          .filter(Boolean);
+        console.log(
+          `[NotificationService] Job alert push technician=${userId} request=${payload.data?.requestId || ""} sent=${response.successCount} failed=${response.failureCount}${failures.length ? ` errors=${failures.join(",")}` : ""}`
+        );
+      }
 
       if (response.failureCount > 0) {
         const invalidTokens = [];
