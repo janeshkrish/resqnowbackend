@@ -36,6 +36,9 @@ import { isTowingServiceType } from "../services/towingServiceType.js";
 import { buildTechnicianJobDetails } from "../services/technicianJobDetails.js";
 import { getLiveTrackingRuntime } from "../services/liveTrackingRuntime.js";
 import { isLiveTrackingStatus } from "../services/liveTrackingIngestion.js";
+import { resolveLiveTrackingDestination } from "../services/liveTrackingRouteMetrics.js";
+import { buildEtaLocationFields, isEtaTrackedStatus } from "../services/trafficEtaService.js";
+import { normalizeRouteVehicleMode } from "../services/routeService.js";
 import { toPublicNearbyTechnician } from "../services/publicTechnician.js";
 import {
   markTechnicianHeartbeat,
@@ -89,6 +92,70 @@ async function findLegacyTrackingJobId(technicianId) {
   );
   const request = rows.find((row) => isLiveTrackingStatus(row.status));
   return request?.id != null ? String(request.id) : null;
+}
+
+async function findLiveEtaJob(technicianId, requestId) {
+  const pool = await db.getPool();
+  const [rows] = await pool.execute(
+    `SELECT id, status, service_type, vehicle_type, location_lat, location_lng,
+            customer_location_lat, customer_location_lng, drop_latitude, drop_longitude
+     FROM service_requests
+     WHERE technician_id = ?${requestId ? " AND id = ?" : ""}
+     ORDER BY updated_at DESC
+     LIMIT 10`,
+    requestId ? [technicianId, requestId] : [technicianId],
+  );
+  return rows.find((row) => isLiveTrackingStatus(row.status)) || null;
+}
+
+/**
+ * The traffic-aware ETA the customer is shown, for the technician's own screens.
+ * It only asks the shared ETA service: that serves its cached answer for the request
+ * and refreshes on its own schedule, so this adds no provider call per poll and leaves
+ * the location pipeline as it is. Every "no ETA" case answers 200 with a reason; the
+ * app then keeps its own road-route estimate.
+ */
+export async function handleTechnicianLiveEta(req, res, {
+  findJob = findLiveEtaJob,
+  getRuntime = getLiveTrackingRuntime,
+  now = () => Date.now(),
+} = {}) {
+  const serverTime = new Date(now()).toISOString();
+  const none = (reason) => res.json({ eta: null, reason, serverTime });
+  try {
+    const runtime = getRuntime();
+    const trafficEta = runtime?.trafficEta;
+    if (!trafficEta?.enabled) return none('disabled');
+
+    const requestId = String(req.query?.requestId ?? '').trim() || null;
+    const job = await findJob(req.technicianId, requestId);
+    if (!job) return none('no_active_job');
+    if (!isEtaTrackedStatus(job.status)) return none('not_travelling');
+    const destination = resolveLiveTrackingDestination(job);
+    if (!destination) return none('no_destination');
+
+    const location = await runtime.store.getForRequest(String(req.technicianId), String(job.id));
+    const lat = Number(location?.lat);
+    const lng = Number(location?.lng);
+    if (!location || !Number.isFinite(lat) || !Number.isFinite(lng)) return none('no_recent_location');
+
+    // The same vehicle rule the live tracking publisher uses, so both share one ETA.
+    const vehicleMode = isTowingServiceType(job.service_type)
+      ? 'commercial-tow'
+      : normalizeRouteVehicleMode(job.vehicle_type);
+    const { eta } = await trafficEta.resolve({
+      requestId: String(job.id),
+      origin: { lat, lng },
+      destination,
+      vehicleMode,
+      status: job.status,
+    });
+    if (!eta) return none('unavailable');
+    return res.json({ ...buildEtaLocationFields(eta), serverTime });
+  } catch (error) {
+    console.error('[Technician live ETA] failed:', error?.message || error);
+    return none('unavailable');
+  }
 }
 
 function trackingHttpStatus(code) {
@@ -1857,6 +1924,8 @@ router.patch("/me/location", verifyTechnician, async (req, res) => {
   // validation, Redis current-state, history, and publication path as v1 Socket.IO.
   return handleLiveTrackingRecovery(req, res);
 });
+
+router.get("/me/active-job/eta", verifyTechnician, (req, res) => handleTechnicianLiveEta(req, res));
 
 router.get("/me/active-job", verifyTechnician, async (req, res) => {
   try {

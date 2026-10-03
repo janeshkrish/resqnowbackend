@@ -71,6 +71,16 @@ export function getTrafficEtaConfig(env = process.env) {
   };
 }
 
+/** For /ready: whether ETAs are served, and whether they include live traffic. Never the key. */
+export function trafficEtaReadiness(env = process.env) {
+  const config = getTrafficEtaConfig(env);
+  return {
+    enabled: config.enabled,
+    liveTraffic: config.enabled && config.provider === 'mappls' && Boolean(config.mapplsApiKey),
+    provider: config.provider,
+  };
+}
+
 export function isEtaTrackedStatus(status) {
   return ETA_STATUSES.has(String(status || '').trim().toLowerCase().replace(/[\s-]+/g, '_'));
 }

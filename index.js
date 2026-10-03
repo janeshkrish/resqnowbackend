@@ -39,6 +39,7 @@ import {
 import { validateEnvironmentOrThrow, logEnvironmentSummary } from "./config/envValidation.js";
 import { socketService } from "./services/socket.js";
 import { notificationService } from "./services/notificationService.js";
+import { trafficEtaReadiness } from "./services/trafficEtaService.js";
 import {
   closeLiveTrackingRuntime,
   getLiveTrackingRuntime,
@@ -303,6 +304,8 @@ function createApp() {
       },
       // Whether job alerts can reach phones with the app closed (Firebase Admin credentials).
       push: { configured: notificationService.isInitialized },
+      // Whether ETAs are served to the tracking screens, and whether they include live traffic.
+      trafficEta: trafficEtaReadiness(),
     };
     if (!dbState.ready) return res.status(503).json(payload);
     return res.json(payload);
