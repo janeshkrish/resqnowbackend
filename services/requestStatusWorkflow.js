@@ -119,6 +119,14 @@ export function normalizeRequestStatus(status) {
   return VALID_STATUSES.has(normalized) ? normalized : null;
 }
 
+// A customer may cancel only until the technician sets off. After that the
+// technician has already spent time and fuel on the job.
+export const CUSTOMER_CANCELLABLE_STATUSES = Object.freeze(["pending", "assigned", "accepted"]);
+
+export function canCustomerCancelRequest(status) {
+  return CUSTOMER_CANCELLABLE_STATUSES.includes(normalizeRequestStatus(status));
+}
+
 export function normalizeStatusForWorkflow(status, { serviceType = null, towing = null } = {}) {
   const normalized = normalizeRequestStatus(status);
   if (!normalized) return null;

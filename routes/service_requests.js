@@ -26,6 +26,7 @@ import { answerValue, describeRequestDetails, sanitizeRequestDetails } from "../
 import { defaultTowTruckType, normalizeTowTruckType, normalizeVehicleSubtype } from "../services/vehicleClasses.js";
 import { buildTechnicianJobDetails } from "../services/technicianJobDetails.js";
 import {
+    canCustomerCancelRequest,
     getTowingRealtimeEvent,
     mapRequestedTechnicianStatus,
     normalizeRequestStatus,
@@ -1258,17 +1259,37 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
 });
 
 /**
+ * Why a customer's cancellation is turned down, or null when it may go ahead.
+ * Cancelling closes once the technician sets off.
+ */
+function customerCancelRefusal(status) {
+    if (String(status || '').trim().toLowerCase() === 'cancelled') {
+        return { code: 400, body: { error: 'Request is already cancelled.' } };
+    }
+    if (canCustomerCancelRequest(status)) return null;
+    return {
+        code: 409,
+        body: {
+            error: 'This request can no longer be cancelled. Cancelling closes once your technician is on the way.',
+            code: 'CANCEL_NOT_ALLOWED',
+            status,
+        },
+    };
+}
+
+/**
  * PATCH /api/service-requests/:id/status
  * Update request status (For User - e.g. cancel)
  */
-router.patch("/:id/status", verifyUser, async (req, res) => {
+export async function handleCustomerStatusUpdate(req, res, deps = {}) {
+    const { getPool: resolvePool = getPool, release = releaseTechnicianAvailability, sockets = socketService } = deps;
     try {
         const userId = req.user.userId;
         const requestId = req.params.id;
         const { status } = req.body;
 
         // Check ownership
-        const pool = await getPool();
+        const pool = await resolvePool();
         const [check] = await pool.query("SELECT id, status, technician_id FROM service_requests WHERE id = ? AND user_id = ?", [requestId, userId]);
         if (check.length === 0) {
             return res.status(404).json({ error: "Request not found or unauthorized." });
@@ -1281,10 +1302,8 @@ router.patch("/:id/status", verifyUser, async (req, res) => {
         }
 
         if (normalized === 'cancelled') {
-            // Rule: Cannot cancel if technician has arrived or job is done
-            if (['arrived', 'service_started', 'in-progress', 'in_progress', 'en_route_pickup', 'arrived_pickup', 'vehicle_loaded', 'enroute_drop', 'arrived_drop', 'service_completed', 'awaiting_payment', 'payment_pending', 'completed', 'paid', 'closed'].includes(String(reqData.status || '').toLowerCase())) {
-                return res.status(400).json({ error: `Cannot cancel request when status is '${reqData.status}'.` });
-            }
+            const refusal = customerCancelRefusal(reqData.status);
+            if (refusal) return res.status(refusal.code).json(refusal.body);
         }
 
         await pool.execute(
@@ -1293,12 +1312,12 @@ router.patch("/:id/status", verifyUser, async (req, res) => {
         );
 
         if (reqData.technician_id && (normalized === 'cancelled' || isTerminalJobStatus(normalized))) {
-            await releaseTechnicianAvailability(pool, reqData.technician_id, requestId);
+            await release(pool, reqData.technician_id, requestId);
         }
 
         // Notify Technician if assigned
         if (reqData.technician_id) {
-            socketService.notifyTechnician(reqData.technician_id, 'job:status_update', {
+            sockets.notifyTechnician(reqData.technician_id, 'job:status_update', {
                 requestId,
                 status: normalized
             });
@@ -1323,39 +1342,44 @@ router.patch("/:id/status", verifyUser, async (req, res) => {
         console.error("[Service Requests] Update status error:", err);
         res.status(500).json({ error: "Failed to update status." });
     }
-});
+}
+router.patch("/:id/status", verifyUser, (req, res) => handleCustomerStatusUpdate(req, res));
 
 
 /**
  * PATCH /api/service-requests/:id/cancel
  * Cancel request (User) - explicit route per spec
  */
-router.patch("/:id/cancel", verifyUser, async (req, res) => {
+export async function handleCustomerCancel(req, res, deps = {}) {
+    const { getPool: resolvePool = getPool, release = releaseTechnicianAvailability, sockets = socketService } = deps;
     try {
         const userId = req.user.userId;
         const requestId = req.params.id;
-        const pool = await getPool();
-
-        const [rows] = await pool.query("SELECT id, status, technician_id FROM service_requests WHERE id = ? AND user_id = ?", [requestId, userId]);
-        if (rows.length === 0) return res.status(404).json({ error: 'Request not found or unauthorized' });
-
-        const current = rows[0];
-
-        // Strict Rule: Allow cancel at ANY status as long as it's not already cancelled
-        if (String(current.status) === 'cancelled') {
-            return res.status(400).json({ error: 'Request is already cancelled.' });
-        }
-
-        const { reason } = req.body;
+        const pool = await resolvePool();
+        const { reason } = req.body || {};
 
         const conn = await pool.getConnection();
         try {
             await conn.beginTransaction();
-            // Invalidate payment if exists? (Not explicitly asked but implies "Invalidates payment")
-            // We set status to cancelled.
-            // also set technician_id to NULL to free them.
-            // set cancelled_at to NOW()
+            // The row is locked while the rule is checked, so a technician who accepts
+            // or sets off at this very moment is seen here rather than missed.
+            const [rows] = await conn.query(
+                "SELECT id, status, technician_id FROM service_requests WHERE id = ? AND user_id = ? FOR UPDATE",
+                [requestId, userId]
+            );
+            if (rows.length === 0) {
+                await conn.rollback();
+                return res.status(404).json({ error: 'Request not found or unauthorized' });
+            }
 
+            const current = rows[0];
+            const refusal = customerCancelRefusal(current.status);
+            if (refusal) {
+                await conn.rollback();
+                return res.status(refusal.code).json(refusal.body);
+            }
+
+            // Status becomes cancelled, the technician is detached and cancelled_at is stamped.
             await conn.execute(
                 'UPDATE service_requests SET status = ?, technician_id = NULL, cancelled_at = NOW(), cancellation_reason = ? WHERE id = ?',
                 ['cancelled', reason || null, requestId]
@@ -1363,7 +1387,7 @@ router.patch("/:id/cancel", verifyUser, async (req, res) => {
 
             // Release Technician
             if (current.technician_id) {
-                await releaseTechnicianAvailability(conn, current.technician_id, requestId);
+                await release(conn, current.technician_id, requestId);
             }
 
             await conn.commit();
@@ -1371,9 +1395,9 @@ router.patch("/:id/cancel", verifyUser, async (req, res) => {
             console.log('REQUEST STATUS UPDATED:', { requestId, status: 'cancelled' });
 
             if (current.technician_id) {
-                socketService.notifyTechnician(current.technician_id, 'job:status_update', { requestId, status: 'cancelled', reason: reason || "User cancelled" });
+                sockets.notifyTechnician(current.technician_id, 'job:status_update', { requestId, status: 'cancelled', reason: reason || "User cancelled" });
             }
-            socketService.notifyUser(userId, 'job:status_update', { requestId, status: 'cancelled' });
+            sockets.notifyUser(userId, 'job:status_update', { requestId, status: 'cancelled' });
 
             const [updatedRows] = await pool.query('SELECT * FROM service_requests WHERE id = ?', [requestId]);
             return res.json({
@@ -1396,7 +1420,8 @@ router.patch("/:id/cancel", verifyUser, async (req, res) => {
         console.error('[Service Requests] Cancel error:', err);
         res.status(500).json({ error: 'Failed to cancel request' });
     }
-});
+}
+router.patch("/:id/cancel", verifyUser, (req, res) => handleCustomerCancel(req, res));
 
 /**
  * GET /api/service-requests/:id
