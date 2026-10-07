@@ -1039,7 +1039,10 @@ router.get("/requests", verifyTechnician, async (req, res) => {
   }
 });
 
-router.post("/register", async (req, res) => {
+router.post("/register", registerTechnician);
+
+async function registerTechnician(req, res) {
+  const isAdminCreation = Boolean(req.admin);
   let registrationConnection;
   let registrationCommitted = false;
   try {
@@ -1113,7 +1116,7 @@ router.post("/register", async (req, res) => {
         (whatsapp_number || "").trim(),
         service_type,
         location,
-        "pending",
+        isAdminCreation && String(req.body.status || "").toLowerCase() === "approved" ? "approved" : "pending",
         false,
         false,
         password_hash,
@@ -1178,7 +1181,7 @@ router.post("/register", async (req, res) => {
       socketService.broadcast("admin:notification", { title, message, created_at: new Date() });
     } catch { }
 
-    if (normalizedEmail) await sendEventEmail("TECHNICIAN_APPLICATION_SUBMITTED", {
+    if (normalizedEmail) await sendEventEmail(isAdminCreation ? "TECHNICIAN_REGISTER" : "TECHNICIAN_APPLICATION_SUBMITTED", {
       name: trimmedName,
       email: normalizedEmail,
       applicantEmail: normalizedEmail,
@@ -1194,6 +1197,9 @@ router.post("/register", async (req, res) => {
     }
 
     const id = result[0].insertId;
+    if (isAdminCreation) {
+      return res.status(201).json({ id: String(id), message: "Technician added successfully." });
+    }
     const token = signTechnicianToken(id, storageEmail);
 
     return res.status(201).json({
@@ -1204,12 +1210,15 @@ router.post("/register", async (req, res) => {
 
   } catch (err) {
     if (registrationConnection && !registrationCommitted) await registrationConnection.rollback();
+    if (isAdminCreation && (err.code === "ER_DUP_ENTRY" || err.message?.includes("Duplicate"))) {
+      return res.status(409).json({ error: "This email is already registered." });
+    }
     console.error("Registration error:", err);
     return res.status(500).json({ error: "Registration failed." });
   } finally {
     registrationConnection?.release();
   }
-});
+}
 
 router.post("/login", async (req, res) => {
   try {
@@ -2601,112 +2610,7 @@ router.get("/me/payout-transactions", verifyTechnician, async (req, res) => {
   }
 });
 
-router.post("/create", verifyAdmin, async (req, res) => {
-  try {
-    const {
-      name, email, password, phone,
-      proprietor_name, alternate_phone, whatsapp_number,
-      address, region, district, state, locality, google_maps_link,
-      aadhaar_number, pan_number, business_type, gst_number, trade_license_number,
-      working_hours, service_costs, payment_details, app_readiness, vehicle_types,
-      serviceAreaRange, experience, specialties, pricing, status,
-      resume_url, documents
-    } = req.body;
-
-    const normalizedEmail = (email || "").trim().toLowerCase();
-    const trimmedName = (name || "").trim();
-
-    if (!trimmedName || !normalizedEmail) {
-      return res.status(400).json({ error: "Name and email are required." });
-    }
-
-    if (!password || String(password).length < 8) {
-      return res.status(400).json({ error: "Password is required and must be at least 8 characters." });
-    }
-    const password_hash = await bcrypt.hash(String(password), 10);
-    const normalizedSpecialties = normalizeSpecialties(specialties);
-    const normalizedVehicleTypes = normalizeVehicleTypes(vehicle_types);
-    const normalizedServiceCosts = normalizeServiceCosts(service_costs);
-    const service_type = normalizedSpecialties[0] || "other";
-    const location = (locality || address || "").trim() || "—";
-    const normalizedDocuments = sanitizeTechnicianDocuments(documents);
-    const normalizedResumeUrl = normalizeUploadResourcePath(resume_url);
-    const upiId = String(payment_details?.upi_id || req.body?.upi_id || "").trim();
-    const upiName = String(payment_details?.upi_name || req.body?.upi_name || proprietor_name || trimmedName).trim();
-    const requestedStatus = String(status || "").toLowerCase();
-    const appStatus = requestedStatus === "approved" ? "approved" : "pending";
-
-    const specialtiesJson = JSON.stringify(normalizedSpecialties);
-    const pricingJson = JSON.stringify(pricing && typeof pricing === "object" ? pricing : {});
-    const documentsJson = JSON.stringify(normalizedDocuments);
-    const workingHoursJson = JSON.stringify(working_hours || {});
-    const serviceCostsJson = JSON.stringify(normalizedServiceCosts || {});
-    const paymentDetailsJson = JSON.stringify(payment_details || {});
-    const appReadinessJson = JSON.stringify(app_readiness || {});
-    const vehicleTypesJson = JSON.stringify(normalizedVehicleTypes || {});
-
-    const pool = await db.getPool();
-    const result = await pool.execute(
-      `INSERT INTO technicians(
-        name, email, phone, upi_id, upi_name,
-        proprietor_name, alternate_phone, whatsapp_number,
-        service_type, location, status, password_hash,
-        address, region, district, state, locality, google_maps_link,
-        aadhaar_number, pan_number, business_type, gst_number, trade_license_number,
-        service_area_range, experience,
-        specialties, pricing, working_hours, service_costs, payment_details, app_readiness, vehicle_types,
-        resume_url, documents
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        trimmedName,
-        normalizedEmail,
-        (phone || "").trim(),
-        upiId || null,
-        upiName || null,
-        (proprietor_name || "").trim(),
-        (alternate_phone || "").trim(),
-        (whatsapp_number || "").trim(),
-        service_type,
-        location,
-        appStatus,
-        password_hash,
-        (address || "").trim(),
-        (region || "").trim(),
-        (district || "").trim(),
-        (state || "").trim(),
-        (locality || "").trim(),
-        (google_maps_link || "").trim(),
-        (aadhaar_number || "").trim(),
-        (pan_number || "").trim(),
-        (business_type || "").trim(),
-        (gst_number || "").trim(),
-        (trade_license_number || "").trim(),
-        Number(serviceAreaRange) || 10,
-        Number(experience) || 0,
-        specialtiesJson,
-        pricingJson,
-        workingHoursJson,
-        serviceCostsJson,
-        paymentDetailsJson,
-        appReadinessJson,
-        vehicleTypesJson,
-        normalizedResumeUrl,
-        documentsJson,
-      ]
-    );
-    const id = result[0].insertId;
-    await sendEventEmail("TECHNICIAN_REGISTER", {
-      name: trimmedName,
-      email: normalizedEmail,
-    });
-    return res.status(201).json({ id: String(id), message: "Technician added successfully." });
-  } catch (err) {
-    if (err.code === "ER_DUP_ENTRY" || err.message?.includes("Duplicate")) {
-      return res.status(409).json({ error: "This email is already registered." });
-    }
-    return res.status(500).json({ error: err.message || "Failed to add technician." });
-  }
-});
+router.post("/create", verifyAdmin, registerTechnician);
 
 router.get("/me/reviews", verifyTechnician, async (req, res) => {
   try {

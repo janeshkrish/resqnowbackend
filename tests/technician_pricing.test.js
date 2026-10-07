@@ -2,6 +2,8 @@ import { resolveTechnicianSignupCredentials } from "../services/serviceNormaliza
 import { replaceTechnicianServicePricing } from "../controllers/technicianPricingController.js";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import vm from "node:vm";
 
 import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
 import { estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
@@ -245,4 +247,88 @@ test('rejects invalid identifiers and negative prices', async () => {
   const connection = { execute: async () => [{}] };
   await assert.rejects(replaceTechnicianServicePricing(connection, 42, [{ service_id: 0, vehicle_category_id: 1, pricing_json: {} }]), /Invalid/);
   await assert.rejects(replaceTechnicianServicePricing(connection, 42, [{ service_id: 1, vehicle_category_id: 1, pricing_json: { visit_charge: -1 } }]), /non-negative/);
+});
+
+// Exercise the registered admin handler with a database connection kept in memory.
+// This catches lost coordinates/pricing and inconsistent optional credentials.
+async function runAdminRegistration(body) {
+  const source = await readFile(new URL("../routes/technicians.js", import.meta.url), "utf8");
+  const routes = new Map();
+  const writes = [];
+  const events = [];
+  const connection = {
+    beginTransaction: async () => events.push("begin"),
+    commit: async () => events.push("commit"),
+    rollback: async () => events.push("rollback"),
+    release: () => events.push("release"),
+    execute: async (sql, values) => { writes.push({ sql, values }); return [{ insertId: 42 }]; },
+  };
+  const pool = { ...connection, query: async () => [[]], getConnection: async () => connection };
+  const environment = {
+    router: { post: (path, ...handlers) => routes.set(path, handlers.at(-1)) },
+    verifyAdmin: () => {},
+    db: { getPool: async () => pool },
+    bcrypt: { hash: async () => "hashed-password" },
+    resolveTechnicianSignupCredentials,
+    normalizeSpecialties: value => value || [],
+    normalizeVehicleTypes: value => value || {},
+    normalizeServiceCosts: value => value || [],
+    sanitizeTechnicianDocuments: value => value || {},
+    normalizeUploadResourcePath: () => null,
+    normalizeTechnicianPricingEntries,
+    replaceTechnicianPricingRows: async () => {},
+    replaceTechnicianFleetVehicles: async () => {},
+    technicianPricingController: { replaceTechnicianServicePricing },
+    ADMIN_NOTIFICATION_TYPES: { NEW_TECHNICIAN_APPLICATION: "new_technician_application" },
+    socketService: { broadcast: () => {} },
+    sendEventEmail: async () => {},
+    signTechnicianToken: () => "technician-token",
+    process: { env: {} },
+    console: { error: () => {} },
+  };
+  vm.runInNewContext(
+    source.slice(source.indexOf('router.post("/register"'), source.indexOf('router.post("/login"')) +
+    source.slice(source.indexOf('router.post("/create"'), source.indexOf('router.get("/me/reviews"')),
+    environment,
+  );
+  const response = {
+    statusCode: 200,
+    status(code) { this.statusCode = code; return this; },
+    json(data) { this.body = data; return this; },
+  };
+  await routes.get("/create")({ admin: { id: 1 }, body }, response);
+  return { response, writes, events };
+}
+
+const adminSignup = {
+  name: "Roadside Garage", proprietor_name: "Garage Owner", phone: "9876543210",
+  latitude: 13.0827, longitude: 80.2707, address: "10 Garage Street", state: "Tamil Nadu",
+  specialties: ["flat-tire"], vehicle_types: { bike: true },
+  consent: { agreed: true }, technician_agreement_accepted: true,
+  dynamic_pricing_config: [{ service_id: 1, vehicle_category_id: 1, pricing_json: { visit_charge: 120 } }],
+};
+
+test("admin registration accepts the shared form without optional login credentials", async () => {
+  const { response, writes, events } = await runAdminRegistration(adminSignup);
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.body.id, "42");
+  assert.equal(response.body.token, undefined);
+  const technician = writes.find(write => /INSERT INTO technicians\s*\(/.test(write.sql));
+  assert.match(technician.sql, /latitude, longitude/);
+  assert.deepEqual(Array.from(technician.values.slice(-2)), [13.0827, 80.2707]);
+  assert.ok(writes.some(write => /INSERT INTO technician_service_pricing/.test(write.sql)));
+  assert.deepEqual(events, ["begin", "commit", "release"]);
+});
+
+test("admin registration rejects missing agreements before saving the shared form", async () => {
+  const { response, writes } = await runAdminRegistration({ ...adminSignup, email: "owner@example.com", password: "safe-password", technician_agreement_accepted: false });
+  assert.equal(response.statusCode, 400);
+  assert.match(response.body.error, /both agreements/);
+  assert.equal(writes.length, 0);
+});
+
+test("admin registration rolls back when dynamic prices cannot be saved", async () => {
+  const { response, events } = await runAdminRegistration({ ...adminSignup, email: "owner@example.com", password: "safe-password", dynamic_pricing_config: [{ service_id: 0, vehicle_category_id: 1, pricing_json: {} }] });
+  assert.equal(response.statusCode, 500);
+  assert.deepEqual(events, ["begin", "rollback", "release"]);
 });
