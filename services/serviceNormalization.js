@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 const SERVICE_DOMAIN_ALIASES = {
   towing: ["towing", "tow", "towing services", "towing assistance"],
   "flat-tire": [
@@ -220,4 +221,18 @@ function safeParse(value) {
   } catch {
     return null;
   }
+}
+
+
+export function resolveTechnicianSignupCredentials({ name, phone, email, password }) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const rawPassword = typeof password === 'string' ? password : '';
+  if (!String(name || '').trim()) return { error: 'Shop name is required.' };
+  if (!/^\+?[\d\s()-]{10,20}$/.test(String(phone || '').trim())) return { error: 'A valid mobile number is required.' };
+  if (normalizedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return { error: 'Enter a valid email address.' };
+  if (normalizedEmail && !rawPassword) return { error: 'A password is required when you enter an email.' };
+  if (rawPassword && rawPassword.length < 8) return { error: 'Password must be at least 8 characters.' };
+  // The existing email column is UNIQUE NOT NULL. A reserved, undeliverable
+  // internal identifier supports applications without email without a migration.
+  return { email: normalizedEmail, storageEmail: normalizedEmail || `unclaimed-${randomUUID()}@resqnow.invalid`, password: rawPassword };
 }

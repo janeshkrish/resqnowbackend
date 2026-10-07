@@ -13,6 +13,7 @@ import {
   normalizeSpecialties,
   normalizeVehicleTypes,
   normalizeServiceCosts,
+  resolveTechnicianSignupCredentials,
 } from "../services/serviceNormalization.js";
 import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
 import {
@@ -1039,6 +1040,8 @@ router.get("/requests", verifyTechnician, async (req, res) => {
 });
 
 router.post("/register", async (req, res) => {
+  let registrationConnection;
+  let registrationCommitted = false;
   try {
     const {
       name, email, password, phone,
@@ -1049,19 +1052,16 @@ router.post("/register", async (req, res) => {
       serviceAreaRange, experience, specialties, pricing, resume_url, documents
     } = req.body;
 
-    const normalizedEmail = (email || "").trim().toLowerCase();
+    const credentials = resolveTechnicianSignupCredentials({ name, phone, email, password });
+    if (credentials.error) return res.status(400).json({ error: credentials.error });
+    if (req.body.dynamic_pricing_config && (req.body.consent?.agreed !== true || req.body.technician_agreement_accepted !== true)) {
+      return res.status(400).json({ error: "Accept both agreements before submitting your application." });
+    }
+    const normalizedEmail = credentials.email;
+    const storageEmail = credentials.storageEmail;
     const trimmedName = (name || "").trim();
 
-    if (!trimmedName || !normalizedEmail || !password) {
-      return res.status(400).json({ error: "Name, email and password are required." });
-    }
-
-    // Check password strength
-    if (password.length < 8) {
-      return res.status(400).json({ error: "Password must be at least 8 characters." });
-    }
-
-    const password_hash = await bcrypt.hash(password, 10);
+    const password_hash = credentials.password ? await bcrypt.hash(credentials.password, 10) : null;
     const normalizedSpecialties = normalizeSpecialties(specialties);
     const normalizedVehicleTypes = normalizeVehicleTypes(vehicle_types);
     const normalizedServiceCosts = normalizeServiceCosts(service_costs);
@@ -1084,12 +1084,14 @@ router.post("/register", async (req, res) => {
     const pool = await db.getPool();
 
     // Check existing email
-    const [existing] = await pool.query("SELECT id FROM technicians WHERE email = ?", [normalizedEmail]);
+    const [existing] = normalizedEmail ? await pool.query("SELECT id FROM technicians WHERE email = ?", [normalizedEmail]) : [[]];
     if (existing.length > 0) {
       return res.status(409).json({ error: "This email is already registered." });
     }
 
-    const result = await pool.execute(
+    registrationConnection = await pool.getConnection();
+    await registrationConnection.beginTransaction();
+    const result = await registrationConnection.execute(
       `INSERT INTO technicians (
         name, email, phone, upi_id, upi_name,
         proprietor_name, alternate_phone, whatsapp_number,
@@ -1102,7 +1104,7 @@ router.post("/register", async (req, res) => {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         trimmedName,
-        normalizedEmail,
+        storageEmail,
         (phone || "").trim(),
         upiId || null,
         upiName || null,
@@ -1148,12 +1150,19 @@ router.post("/register", async (req, res) => {
       if (req.body.pricing_config || req.body.service_costs) {
         const payloadToSync = req.body.pricing_config || req.body.service_costs;
         const normalizedEntries = normalizeTechnicianPricingEntries(payloadToSync);
-        await replaceTechnicianPricingRows(pool, insertedId, normalizedEntries);
-        await replaceTechnicianFleetVehicles(pool, insertedId, payloadToSync);
+        await replaceTechnicianPricingRows(registrationConnection, insertedId, normalizedEntries);
+        await replaceTechnicianFleetVehicles(registrationConnection, insertedId, payloadToSync);
       }
     } catch (pricingError) {
       console.error("[Register] Failed to sync technician pricing", pricingError);
+      throw pricingError;
     }
+
+    if (req.body.dynamic_pricing_config) {
+      await technicianPricingController.replaceTechnicianServicePricing(registrationConnection, insertedId, req.body.dynamic_pricing_config);
+    }
+    await registrationConnection.commit();
+    registrationCommitted = true;
 
     // Notification Logic
     const title = "New Technician Application";
@@ -1169,7 +1178,7 @@ router.post("/register", async (req, res) => {
       socketService.broadcast("admin:notification", { title, message, created_at: new Date() });
     } catch { }
 
-    await sendEventEmail("TECHNICIAN_APPLICATION_SUBMITTED", {
+    if (normalizedEmail) await sendEventEmail("TECHNICIAN_APPLICATION_SUBMITTED", {
       name: trimmedName,
       email: normalizedEmail,
       applicantEmail: normalizedEmail,
@@ -1185,7 +1194,7 @@ router.post("/register", async (req, res) => {
     }
 
     const id = result[0].insertId;
-    const token = signTechnicianToken(id, normalizedEmail);
+    const token = signTechnicianToken(id, storageEmail);
 
     return res.status(201).json({
       message: "Registration started. Please complete the registration payment.",
@@ -1194,8 +1203,11 @@ router.post("/register", async (req, res) => {
     });
 
   } catch (err) {
+    if (registrationConnection && !registrationCommitted) await registrationConnection.rollback();
     console.error("Registration error:", err);
     return res.status(500).json({ error: "Registration failed." });
+  } finally {
+    registrationConnection?.release();
   }
 });
 

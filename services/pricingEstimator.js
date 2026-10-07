@@ -196,10 +196,10 @@ const resolveVehicleSpecificServicePrice = (row, vehicle) => {
  * so the technician is never offered less than the job pays.
  */
 export const resolveFlatTirePrice = (row, context = {}) => {
+  if (!row) return null;
   const subcategory = pricingSubcategoryFor(context.vehicleSubtype);
-  if (!row || !subcategory) return null;
   const metadata = safeParse(row.metadata) || row;
-  const entry = metadata?.subcategories?.[subcategory];
+  const entry = metadata?.subcategories?.[context.vehicleSubtype] || metadata?.subcategories?.[subcategory];
   if (!entry || typeof entry !== "object") return null;
   const tube = toNum(entry.tube_tyre_price);
   const tubeless = toNum(entry.tubeless_price);
@@ -211,6 +211,9 @@ export const resolveFlatTirePrice = (row, context = {}) => {
 
 export const calculateTechnicianServiceRowPayout = (row, vehicle, context = {}) => {
   if (!row) return null;
+  const metadata = safeParse(row.metadata) || row;
+  const subtypePricing = metadata?.subcategories?.[context.vehicleSubtype] || metadata?.subcategories?.[pricingSubcategoryFor(context.vehicleSubtype)];
+  if (subtypePricing && typeof subtypePricing === "object") row = { ...row, ...subtypePricing, metadata };
   const visitCharge = toNum(row.visit_charge) || 0;
   const deliveryCharge = toNum(row.delivery_charge) || 0;
   const isFlatTire = canonicalizeServiceDomain(row.service_domain) === "flat-tire";

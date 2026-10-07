@@ -1,5 +1,27 @@
 import * as db from "../db.js";
 
+// Accept an existing transaction so signup and its prices are committed together.
+export async function replaceTechnicianServicePricing(conn, technicianId, rows) {
+    if (!Array.isArray(rows)) throw new Error("Pricing must be an array.");
+    await conn.execute("DELETE FROM technician_service_pricing WHERE technician_id = ?", [technicianId]);
+    for (const item of rows) {
+        if (!Number.isInteger(Number(item.service_id)) || Number(item.service_id) <= 0 ||
+            !Number.isInteger(Number(item.vehicle_category_id)) || Number(item.vehicle_category_id) <= 0 ||
+            !item.pricing_json || typeof item.pricing_json !== "object" || Array.isArray(item.pricing_json)) {
+            throw new Error("Invalid service pricing row.");
+        }
+        for (const [key, value] of Object.entries(item.pricing_json)) {
+            if (["service_domain", "vehicle_type", "vehicle_subtype", "vehicle_subtype_label"].includes(key)) continue;
+            if (value === "" || value == null) continue;
+            if (!Number.isFinite(Number(value)) || Number(value) < 0) throw new Error("Prices must be non-negative numbers.");
+        }
+        await conn.execute(
+            "INSERT INTO technician_service_pricing (technician_id, service_id, vehicle_category_id, vehicle_subcategory_id, fleet_id, pricing_json) VALUES (?, ?, ?, ?, ?, ?)",
+            [technicianId, item.service_id, item.vehicle_category_id, item.vehicle_subcategory_id || null, item.fleet_id || null, JSON.stringify(item.pricing_json)]
+        );
+    }
+}
+
 export const getPricingTemplate = async (req, res) => {
     try {
         const pool = await db.getPool();
@@ -52,25 +74,7 @@ export const saveTechnicianPricing = async (req, res) => {
         try {
             await conn.beginTransaction();
 
-            // Clear old pricing
-            await conn.execute("DELETE FROM technician_service_pricing WHERE technician_id = ?", [technician_id]);
-
-            // Insert new
-            if (pricing_data && pricing_data.length > 0) {
-                for (const item of pricing_data) {
-                    await conn.execute(
-                        "INSERT INTO technician_service_pricing (technician_id, service_id, vehicle_category_id, vehicle_subcategory_id, fleet_id, pricing_json) VALUES (?, ?, ?, ?, ?, ?)",
-                        [
-                            technician_id,
-                            item.service_id,
-                            item.vehicle_category_id,
-                            item.vehicle_subcategory_id || null,
-                            item.fleet_id || null,
-                            JSON.stringify(item.pricing_json)
-                        ]
-                    );
-                }
-            }
+            await replaceTechnicianServicePricing(conn, technician_id, pricing_data || []);
 
             await conn.commit();
             res.json({ success: true });
