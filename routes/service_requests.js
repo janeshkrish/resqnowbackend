@@ -42,7 +42,9 @@ import {
     isActiveJobStatus,
     isTerminalJobStatus,
     markTechnicianReserved,
-    releaseTechnicianAvailability
+    createRequestWithReservation,
+    releaseTechnicianAvailability,
+    JobOwnershipError
 } from "../services/technicianStateService.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
 
@@ -511,7 +513,9 @@ router.post("/", verifyUser, async (req, res) => {
             technicianEstimatedEarning = toPositiveMoney(earningEstimate?.amount);
         }
 
-        const [result] = await pool.execute(
+        let result;
+        try {
+            result = await createRequestWithReservation(pool,
             `INSERT INTO service_requests 
       (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_estimated_earning, technician_id, status, amount, vehicle_brand, vehicle_subtype, tow_truck_type, request_details_json) 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -546,9 +550,13 @@ router.post("/", verifyUser, async (req, res) => {
                 vehicleSubtype,
                 towTruckType,
                 requestDetails ? JSON.stringify(requestDetails) : null
-            ]
-        );
-
+            ],
+            directTechnicianId
+            );
+        } catch (error) {
+            if (error instanceof JobOwnershipError) return res.status(409).json({ code: error.code, error: error.message });
+            throw error;
+        }
         const newRequestId = result.insertId;
         console.log(`[Create Job] Created Request #${newRequestId}`);
 
@@ -596,7 +604,6 @@ router.post("/", verifyUser, async (req, res) => {
         }
 
         if (hasDirectTechnician && directTechnicianId) {
-            await markTechnicianReserved(pool, directTechnicianId, newRequestId);
             console.log(`[Create Job] Reserved technician ${directTechnicianId} for direct request #${newRequestId}.`);
             if (adminNotificationEmail) {
                 void sendEventEmail("ADMIN_TECHNICIAN_ASSIGNED", {
@@ -779,7 +786,7 @@ router.post("/:id/accept", verifyTechnician, async (req, res) => {
             if (result.code === "technician_not_found") {
                 return res.status(404).json({ error: result.reason || "Technician not found." });
             }
-            return res.status(409).json({ error: result.reason || "Job already taken." });
+            return res.status(409).json({ success: false, code: result.code, error: result.reason || "Job already taken." });
         }
 
         const responseJob =
@@ -865,6 +872,8 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 sr.technician_id,
                 COALESCE(sr.amount, sr.service_charge, 0) AS amount,
                 d.status AS offer_status,
+                d.expires_at AS offer_expires_at,
+                d.expires_at IS NOT NULL AND d.expires_at <= NOW() AS offer_expired,
                 t.latitude AS technician_lat,
                 t.longitude AS technician_lng,
                 t.pricing AS technician_pricing,
@@ -876,6 +885,7 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
             LEFT JOIN technicians t
                 ON t.id = ?
             WHERE sr.id = ?
+            ORDER BY d.id DESC
             LIMIT 1`,
             [technicianId, technicianId, requestId]
         );
@@ -899,7 +909,7 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
         const offerStatus = String(row?.offer_status || "").trim().toLowerCase();
         const assignedTechnicianId = row?.technician_id == null ? null : String(row.technician_id);
         const isAssignedToCurrentTechnician = assignedTechnicianId === String(technicianId);
-        const hasPendingOffer = offerStatus === "pending";
+        const hasPendingOffer = offerStatus === "pending" && !Number(row.offer_expired);
         const terminalStatuses = new Set(["cancelled", "completed", "rejected", "paid", "closed"]);
 
         if (terminalStatuses.has(normalizedStatus)) {
@@ -921,8 +931,8 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
         if (!isAssignedToCurrentTechnician && !hasPendingOffer) {
             return res.status(409).json({
                 available: false,
-                reason: "unavailable",
-                message: "This job offer is no longer available.",
+                reason: Number(row.offer_expired) || offerStatus === "expired" ? "expired" : "unavailable",
+                message: Number(row.offer_expired) || offerStatus === "expired" ? "This job offer has expired." : "This job offer is no longer available.",
             });
         }
 
@@ -986,13 +996,16 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
  * PATCH /api/service-requests/:id/technician-status
  * Update request status (For Technician)
  */
-router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
+export async function handleTechnicianStatusUpdate(req, res, { getPool: resolvePool = getPool } = {}) {
+    let conn;
+    let committed = false;
+    const afterCommit = [];
     try {
         const technicianId = req.technicianId;
         const requestId = req.params.id;
         const { status } = req.body;
 
-        const pool = await getPool();
+        const pool = await resolvePool();
         const normalized = normalizeStatus(status);
         if (!normalized) {
             return res.status(400).json({ error: "Invalid status value." });
@@ -1007,7 +1020,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                 if (acceptResult.code === "not_found" || acceptResult.code === "technician_not_found") {
                     return res.status(404).json({ error: acceptResult.reason || "Request not found." });
                 }
-                return res.status(409).json({ error: acceptResult.reason || "Job already accepted by another technician." });
+                return res.status(409).json({ success: false, code: acceptResult.code, error: acceptResult.reason || "Job already accepted by another technician." });
             }
             return res.json({
                 success: true,
@@ -1017,9 +1030,12 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             });
         }
 
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
+
         // Check assignment
         console.log(`[Tech Status Update] RequestID: ${requestId}, TechID: ${technicianId}, Status: ${status}`);
-        const [requests] = await pool.query("SELECT * FROM service_requests WHERE id = ? AND technician_id = ?", [requestId, technicianId]);
+        const [requests] = await conn.query("SELECT * FROM service_requests WHERE id = ? AND technician_id = ? FOR UPDATE", [requestId, technicianId]);
         if (requests.length === 0) {
             console.error(`[Tech Status Update] Fail: Request ${requestId} not assigned to technician ${technicianId}`);
             return res.status(404).json({ error: "Request not found or not assigned to you." });
@@ -1053,11 +1069,11 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
         }
 
         // Fetch user and tech info upfront
-        const [users] = await pool.query("SELECT email, full_name FROM users WHERE id = ?", [request.user_id]);
+        const [users] = await conn.query("SELECT email, full_name FROM users WHERE id = ?", [request.user_id]);
         const userEmail = users[0]?.email;
         const userName = users[0]?.full_name;
 
-        const [techs] = await pool.query("SELECT name FROM technicians WHERE id = ?", [technicianId]);
+        const [techs] = await conn.query("SELECT name FROM technicians WHERE id = ?", [technicianId]);
         const techName = techs[0]?.name || "Your Technician";
 
         let newStatus = requestedStatus;
@@ -1065,7 +1081,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
         let reassignedAmount = null;
 
         if (normalized === 'rejected') {
-            await releaseTechnicianAvailability(pool, technicianId, requestId);
+            await releaseTechnicianAvailability(conn, technicianId, requestId);
             // ... (keep reassignment logic)
             const { jobMatcher } = await import("../services/jobMatcher.js");
             const nextMatch = await jobMatcher.findBestMatch(request, [technicianId]);
@@ -1079,54 +1095,55 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                         { service_type: request.service_type, vehicle_type: request.vehicle_type },
                         nextMatch
                     );
-                await markTechnicianReserved(pool, newTechId, requestId);
-                await pool.query(
+                await markTechnicianReserved(conn, newTechId, requestId);
+                await conn.query(
                     "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id = ?",
                     [requestId, technicianId]
                 );
-                const [existingNextOffer] = await pool.query(
+                const [existingNextOffer] = await conn.query(
                     "SELECT id FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ? LIMIT 1",
                     [requestId, newTechId]
                 );
                 if (existingNextOffer.length > 0) {
-                    await pool.query(
+                    await conn.query(
                         "UPDATE dispatch_offers SET status = 'accepted' WHERE id = ?",
                         [existingNextOffer[0].id]
                     );
                 } else {
-                    await pool.query(
+                    await conn.query(
                         "INSERT INTO dispatch_offers (service_request_id, technician_id, status) VALUES (?, ?, 'accepted')",
                         [requestId, newTechId]
                     );
                 }
-                // Notify new technician
-                const reassignedPayload = {
-                    id: String(requestId),
-                    jobId: String(requestId),
-                    requestId: String(requestId),
-                    customerName: userName || "Customer",
-                    serviceType: request.service_type,
-                    vehicleType: request.vehicle_type,
-                    location: {
-                        lat: request.location_lat,
-                        lng: request.location_lng,
-                        address: request.address
-                    },
-                    ...buildTowingRouteResponseFields(request),
-                    locationDistance: Number.isFinite(Number(nextMatch.distance))
-                        ? `${Number(nextMatch.distance).toFixed(1)} km`
-                        : (nextMatch.distanceText || "Nearby"),
-                    distance: Number(nextMatch.distance) || 0,
-                    amount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0,
-                    priceAmount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0
-                };
-                if (socketService.io) {
-                    socketService.io.to(`technician_${newTechId}`).emit("JOB_ALERT", reassignedPayload);
-                }
-                socketService.notifyTechnician(newTechId, 'job:assigned', reassignedPayload);
-                socketService.notifyTechnician(newTechId, "job:list_update", {
-                    requestId: String(requestId),
-                    action: "updated"
+                afterCommit.push(() => {
+                    // Notify new technician
+                    const reassignedPayload = {
+                        id: String(requestId),
+                        jobId: String(requestId),
+                        requestId: String(requestId),
+                        customerName: userName || "Customer",
+                        serviceType: request.service_type,
+                        vehicleType: request.vehicle_type,
+                        location: {
+                            lat: request.location_lat,
+                            lng: request.location_lng,
+                            address: request.address
+                        },
+                        ...buildTowingRouteResponseFields(request),
+                        locationDistance: Number.isFinite(Number(nextMatch.distance))
+                            ? `${Number(nextMatch.distance).toFixed(1)} km`
+                            : (nextMatch.distanceText || "Nearby"),
+                        distance: Number(nextMatch.distance) || 0,
+                        amount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0,
+                        priceAmount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0
+                    };
+                    if (socketService.io) {
+                        socketService.io.to(`technician_${newTechId}`).emit("JOB_ALERT", reassignedPayload);
+                    }
+                    socketService.notifyTechnician(newTechId, 'job:assigned', reassignedPayload);
+                    socketService.notifyTechnician(newTechId, "job:list_update", {
+                        requestId: String(requestId),
+                        action: "updated"
                 });
 
                 if (nextMatch.email) {
@@ -1138,10 +1155,11 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
                                <p>Location: ${request.address}</p>`
                     }).catch(console.error);
                 }
+                });
             } else {
                 newTechId = null;
                 newStatus = 'pending';
-                await pool.query(
+                await conn.query(
                     "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id = ?",
                     [requestId, technicianId]
                 );
@@ -1170,7 +1188,7 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             // mark completed_at
             timestampUpdate = ", completed_at = COALESCE(completed_at, NOW())";
             if (newStatus === 'paid' || newStatus === 'completed' || newStatus === 'closed') {
-                await releaseTechnicianAvailability(pool, technicianId, requestId);
+                await releaseTechnicianAvailability(conn, technicianId, requestId);
             }
         }
 
@@ -1180,16 +1198,20 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
             ? [newStatus, newTechId, reassignedAmount, requestId]
             : [newStatus, newTechId, requestId];
 
-        await pool.execute(
+        await conn.execute(
             `UPDATE service_requests SET status = ?, technician_id = ? ${amountUpdateClause} ${timestampUpdate}, updated_at = NOW() WHERE id = ?`,
             updateParams
         );
 
         if (newTechId && isActiveJobStatus(newStatus)) {
-            await markTechnicianReserved(pool, newTechId, requestId);
+            await markTechnicianReserved(conn, newTechId, requestId, { alreadyOwned: Number(newTechId) === Number(technicianId) });
         } else if (!isActiveJobStatus(newStatus) && isTerminalJobStatus(newStatus)) {
-            await releaseTechnicianAvailability(pool, technicianId, requestId);
+            await releaseTechnicianAvailability(conn, technicianId, requestId);
         }
+
+        await conn.commit();
+        committed = true;
+        afterCommit.forEach(notify => notify());
 
         // Notify Customer via Socket
         if (request.user_id) {
@@ -1253,10 +1275,18 @@ router.patch("/:id/technician-status", verifyTechnician, async (req, res) => {
         res.json({ success: true, status: newStatus });
 
     } catch (err) {
+        if (err instanceof JobOwnershipError) return res.status(409).json({ code: err.code, error: err.message });
         console.error("[Service Requests] Tech Update status error:", err);
         res.status(500).json({ error: "Failed to update status." });
+    } finally {
+        if (conn) {
+            if (!committed) { try { await conn.rollback(); } catch { /* connection failure */ } }
+            conn.release();
+        }
     }
-});
+}
+
+router.patch("/:id/technician-status", verifyTechnician, handleTechnicianStatusUpdate);
 
 /**
  * Why a customer's cancellation is turned down, or null when it may go ahead.
@@ -1282,66 +1312,15 @@ function customerCancelRefusal(status) {
  * Update request status (For User - e.g. cancel)
  */
 export async function handleCustomerStatusUpdate(req, res, deps = {}) {
-    const { getPool: resolvePool = getPool, release = releaseTechnicianAvailability, sockets = socketService } = deps;
-    try {
-        const userId = req.user.userId;
-        const requestId = req.params.id;
-        const { status } = req.body;
-
-        // Check ownership
-        const pool = await resolvePool();
-        const [check] = await pool.query("SELECT id, status, technician_id FROM service_requests WHERE id = ? AND user_id = ?", [requestId, userId]);
-        if (check.length === 0) {
-            return res.status(404).json({ error: "Request not found or unauthorized." });
-        }
-        const reqData = check[0];
-
-        const normalized = normalizeStatus(status);
-        if (!normalized) {
-            return res.status(400).json({ error: "Invalid status value." });
-        }
-
-        if (normalized === 'cancelled') {
-            const refusal = customerCancelRefusal(reqData.status);
-            if (refusal) return res.status(refusal.code).json(refusal.body);
-        }
-
-        await pool.execute(
-            "UPDATE service_requests SET status = ?, updated_at = NOW() WHERE id = ?",
-            [normalized, requestId]
-        );
-
-        if (reqData.technician_id && (normalized === 'cancelled' || isTerminalJobStatus(normalized))) {
-            await release(pool, reqData.technician_id, requestId);
-        }
-
-        // Notify Technician if assigned
-        if (reqData.technician_id) {
-            sockets.notifyTechnician(reqData.technician_id, 'job:status_update', {
-                requestId,
-                status: normalized
-            });
-
-            if (normalized === 'cancelled') {
-                // Fetch tech email
-                const [techs] = await pool.query("SELECT email, name FROM technicians WHERE id = ?", [reqData.technician_id]);
-                if (techs[0]?.email) {
-                    mail.sendMail({
-                        to: techs[0].email,
-                        subject: "Job Cancelled - ResQNow",
-                        html: `<h3>Hello ${techs[0].name},</h3>
-                               <p>The job #${requestId} has been cancelled by the customer.</p>
-                               <p>You are now available for other requests.</p>`
-                    }).catch(console.error);
-                }
-            }
-        }
-
-        res.json({ success: true, status: normalized });
-    } catch (err) {
-        console.error("[Service Requests] Update status error:", err);
-        res.status(500).json({ error: "Failed to update status." });
+    // Customers may cancel; dispatch and payment transitions belong to their
+    // authenticated handlers. Reuse the locked cancellation path for both URLs.
+    if (normalizeStatus(req.body?.status) !== 'cancelled') {
+        return res.status(400).json({
+            code: 'CUSTOMER_STATUS_NOT_ALLOWED',
+            error: 'Customers can only cancel a request through this endpoint.',
+        });
     }
+    return handleCustomerCancel(req, res, deps);
 }
 router.patch("/:id/status", verifyUser, (req, res) => handleCustomerStatusUpdate(req, res));
 

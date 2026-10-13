@@ -178,3 +178,32 @@ test('the status route follows the same rule when it is asked to cancel', async 
   assert.equal(allow.row.status, 'cancelled');
   assert.deepEqual(allow.seen.released, [{ technician: 7, request: '5502' }]);
 });
+
+test('the legacy customer status route checks cancellation after locking the latest status', async () => {
+  const world = setup({ status: 'accepted', technicianId: 7, statusAtLock: 'en-route' });
+  const res = createResponse();
+  await handleCustomerStatusUpdate({ user: { userId: 41 }, params: { id: '5502' }, body: { status: 'cancelled' } }, res, world.deps);
+  assert.equal(res.statusCode, 409);
+  assert.equal(world.row.status, 'en-route');
+  assert.equal(world.seen.updates.length, 0);
+});
+
+test('legacy customer cancellation releases the owner who accepted before the lock', async () => {
+  const world = setup({ status: 'pending', technicianAtLock: 9, statusAtLock: 'accepted' });
+  const res = createResponse();
+  await handleCustomerStatusUpdate({ user: { userId: 41 }, params: { id: '5502' }, body: { status: 'cancelled' } }, res, world.deps);
+  assert.equal(res.statusCode, 200);
+  assert.equal(world.row.technician_id, null);
+  assert.deepEqual(world.seen.released, [{ technician: 9, request: '5502' }]);
+  assert.deepEqual(world.seen.transactions, ['begin', 'commit', 'release']);
+});
+
+test('a customer cannot reactivate a completed job through the legacy status route', async () => {
+  const world = setup({ status: 'completed', technicianId: 7 });
+  const res = createResponse();
+  await handleCustomerStatusUpdate({ user: { userId: 41 }, params: { id: '5502' }, body: { status: 'accepted' } }, res, world.deps);
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.code, 'CUSTOMER_STATUS_NOT_ALLOWED');
+  assert.equal(world.row.status, 'completed');
+  assert.equal(world.seen.updates.length, 0);
+});

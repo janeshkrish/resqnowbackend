@@ -22,7 +22,7 @@ export async function adminExtendedForceAssign({ requestId, technicianId }) {
   const parsedRequestId = adminExtendedParsePositiveInt(requestId, "requestId");
   const parsedTechnicianId = adminExtendedParsePositiveInt(technicianId, "technicianId");
 
-  const result = await jobDispatchService.acceptJob(parsedTechnicianId, parsedRequestId);
+  const result = await jobDispatchService.acceptJob(parsedTechnicianId, parsedRequestId, { requireOffer: false });
   return {
     requestId: parsedRequestId,
     technicianId: parsedTechnicianId,

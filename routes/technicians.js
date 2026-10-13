@@ -3057,7 +3057,7 @@ router.patch("/:id/approve", verifyAdmin, async (req, res) => {
     const previousStatus = String(existing[0].status || "pending");
 
     await pool.execute(
-      "UPDATE technicians SET status = 'approved', is_active = TRUE, is_available = TRUE, current_job_id = NULL WHERE id = ?",
+      "UPDATE technicians SET status = 'approved', is_active = TRUE, is_available = CASE WHEN current_job_id IS NULL THEN TRUE ELSE FALSE END WHERE id = ?",
       [id]
     );
     await pool.execute(
@@ -3108,7 +3108,7 @@ router.patch("/:id/reject", verifyAdmin, async (req, res) => {
     }
     const previousStatus = String(existing[0].status || "pending");
     await pool.execute(
-      "UPDATE technicians SET status = 'rejected', is_active = FALSE, is_available = FALSE, current_job_id = NULL WHERE id = ?",
+      "UPDATE technicians SET status = 'rejected', is_active = FALSE, is_available = FALSE WHERE id = ?",
       [id]
     );
     await pool.execute(

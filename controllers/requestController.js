@@ -3,6 +3,7 @@ import { buildPagination, likeFilter, resolveAdminId, toPositiveInt } from "./ut
 import { socketService } from "../services/socket.js";
 import { closeRequestWithFinanceSync } from "../services/requestClosureService.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
+import { markTechnicianReserved, releaseTechnicianAvailability, JobOwnershipError, isTerminalJobStatus } from "../services/technicianStateService.js";
 
 const ACTIVE_REQUEST_STATES = [
   "assigned",
@@ -352,7 +353,7 @@ export async function getRequests(req, res) {
   }
 }
 
-export async function assignRequest(req, res) {
+export async function assignRequest(req, res, { getPool: resolvePool = getPool } = {}) {
   try {
     const requestId = toPositiveInt(req.params?.requestId ?? req.body?.requestId, 0, {
       min: 0,
@@ -364,8 +365,8 @@ export async function assignRequest(req, res) {
       return res.status(400).json({ error: "requestId and technicianId are required." });
     }
 
-    const pool = await getPool();
-    const requestRow = await getRequestById(pool, requestId);
+    const pool = await resolvePool();
+    let requestRow = await getRequestById(pool, requestId);
     if (!requestRow) {
       return res.status(404).json({ error: "Request not found." });
     }
@@ -387,6 +388,14 @@ export async function assignRequest(req, res) {
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
+      const [lockedRequests] = await conn.query("SELECT * FROM service_requests WHERE id = ? FOR UPDATE", [requestId]);
+      requestRow = lockedRequests[0];
+      if (!requestRow) throw new JobOwnershipError("not_found", "Request not found.");
+      if (isTerminalJobStatus(requestRow.status)) throw new JobOwnershipError("job_closed", "This request is already closed.");
+      // Lock both capacity rows in ID order when replacing an owner.
+      const technicianIds = [...new Set([technicianId, Number(requestRow.technician_id)].filter(Boolean))].sort((a, b) => a - b);
+      await conn.query(`SELECT id FROM technicians WHERE id IN (${technicianIds.map(() => "?").join(",")}) ORDER BY id FOR UPDATE`, technicianIds);
+      await markTechnicianReserved(conn, technicianId, requestId, { alreadyOwned: Number(requestRow.technician_id) === technicianId });
       await conn.execute(
         `UPDATE service_requests
          SET technician_id = ?,
@@ -399,17 +408,8 @@ export async function assignRequest(req, res) {
         [technicianId, requestId]
       );
       if (requestRow.technician_id && Number(requestRow.technician_id) !== technicianId) {
-        await conn.execute(
-          `UPDATE technicians
-           SET current_job_id = NULL, is_available = TRUE
-           WHERE id = ? AND current_job_id = ?`,
-          [requestRow.technician_id, requestId]
-        );
+        await releaseTechnicianAvailability(conn, requestRow.technician_id, requestId);
       }
-      await conn.execute(
-        "UPDATE technicians SET current_job_id = ?, is_available = FALSE WHERE id = ?",
-        [requestId, technicianId]
-      );
       await appendRequestTimeline({
         pool: conn,
         requestId,
@@ -483,6 +483,7 @@ export async function assignRequest(req, res) {
       message: "Request assigned successfully.",
     });
   } catch (error) {
+    if (error instanceof JobOwnershipError) return res.status(error.code === "not_found" ? 404 : 409).json({ code: error.code, error: error.message });
     console.error("[admin.requests.assign] failed:", error?.message || error);
     return res.status(500).json({ error: "Failed to assign request." });
   }

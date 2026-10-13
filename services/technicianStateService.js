@@ -44,18 +44,71 @@ export function isTerminalJobStatus(status) {
   return TERMINAL_JOB_STATUSES.has(normalizeStatus(status));
 }
 
-export async function markTechnicianReserved(connOrPool, technicianId, requestId) {
+export class JobOwnershipError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+    this.statusCode = 409;
+  }
+}
+
+export async function createRequestWithReservation(pool, sql, values, technicianId) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    // Lock capacity before inserting an assigned row. Competing direct bookings
+    // must not hold each other's new request rows while waiting for this lock.
+    if (technicianId) {
+      await conn.query("SELECT id FROM technicians WHERE id = ? FOR UPDATE", [technicianId]);
+    }
+    const [result] = await conn.execute(sql, values);
+    if (technicianId) await markTechnicianReserved(conn, technicianId, result.insertId);
+    await conn.commit();
+    return result;
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally { conn.release(); }
+}
+
+// Call only on the connection used for the assignment transaction. The technician
+// row is the serialization point for all requests competing for this capacity.
+export async function markTechnicianReserved(connOrPool, technicianId, requestId, { alreadyOwned = false } = {}) {
   const techId = toPositiveInt(technicianId);
   const jobId = toPositiveInt(requestId);
   if (!techId || !jobId) return false;
 
-  await connOrPool.query(
+  const [rows] = await connOrPool.query("SELECT * FROM technicians WHERE id = ? FOR UPDATE", [techId]);
+  const technician = rows[0];
+  if (!technician) throw new JobOwnershipError("technician_not_found", "Technician not found.");
+  const pointer = toPositiveInt(technician.current_job_id);
+  if (pointer && pointer !== jobId) {
+    throw new JobOwnershipError("technician_busy", "You already have another active job.");
+  }
+  // Use a current locking read: an earlier pricing query may have established a
+  // repeatable-read snapshot before a competing reservation committed.
+  const [activeJobs] = await connOrPool.query(
+    `SELECT id FROM service_requests
+     WHERE technician_id = ? AND id <> ?
+       AND LOWER(TRIM(COALESCE(status, ''))) IN (${[...ACTIVE_JOB_STATUSES].map(() => "?").join(",")})
+     LIMIT 1 FOR UPDATE`,
+    [techId, jobId, ...ACTIVE_JOB_STATUSES]
+  );
+  if (activeJobs.length) throw new JobOwnershipError("technician_busy", "You already have another active job.");
+  if (!alreadyOwned && pointer !== jobId && (
+    normalizeStatus(technician.status) !== "approved" || !Number(technician.is_active) || !Number(technician.is_available)
+  )) {
+    throw new JobOwnershipError("technician_unavailable", "Technician is not currently available.");
+  }
+
+  const [result] = await connOrPool.query(
     `UPDATE technicians
      SET is_available = FALSE,
          current_job_id = ?
-     WHERE id = ?`,
-    [jobId, techId]
+     WHERE id = ? AND (current_job_id IS NULL OR current_job_id = ?)`,
+    [jobId, techId, jobId]
   );
+  if (Number(result.affectedRows) !== 1) throw new JobOwnershipError("technician_busy", "You already have another active job.");
   return true;
 }
 
@@ -72,26 +125,21 @@ export async function releaseTechnicianAvailability(connOrPool, technicianId, re
     await connOrPool.query(
       `UPDATE technicians
        SET is_available = CASE
-         WHEN is_active = TRUE AND current_job_id IS NULL THEN TRUE
+         WHEN is_active = TRUE AND LOWER(COALESCE(status, '')) = 'approved' AND current_job_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM service_requests sr WHERE sr.technician_id = technicians.id
+               AND sr.id <> ? AND LOWER(TRIM(COALESCE(sr.status, ''))) IN (${[...ACTIVE_JOB_STATUSES].map(() => "?").join(",")})
+           ) THEN TRUE
          ELSE FALSE
        END
        WHERE id = ?`,
-      [techId]
+      [jobId, ...ACTIVE_JOB_STATUSES, techId]
     );
     return true;
   }
 
-  await connOrPool.query(
-    `UPDATE technicians
-     SET current_job_id = NULL,
-         is_available = CASE
-           WHEN is_active = TRUE THEN TRUE
-           ELSE FALSE
-         END
-     WHERE id = ?`,
-    [techId]
-  );
-  return true;
+  // An event without a request ID cannot safely release an owner's reservation.
+  return false;
 }
 
 export async function reconcileTechnicianAvailability(connOrPool) {

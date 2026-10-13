@@ -463,41 +463,14 @@ async function processDispatchTimeoutJob(data) {
     `[Dispatch Queue] Processing timeout requestId=${jobId} technicianId=${technicianId} retryCount=${payload.retryCount}`
   );
 
-  const pool = await getPool();
-  const requestRow = await fetchRequestRow(pool, jobId);
-  if (!requestRow) return { skipped: true, reason: "request_not_found" };
-  if (!isPendingUnassignedRequest(requestRow)) {
-    return { skipped: true, reason: `request_resolved:${normalizeStatus(requestRow.status)}` };
-  }
-
-  const [pendingOfferRows] = await pool.query(
-    `SELECT id
-     FROM dispatch_offers
-     WHERE service_request_id = ?
-       AND technician_id = ?
-       AND status = 'pending'
-     ORDER BY id DESC
-     LIMIT 1`,
-    [jobId, technicianId]
-  );
-
-  const pendingOfferId = pendingOfferRows?.[0]?.id;
-  if (!pendingOfferId) {
-    return { skipped: true, reason: "offer_already_handled" };
-  }
-
-  await pool.query(
-    `UPDATE dispatch_offers
-     SET status = 'expired',
-         expires_at = COALESCE(expires_at, NOW())
-     WHERE id = ?`,
-    [pendingOfferId]
-  );
+  const result = await jobDispatchService.expirePendingOffer(jobId, technicianId);
+  if (!result.expired) return { skipped: true, reason: result.reason };
   console.log(`[Dispatch Queue] Offer expired requestId=${jobId} technicianId=${technicianId}`);
 
   const takenPayload = {
     jobId: String(jobId),
     technicianId: null,
+    code: "offer_expired",
     message: "Job offer timed out.",
   };
   if (socketService.io) {
@@ -506,6 +479,7 @@ async function processDispatchTimeoutJob(data) {
   socketService.notifyTechnician(technicianId, "job:revoked", {
     requestId: String(jobId),
     jobId: String(jobId),
+    code: "offer_expired",
     message: "Job offer timed out. Reassigning request.",
   });
 
