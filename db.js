@@ -254,7 +254,7 @@ const USERS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS users (
   id INT AUTO_INCREMENT PRIMARY KEY,
   full_name VARCHAR(255) NOT NULL,
-  email VARCHAR(255) UNIQUE NOT NULL,
+  email VARCHAR(255) UNIQUE,
   password_hash VARCHAR(255),
   google_id VARCHAR(255) UNIQUE,
   is_verified BOOLEAN DEFAULT FALSE,
@@ -1484,6 +1484,35 @@ export async function updateUsersTableSchema() {
   await addColumnIfNotExists(p, 'users', 'birthday DATE');
   await addColumnIfNotExists(p, 'users', 'gender VARCHAR(20)');
   await addColumnIfNotExists(p, 'users', 'settings JSON');
+
+  // Mobile number login: the number Firebase verified, and the Firebase account it belongs to.
+  // A customer who signs up with only a number has no email, so email may be empty.
+  await addColumnIfNotExists(p, 'users', 'phone_e164 VARCHAR(20)');
+  await addColumnIfNotExists(p, 'users', 'firebase_uid VARCHAR(128)');
+  await addUniqueIndexIfNotExists(p, 'users', 'uniq_users_phone_e164', 'phone_e164');
+  await addUniqueIndexIfNotExists(p, 'users', 'uniq_users_firebase_uid', 'firebase_uid');
+  try {
+    await allowNullColumn(p, 'users', 'email');
+  } catch (err) {
+    console.log("Note: could not make users.email optional:", err.message);
+  }
+}
+
+async function allowNullColumn(poolLike, tableName, columnName) {
+  const metadata = await getColumnMetadata(poolLike, tableName, columnName);
+  if (!metadata) return;
+  const nullable = String(metadata.is_nullable ?? metadata.IS_NULLABLE ?? "").toUpperCase();
+  const columnType = String(metadata.column_type ?? metadata.COLUMN_TYPE ?? "").trim();
+  if (nullable !== "NO" || !/^[a-z]+(\(\d+\))?$/i.test(columnType)) return;
+
+  await runDdlWithRetry(
+    poolLike,
+    `modify ${tableName}.${columnName}`,
+    () =>
+      poolLike.query(
+        `ALTER TABLE ${normalizeIdentifier(tableName)} MODIFY COLUMN ${normalizeIdentifier(columnName)} ${columnType} NULL`
+      )
+  );
 }
 
 // --- Dynamic Service Configuration Tables ---

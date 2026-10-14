@@ -7,6 +7,7 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { getAdminCredentials, signAdminToken, verifyUser } from "../middleware/auth.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
+import { handlePhoneLogin } from "../services/phoneLogin.js";
 
 const router = Router();
 
@@ -593,6 +594,11 @@ router.post('/login', async (req, res) => {
     console.error("[User Login Error]", err);
     return res.status(500).json({ error: "Login failed." });
   }
+});
+
+// 3b. Login with a mobile number verified by Firebase
+router.post('/phone-login', (req, res) => {
+  return handlePhoneLogin(req, res, { getPool: db.getPool, signToken: signUserToken });
 });
 
 
