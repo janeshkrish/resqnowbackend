@@ -54,7 +54,7 @@ export class JobOwnershipError extends Error {
   }
 }
 
-export async function createRequestWithReservation(pool, sql, values, technicianId) {
+export async function createRequestWithReservation(pool, sql, values, technicianId, { afterReserve } = {}) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -65,6 +65,7 @@ export async function createRequestWithReservation(pool, sql, values, technician
     }
     const [result] = await conn.execute(sql, values);
     if (technicianId) await markTechnicianReserved(conn, technicianId, result.insertId);
+    if (afterReserve) await afterReserve(conn, result);
     await conn.commit();
     return result;
   } catch (error) {

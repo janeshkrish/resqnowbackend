@@ -173,7 +173,8 @@ export async function backfillMarketplaceWalletCredits(pool) {
        p.id AS payment_id,
        p.service_request_id,
        sr.technician_id,
-       COALESCE(p.base_amount, p.technician_amount) AS base_amount,
+       p.technician_amount,
+       p.base_amount,
        p.currency,
        p.payment_method
      FROM payments p
@@ -186,13 +187,19 @@ export async function backfillMarketplaceWalletCredits(pool) {
 
   let creditsCreated = 0;
   for (const row of rows || []) {
+    const recordedEarning = Number(row.technician_amount);
+    // Customer base can include tax; it is not technician earnings. Only old
+    // payments with no recorded earning may fall back to their historical base.
+    const technicianAmount = row.technician_amount == null || recordedEarning === 0
+      ? Number(row.base_amount) : recordedEarning;
+    if (!Number.isFinite(technicianAmount) || technicianAmount <= 0) continue;
     try {
       await withTransaction(pool, async (conn) => {
         const result = await creditTechnicianWalletForPayment(conn, {
           technicianId: row.technician_id,
           paymentId: row.payment_id,
           serviceRequestId: row.service_request_id,
-          amount: row.base_amount,
+          amount: technicianAmount,
           currency: row.currency || "INR",
           description: "Backfilled marketplace wallet credit from completed Razorpay payment.",
           idempotencyKey: `payment-credit:${row.payment_id}`,

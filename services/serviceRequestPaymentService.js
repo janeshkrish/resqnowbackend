@@ -1,4 +1,5 @@
 import { roundMoney } from "../utils/money.js";
+import { acceptedPricingSnapshot } from "./dispatchPricingService.js";
 
 export const SERVICE_REQUEST_PLATFORM_FEE_PERCENT = 0.1;
 export const SERVICE_REQUEST_RAZORPAY_FEE = 2;
@@ -6,9 +7,29 @@ export const SERVICE_REQUEST_RAZORPAY_FEE = 2;
 const COMPLETED_PAYMENT_STATUSES = new Set(["paid", "completed"]);
 
 const toFiniteMoney = (value) => {
+  if (value == null || value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? roundMoney(parsed) : null;
 };
+
+const parsePaymentSnapshot = (value) => {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+};
+
+// A registered rate may change after acceptance. Billing must read the accepted
+// agreement, or the recorded amounts for an historical job, never today's rates.
+export function resolveServiceRequestBillingBase(requestRow) {
+  const snapshot = acceptedPricingSnapshot(requestRow || {});
+  return toFiniteMoney(snapshot?.customer_base_amount ?? requestRow?.amount ?? requestRow?.service_charge);
+}
+
+export function resolveServiceRequestTechnicianAmount(requestRow) {
+  const snapshot = acceptedPricingSnapshot(requestRow || {});
+  return toFiniteMoney(snapshot?.technician_earning ?? requestRow?.technician_estimated_earning ?? requestRow?.amount ?? requestRow?.service_charge);
+}
 
 const toPercent = (value) => {
   const parsed = Number(value);
@@ -84,9 +105,12 @@ export function buildServiceRequestPaymentDetails({
   currency = "INR",
   fallbackPaymentMode = null,
 } = {}) {
+  const acceptedSnapshot = acceptedPricingSnapshot(requestRow || {});
+  const storedPaymentSnapshot = parsePaymentSnapshot(paymentRow?.pricing_snapshot);
   const resolvedBaseAmount =
     toFiniteMoney(
-      paymentRow?.base_amount ??
+      acceptedSnapshot?.customer_base_amount ??
+        paymentRow?.base_amount ??
         paymentRow?.baseAmount ??
         paymentRow?.technician_amount ??
         paymentRow?.technicianAmount ??
@@ -106,7 +130,8 @@ export function buildServiceRequestPaymentDetails({
       requestRow?.payment_method ??
       requestRow?.paymentMethod ??
       requestRow?.payment_mode ??
-      requestRow?.paymentMode,
+      requestRow?.paymentMode ??
+      acceptedSnapshot?.payment_mode,
     fallbackPaymentMode
   );
 
@@ -114,24 +139,28 @@ export function buildServiceRequestPaymentDetails({
     currency: paymentRow?.currency ?? requestRow?.currency ?? currency,
     paymentMode: requestedMode ?? "cash",
     platformFeeDiscountPercent: requestRow?.applied_discount_percent,
-    platformFeeDiscountAmount: requestRow?.applied_discount_amount,
+    platformFeeDiscountAmount: requestRow?.applied_discount_amount ??
+      (requestRow?.applied_discount_percent != null ? null : acceptedSnapshot?.discount_amount),
   });
+  const preservesSnapshotDiscount = acceptedSnapshot && computed.discountAmount === acceptedSnapshot.discount_amount;
 
   const explicitPlatformFee = toFiniteMoney(
     paymentRow?.platform_fee ??
       paymentRow?.platformFee ??
-      requestRow?.platform_fee ??
-      requestRow?.platformFee
+      (preservesSnapshotDiscount ? acceptedSnapshot.platform_fee : null) ??
+      (acceptedSnapshot ? null : requestRow?.platform_fee) ??
+      (acceptedSnapshot ? null : requestRow?.platformFee)
   );
   const explicitRazorpayFee = toFiniteMoney(
     paymentRow?.payment_fee ??
       paymentRow?.paymentFee ??
       paymentRow?.razorpay_fee ??
       paymentRow?.razorpayFee ??
-      requestRow?.payment_fee ??
-      requestRow?.paymentFee ??
-      requestRow?.razorpay_fee ??
-      requestRow?.razorpayFee
+      (acceptedSnapshot && requestedMode === acceptedSnapshot.payment_mode ? acceptedSnapshot.payment_fee : null) ??
+      (acceptedSnapshot ? null : requestRow?.payment_fee) ??
+      (acceptedSnapshot ? null : requestRow?.paymentFee) ??
+      (acceptedSnapshot ? null : requestRow?.razorpay_fee) ??
+      (acceptedSnapshot ? null : requestRow?.razorpayFee)
   );
 
   const paymentMode =
@@ -139,6 +168,9 @@ export function buildServiceRequestPaymentDetails({
     (explicitRazorpayFee != null && explicitRazorpayFee > 0 ? "upi" : fallbackPaymentMode);
 
   const platformFee = explicitPlatformFee ?? computed.platformFee;
+  const originalPlatformFee = toFiniteMoney(storedPaymentSnapshot?.original_platform_fee) ?? computed.originalPlatformFee;
+  const discountAmount = toFiniteMoney(storedPaymentSnapshot?.discount_amount) ??
+    (paymentRow && explicitPlatformFee != null ? roundMoney(Math.max(0, originalPlatformFee - platformFee)) : computed.discountAmount);
   const razorpayFee =
     explicitRazorpayFee ?? (paymentMode === "upi" ? SERVICE_REQUEST_RAZORPAY_FEE : 0);
   const finalAmount =
@@ -146,8 +178,8 @@ export function buildServiceRequestPaymentDetails({
       paymentRow?.amount ??
         paymentRow?.final_amount ??
         paymentRow?.finalAmount ??
-        requestRow?.final_amount ??
-        requestRow?.finalAmount
+        (acceptedSnapshot ? null : requestRow?.final_amount) ??
+        (acceptedSnapshot ? null : requestRow?.finalAmount)
     ) ?? roundMoney(resolvedBaseAmount + platformFee + razorpayFee);
 
   const isSettled = paymentRow ? toBoolean(paymentRow?.is_settled) : false;
@@ -164,10 +196,10 @@ export function buildServiceRequestPaymentDetails({
     base_amount: resolvedBaseAmount,
     platformFeePercent: computed.platformFeePercent,
     platform_fee_percent: computed.platformFeePercent,
-    originalPlatformFee: computed.originalPlatformFee,
-    original_platform_fee: computed.originalPlatformFee,
-    discountAmount: computed.discountAmount,
-    discount_amount: computed.discountAmount,
+    originalPlatformFee,
+    original_platform_fee: originalPlatformFee,
+    discountAmount,
+    discount_amount: discountAmount,
     platformFee,
     platform_fee: platformFee,
     paymentFeePercent: 0,

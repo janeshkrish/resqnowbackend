@@ -7,7 +7,7 @@ const router = Router();
 router.get("/:id/acceptance", verifyTechnician, async (req, res) => {
     try {
         res.set("Cache-Control", "no-store");
-        const result = await jobDispatchService.getAcceptanceOutcome(req.technicianId, req.params.id);
+        const result = await jobDispatchService.getAcceptanceOutcome(req.technicianId, req.params.id, { offerId: req.query?.offerId ?? null });
         if (result.code === "not_found") return res.status(404).json({ state: "closed", code: result.code });
         return res.json(result);
     } catch (error) {
@@ -31,7 +31,7 @@ router.post("/accept", verifyTechnician, async (req, res) => {
             return res.status(400).json({ error: "jobId or requestId is required." });
         }
 
-        const result = await jobDispatchService.acceptJob(technicianId, requestId);
+        const result = await jobDispatchService.acceptJob(technicianId, requestId, { offerId: req.body?.offerId ?? req.body?.offer_id ?? null });
         if (!result.success) {
             if (result.code === "not_found") {
                 return res.status(404).json({ error: result.reason || "Job not found." });

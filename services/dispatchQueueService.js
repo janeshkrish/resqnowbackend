@@ -4,6 +4,7 @@ import { getPool } from "../db.js";
 import { jobDispatchService } from "./jobDispatchService.js";
 import { socketService } from "./socket.js";
 import { isTowingServiceType } from "./towingServiceType.js";
+import { createPricedDispatchOffer, dispatchOfferPricingFields } from "./dispatchOfferService.js";
 import { buildTechnicianJobDetails } from "./technicianJobDetails.js";
 
 export const DISPATCH_QUEUE_NAME = "job-dispatch-queue";
@@ -184,6 +185,7 @@ async function fetchRequestRow(pool, jobId) {
         sr.estimated_price,
         sr.final_price,
         sr.contact_name,
+        sr.created_at, sr.scheduled_time, sr.payment_method, sr.applied_discount_percent, sr.applied_discount_amount,
         sr.location_lat,
         sr.location_lng,
         COALESCE(sr.amount, sr.service_charge, 0) AS amount,
@@ -212,7 +214,7 @@ async function expireStaleOffers(pool, jobId) {
          expires_at = COALESCE(expires_at, NOW())
      WHERE service_request_id = ?
        AND status = 'pending'
-       AND sent_at <= ?`,
+       AND (sent_at <= ? OR pricing_snapshot IS NULL)`,
     [jobId, expiryCutoff]
   );
 }
@@ -223,6 +225,7 @@ async function getActivePendingOffers(pool, jobId) {
      FROM dispatch_offers
      WHERE service_request_id = ?
        AND status = 'pending'
+       AND pricing_snapshot IS NOT NULL
        AND (expires_at IS NULL OR expires_at > NOW())`,
     [jobId]
   );
@@ -235,7 +238,8 @@ async function getAttemptedTechnicianSet(pool, jobId, explicitAttempted) {
     `SELECT technician_id
      FROM dispatch_offers
      WHERE service_request_id = ?
-       AND status IN ('accepted', 'rejected', 'expired')`,
+       AND status IN ('accepted', 'rejected', 'expired')
+       AND pricing_snapshot IS NOT NULL`,
     [jobId]
   );
   for (const row of rows || []) {
@@ -245,7 +249,7 @@ async function getAttemptedTechnicianSet(pool, jobId, explicitAttempted) {
   return attempted;
 }
 
-function buildOfferPayload(requestRow, candidateTech) {
+export function buildOfferPayload(requestRow, candidateTech, offer) {
   const distanceText = String(candidateTech?.distanceText || "Nearby").trim() || "Nearby";
   const etaText = String(candidateTech?.etaText || "").trim();
   const dropLat = Number(requestRow.drop_latitude);
@@ -292,47 +296,13 @@ function buildOfferPayload(requestRow, candidateTech) {
     ...towingFields,
     ...buildTechnicianJobDetails(requestRow),
     description: requestRow.description || null,
-    amount: Number(requestRow.amount || 0),
-    priceAmount: Number(requestRow.amount || 0),
+    ...dispatchOfferPricingFields(offer),
     distance: distanceText,
     locationDistance: distanceText,
     eta: etaText || null,
     expiresIn: Math.ceil(DISPATCH_OFFER_TIMEOUT_MS / 1000),
     dispatchSource: "redis_queue",
   };
-}
-
-async function upsertPendingOffer(pool, jobId, technicianId) {
-  const expiresAt = new Date(Date.now() + DISPATCH_OFFER_TIMEOUT_MS);
-
-  const [existingRows] = await pool.query(
-    `SELECT id
-     FROM dispatch_offers
-     WHERE service_request_id = ?
-       AND technician_id = ?
-     ORDER BY id DESC
-     LIMIT 1`,
-    [jobId, technicianId]
-  );
-
-  const existingId = existingRows?.[0]?.id;
-  if (existingId) {
-    await pool.query(
-      `UPDATE dispatch_offers
-       SET status = 'pending',
-           sent_at = NOW(),
-           expires_at = ?
-       WHERE id = ?`,
-      [expiresAt, existingId]
-    );
-    return;
-  }
-
-  await pool.query(
-    `INSERT INTO dispatch_offers (service_request_id, technician_id, status, sent_at, expires_at)
-     VALUES (?, ?, 'pending', NOW(), ?)`,
-    [jobId, technicianId, expiresAt]
-  );
 }
 
 async function scheduleDispatchTimeout(payload) {
@@ -349,7 +319,7 @@ async function requeueJob(payload, delayMs = DISPATCH_RETRY_DELAY_MS) {
   return enqueueDispatchJob(payload, { delayMs });
 }
 
-async function processNewDispatchJob(data) {
+export async function processNewDispatchJob(data, options = {}) {
   const payload = buildQueuePayload(data);
   const jobId = payload.jobId;
   if (!jobId) return { skipped: true, reason: "invalid_job_id" };
@@ -360,7 +330,7 @@ async function processNewDispatchJob(data) {
     `[Dispatch Queue] Processing new-job requestId=${jobId} retryCount=${payload.retryCount} source=${payload.source}`
   );
 
-  const pool = await getPool();
+  const pool = options.pool || await getPool();
   const requestRow = await fetchRequestRow(pool, jobId);
   if (!requestRow) return { skipped: true, reason: "request_not_found" };
   if (!isPendingUnassignedRequest(requestRow)) {
@@ -374,7 +344,7 @@ async function processNewDispatchJob(data) {
   }
 
   const attemptedSet = await getAttemptedTechnicianSet(pool, jobId, payload.attemptedTechnicianIds);
-  const candidates = await jobDispatchService.findTopTechnicians({
+  const candidates = await (options.findTechnicians || jobDispatchService.findTopTechnicians.bind(jobDispatchService))({
     id: requestRow.id,
     service_type: requestRow.service_type,
     vehicle_type: requestRow.vehicle_type,
@@ -397,7 +367,7 @@ async function processNewDispatchJob(data) {
     `[Dispatch Queue] Technician candidates requestId=${jobId} count=${Array.isArray(candidates) ? candidates.length : 0}`
   );
 
-  const nextCandidate = (candidates || []).find((candidate) => {
+  let nextCandidate = (candidates || []).find((candidate) => {
     const candidateId = String(candidate?.id || "").trim();
     return candidateId && !attemptedSet.has(candidateId);
   });
@@ -406,7 +376,7 @@ async function processNewDispatchJob(data) {
     const shouldResetAttempts = (candidates || []).length > 0 && attemptedSet.size >= (candidates || []).length;
     const nextAttempted = shouldResetAttempts ? [] : Array.from(attemptedSet);
 
-    await requeueJob(
+    await (options.requeue || requeueJob)(
       {
         ...payload,
         attemptedTechnicianIds: nextAttempted,
@@ -423,27 +393,37 @@ async function processNewDispatchJob(data) {
 
   const technicianId = asPositiveInt(nextCandidate.id);
   if (!technicianId) {
-    await requeueJob({ ...payload, retryCount: payload.retryCount + 1 }, DISPATCH_RETRY_DELAY_MS);
+    await (options.requeue || requeueJob)({ ...payload, retryCount: payload.retryCount + 1 }, DISPATCH_RETRY_DELAY_MS);
     return { queued: true, reason: "invalid_candidate_id" };
   }
 
-  await upsertPendingOffer(pool, jobId, technicianId);
-  const offerPayload = buildOfferPayload(requestRow, nextCandidate);
+  let offer;
+  try { offer = await createPricedDispatchOffer(pool, requestRow, nextCandidate, { timeoutMs: DISPATCH_OFFER_TIMEOUT_MS,
+    ...(options.estimateEarning ? { estimateEarning: options.estimateEarning } : {}) }); }
+  catch (error) {
+    if (error.code === "offer_unavailable") return { skipped: true, reason: error.code };
+    if (error.code !== "pricing_unavailable") throw error;
+    await (options.requeue || requeueJob)({ ...payload, attemptedTechnicianIds: [...attemptedSet, String(technicianId)],
+      retryCount: payload.retryCount + 1, source: "unpriced_candidate" });
+    return { queued: true, reason: "pricing_unavailable" };
+  }
+  const offerPayload = buildOfferPayload(requestRow, nextCandidate, offer);
+  const sockets = options.sockets || socketService;
   console.log(
     `[Dispatch Queue] Dispatching JOB_ALERT requestId=${jobId} technicianId=${technicianId} retryCount=${payload.retryCount}`
   );
 
-  if (socketService.io) {
-    socketService.io.to(`technician_${technicianId}`).emit("JOB_ALERT", offerPayload);
-    socketService.io.to(`technician_${technicianId}`).emit("job:list_update", {
+  if (sockets.io) {
+    sockets.io.to(`technician_${technicianId}`).emit("JOB_ALERT", offerPayload);
+    sockets.io.to(`technician_${technicianId}`).emit("job:list_update", {
       requestId: String(jobId),
       action: "created",
     });
   }
-  socketService.notifyTechnician(technicianId, "job_offer", offerPayload);
+  sockets.notifyTechnician(technicianId, "job_offer", offerPayload);
 
   const nextAttempted = [...new Set([...Array.from(attemptedSet), String(technicianId)])];
-  await scheduleDispatchTimeout({
+  await (options.scheduleTimeout || scheduleDispatchTimeout)({
     jobId,
     technicianId,
     retryCount: payload.retryCount + 1,
@@ -579,6 +559,7 @@ export async function recoverRecentPendingDispatchJobs(options = {}) {
          FROM dispatch_offers offer
          WHERE offer.service_request_id = sr.id
            AND LOWER(COALESCE(offer.status, '')) = 'pending'
+           AND offer.pricing_snapshot IS NOT NULL
            AND (offer.expires_at IS NULL OR offer.expires_at > NOW())
        )
      ORDER BY sr.created_at ASC

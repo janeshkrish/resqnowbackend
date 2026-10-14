@@ -321,6 +321,7 @@ CREATE TABLE IF NOT EXISTS service_requests (
   route_distance_km DECIMAL(10, 2),
   estimated_duration INT,
   route_metadata_json JSON,
+  pricing_snapshot JSON,
   pricing_breakdown_json JSON,
   estimated_price DECIMAL(10, 2),
   final_price DECIMAL(10, 2),
@@ -344,6 +345,7 @@ CREATE TABLE IF NOT EXISTS service_requests (
 export async function ensureServiceRequestsTable() {
   const p = await getPool();
   await p.execute(SERVICE_REQUESTS_TABLE_SQL);
+  await ensureDispatchPricingSnapshotColumn(p, "service_requests");
 }
 
 const REQUEST_TIMELINE_TABLE_SQL = `
@@ -460,6 +462,7 @@ CREATE TABLE IF NOT EXISTS dispatch_offers (
   service_request_id INT NOT NULL,
   technician_id INT NOT NULL,
   status ENUM('pending', 'accepted', 'rejected', 'expired') DEFAULT 'pending',
+  pricing_snapshot JSON,
   sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   expires_at TIMESTAMP,
   FOREIGN KEY (service_request_id) REFERENCES service_requests(id),
@@ -470,6 +473,7 @@ CREATE TABLE IF NOT EXISTS dispatch_offers (
 export async function ensureDispatchOffersTable() {
   const p = await getPool();
   await p.execute(DISPATCH_OFFERS_TABLE_SQL);
+  await ensureDispatchPricingSnapshotColumn(p, "dispatch_offers");
   await addIndexIfNotExists(p, "dispatch_offers", "idx_dispatch_offers_request_status", "service_request_id, status");
   await addIndexIfNotExists(p, "dispatch_offers", "idx_dispatch_offers_request_tech", "service_request_id, technician_id");
   await addIndexIfNotExists(p, "dispatch_offers", "idx_dispatch_offers_tech_status", "technician_id, status");
@@ -678,6 +682,15 @@ async function addColumnIfNotExists(pool, table, columnDef) {
     if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060 && !err.message?.includes("Duplicate column")) {
       console.log(`Note: Could not add column ${columnDef} to ${table}, might already exist. Error: ${err.message}`);
     }
+  }
+}
+
+async function ensureDispatchPricingSnapshotColumn(poolLike, tableName) {
+  await addColumnIfNotExists(poolLike, tableName, "pricing_snapshot JSON DEFAULT NULL");
+  // These columns are required by dispatch/acceptance queries. Do not let an ALTER
+  // permission failure silently start a backend that cannot save agreed prices.
+  if (!(await columnExists(poolLike, tableName, "pricing_snapshot"))) {
+    throw new Error(`Missing ${tableName}.pricing_snapshot. Apply the dispatch pricing migration before deployment.`);
   }
 }
 
@@ -1629,13 +1642,13 @@ export async function ensureTechnicianServicePricingTable() {
 
 export async function seedInitialServiceConfig() {
   const p = await getPool();
-  
+
   // Seed Vehicle Categories
   const [catRows] = await p.query("SELECT COUNT(*) as count FROM vehicle_category_master");
   if (catRows[0].count === 0) {
     await p.query("INSERT INTO vehicle_category_master (category_name) VALUES ('Bike'), ('Car'), ('Commercial'), ('EV')");
   }
-  
+
   // Seed Services
   const [svcRows] = await p.query("SELECT COUNT(*) as count FROM service_master");
   if (svcRows[0].count === 0) {
@@ -1664,7 +1677,7 @@ export async function seedInitialServiceConfig() {
       if (cat.category_name === 'Car') subcats = ['Hatchback', 'Sedan', 'SUV', 'Luxury'];
       if (cat.category_name === 'Commercial') subcats = ['Mini Truck', 'Truck', 'Bus', 'Trailer'];
       if (cat.category_name === 'EV') subcats = ['EV Bike', 'EV Car', 'EV Commercial'];
-      
+
       for (const sc of subcats) {
         await p.execute("INSERT INTO vehicle_subcategory_master (vehicle_category_id, subcategory_name) VALUES (?, ?)", [cat.id, sc]);
       }
@@ -1694,7 +1707,7 @@ export async function seedInitialServiceConfig() {
        else if (s.service_name === 'Lockout Assistance') fields = [{k: 'unlock_charge', l: 'Unlock Charge'}, {k: 'visit_charge', l: 'Visit Charge'}];
        else if (s.service_name === 'EV Portable Charger') fields = [{k: 'charging_support_fee', l: 'Charging Support Fee'}, {k: 'visit_charge', l: 'Visit Charge'}];
        else if (s.service_name === 'Winching Services') fields = [{k: 'recovery_fee', l: 'Recovery Fee'}, {k: 'visit_charge', l: 'Visit Charge'}];
-       
+
        for (const f of fields) {
          await p.execute("INSERT INTO service_pricing_field_master (service_id, field_key, field_label, field_type) VALUES (?, ?, ?, 'Number')", [s.id, f.k, f.l]);
        }

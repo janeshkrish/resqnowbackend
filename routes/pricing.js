@@ -5,6 +5,7 @@ import { getPlatformPricingConfig } from "../services/platformPricing.js";
 import { fetchTechnicianPricingDefinition } from "../services/technicianPricingStore.js";
 import { verifyUser } from "../middleware/auth.js";
 import { buildTowingQuote, normalizeTowingQuoteError } from "../services/towingQuoteService.js";
+import { customerPricingView } from "../services/dispatchPricingService.js";
 
 const router = Router();
 
@@ -89,21 +90,22 @@ router.post("/calculate", async (req, res) => {
   }
 });
 
-router.post("/towing-estimate", verifyUser, towingEstimateLimiter, async (req, res) => {
+export async function handleTowingEstimate(req, res, { buildQuote = buildTowingQuote } = {}) {
   try {
-    const quote = await buildTowingQuote({
+    const quote = await buildQuote({
       ...req.body,
       paymentMode: req.body?.paymentMode || req.body?.payment_mode || "upi",
     });
 
+    const routeQuote = customerPricingView({ status: 'pending', towingQuote: quote }).towingQuote;
     return res.json({
       success: true,
-      quote,
+      quote: routeQuote,
       distanceKm: quote.distance_km,
       estimatedDuration: quote.estimated_duration,
       routeMetadata: quote.route_metadata,
-      pricingBreakdown: quote.pricing_breakdown,
-      finalEstimatedPrice: quote.final_estimated_price,
+      pricing_status: 'pending',
+      pricing_finalized: false,
     });
   } catch (err) {
     if (err?.statusCode && err.statusCode < 500) {
@@ -115,6 +117,7 @@ router.post("/towing-estimate", verifyUser, towingEstimateLimiter, async (req, r
     const normalized = normalizeTowingQuoteError(err);
     return res.status(normalized.statusCode).json(normalized.payload);
   }
-});
+}
+router.post("/towing-estimate", verifyUser, towingEstimateLimiter, (req, res) => handleTowingEstimate(req, res));
 
 export default router;

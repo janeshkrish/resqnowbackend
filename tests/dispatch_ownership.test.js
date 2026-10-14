@@ -111,7 +111,11 @@ test('release does not advertise an unapproved technician as available', async (
 function acceptanceDatabase({ pointer = null, owner = null, status = 'pending', offerStatus = 'pending', expired = false, jobOverrides = {}, fleets = [] } = {}) {
   const db = database({ pointer, available: pointer ? 0 : 1 });
   const job = { id: 101, user_id: 41, technician_id: owner, status, amount: 300, service_type: 'car-flat-tire', ...jobOverrides };
-  const offer = offerStatus ? { id: 1, technician_id: 7, status: offerStatus, expired: expired ? 1 : 0 } : null;
+  const offer = offerStatus ? { id: 1, technician_id: 7, status: offerStatus, expired: expired ? 1 : 0,
+    pricing_snapshot: { version: 1, request_id: 101, technician_id: 7, currency: 'INR', technician_earning: 300,
+      customer_base_amount: 300, customer_total_amount: 330, platform_fee: 30, payment_fee: 0, discount_amount: 0,
+      payment_mode: 'cash', pricing_breakdown: { tax_percent: 0, tax_amount: 0 },
+      earnings_source: 'technician_pricing', calculated_at: '2026-10-14T04:00:00.000Z' } } : null;
   const notifications = [];
   let commits = 0;
   const pool = {
@@ -146,7 +150,7 @@ function acceptanceDatabase({ pointer = null, owner = null, status = 'pending', 
     notifyUser: (...args) => notifications.push(args),
   };
   return { ...db, job, offer, pool, notifications, fleets, committed: () => commits,
-    accept: () => jobDispatchService.acceptJob(7, 101, { pool, sockets, estimateEarning: async () => ({ amount: 300 }) }) };
+    accept: () => jobDispatchService.acceptJob(7, 101, { pool, sockets, offerId: 1, estimateEarning: async () => ({ amount: 300 }) }) };
 }
 
 test('acceptance returns a busy conflict without assigning a second request', async () => {
