@@ -1175,7 +1175,7 @@ router.post("/register", async (req, res) => {
       );
 
       // Use SocketService to broadcast to admins (if they are listening on a channel)
-      socketService.broadcast("admin:notification", { title, message, created_at: new Date() });
+      socketService.notifyAdmins("admin:notification", { title, message, created_at: new Date() });
     } catch { }
 
     if (normalizedEmail) await sendEventEmail("TECHNICIAN_APPLICATION_SUBMITTED", {
@@ -3101,7 +3101,7 @@ router.patch("/:id/approve", verifyAdmin, async (req, res) => {
         status: "approved",
       });
     }
-    socketService.broadcast("admin:technician_audit_update", {
+    socketService.notifyAdmins("admin:technician_audit_update", {
       technicianId: id,
       action: "approved",
       adminEmail: req.adminEmail || "unknown-admin",
@@ -3134,7 +3134,7 @@ router.patch("/:id/reject", verifyAdmin, async (req, res) => {
       VALUES (?, 'rejected', ?, 'rejected', ?, ?)`,
       [id, previousStatus, reason || "Rejected by admin", req.adminEmail || "unknown-admin"]
     );
-    socketService.broadcast("admin:technician_audit_update", {
+    socketService.notifyAdmins("admin:technician_audit_update", {
       technicianId: id,
       action: "rejected",
       adminEmail: req.adminEmail || "unknown-admin",

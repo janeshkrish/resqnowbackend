@@ -662,7 +662,7 @@ async function persistAlertsForJob(pool, job, alerts, existingAlerts, resolveQue
     );
 
     const alertId = Number(insertResult?.insertId || 0);
-    socketService.broadcast("admin:command_center_alert", {
+    socketService.notifyAdmins("admin:command_center_alert", {
       id: alertId || undefined,
       requestId: Number(job.request_id),
       technicianId: Number(job.technician_id),
@@ -703,7 +703,7 @@ async function resolveAlertsById(pool, resolveQueue) {
   );
 
   resolveQueue.forEach((entry) => {
-    socketService.broadcast("admin:command_center_alert_resolved", {
+    socketService.notifyAdmins("admin:command_center_alert_resolved", {
       requestId: entry.requestId,
       reasonCode: entry.reasonCode,
       at: new Date().toISOString(),
@@ -755,7 +755,7 @@ async function executeOperationsCommandCenterCycle({ trigger = "scheduler" } = {
   const alertsResolved = await resolveAlertsById(pool, resolveQueue);
 
   monitorState.lastRunAt = new Date().toISOString();
-  socketService.broadcast("admin:command_center_cycle", {
+  socketService.notifyAdmins("admin:command_center_cycle", {
     at: monitorState.lastRunAt,
     jobsScanned: jobs.length,
     alertsDetected,
@@ -1129,7 +1129,7 @@ export async function reassignMonitoredRequest({ requestId, radiusKm = 35, maxCa
   }
 
   await jobDispatchService.dispatchJob(requestRow, topCandidates);
-  socketService.broadcast("admin:command_center_reassign", {
+  socketService.notifyAdmins("admin:command_center_reassign", {
     requestId: Number(requestRow.id),
     candidates: topCandidates.map((candidate) => ({
       technicianId: Number(candidate.id),

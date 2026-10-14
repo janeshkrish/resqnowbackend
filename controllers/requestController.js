@@ -473,8 +473,8 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
     }
     socketService.notifyTechnician(technicianId, "job:assigned", assignmentPayload);
     socketService.notifyUser(requestRow.user_id, "job:status_update", assignmentPayload);
-    socketService.broadcast("admin:request_status_updated", assignmentPayload);
-    socketService.broadcast("admin:technician_update", assignmentPayload);
+    socketService.notifyAdmins("admin:request_status_updated", assignmentPayload);
+    socketService.notifyAdmins("admin:technician_update", assignmentPayload);
 
     return res.json({
       success: true,
@@ -529,7 +529,7 @@ export async function escalateRequest(req, res) {
       actorId: resolveAdminId(req),
       metadata: { radiusKm },
     });
-    socketService.broadcast("admin:request_status_updated", {
+    socketService.notifyAdmins("admin:request_status_updated", {
       requestId,
       status: requestRow.status,
       escalated: true,
@@ -663,19 +663,19 @@ export async function closeRequest(req, res) {
     }
 
     // Keep existing admin pages in sync without manual refresh.
-    socketService.broadcast("admin:request_status_updated", {
+    socketService.notifyAdmins("admin:request_status_updated", {
       requestId,
       status: closureResult.status,
       previousStatus: closureResult.previousStatus,
       at: new Date().toISOString(),
     });
-    socketService.broadcast("admin:payment_update", {
+    socketService.notifyAdmins("admin:payment_update", {
       requestId,
       status: closureResult.status,
       paymentRowsUpdated: closureResult.paymentRowsUpdated,
       at: new Date().toISOString(),
     });
-    socketService.broadcast("admin:analytics_update", {
+    socketService.notifyAdmins("admin:analytics_update", {
       requestId,
       status: closureResult.status,
       at: new Date().toISOString(),
@@ -806,7 +806,7 @@ export async function overrideRequestPricing(req, res) {
         pricingBreakdown: mergedBreakdown,
       });
     }
-    socketService.broadcast("admin:request_pricing_updated", {
+    socketService.notifyAdmins("admin:request_pricing_updated", {
       requestId,
       amount: baseAmount,
       finalPrice,

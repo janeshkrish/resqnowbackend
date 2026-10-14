@@ -5,6 +5,8 @@ import { getPool } from "../db.js";
 import { notificationService } from "./notificationService.js";
 import { logLiveTrackingDiagnostic } from './liveTrackingDiagnostics.js';
 
+export const ADMIN_ROOM = 'admins';
+
 function getJwtSecret() {
   const secret = String(process.env.JWT_SECRET || '').trim();
   if (!secret) throw new SocketAuthError('JWT_SECRET is not configured.');
@@ -116,6 +118,8 @@ export class SocketService {
 
     this.io.on("connection", (socket) => {
       console.log(`[Socket] connected ${socket.id}`);
+      // Admin screens get admin events; customers' and technicians' apps never do.
+      if (socket.data.identity?.role === 'admin') socket.join(ADMIN_ROOM);
       logLiveTrackingDiagnostic('[RT-BACKEND-IN]', 'socket_connected', {
         socketId: socket.id,
         role: socket.data.identity?.role || null,
@@ -308,6 +312,12 @@ export class SocketService {
   broadcast(event, data) {
     if (!this.io) return;
     this.io.emit(event, data);
+  }
+
+  /** Admin-only events (request changes, payments, alerts): sent to signed-in admins only. */
+  notifyAdmins(event, data) {
+    if (!this.io) return;
+    this.io.to(ADMIN_ROOM).emit(event, data);
   }
 }
 

@@ -201,7 +201,7 @@ async function broadcastActivityEvent({ eventType, technicianId, reason = null, 
     }
   }
 
-  socketService.broadcast("admin:technician_activity_update", {
+  socketService.notifyAdmins("admin:technician_activity_update", {
     eventType,
     technicianId: parsedTechnicianId,
     reason: reason || null,
@@ -589,7 +589,7 @@ async function dispatchTechnicianLoginReminder(
     [parsedTechnicianId]
   );
 
-  socketService.broadcast("admin:technician_inactivity_alert", payload);
+  socketService.notifyAdmins("admin:technician_inactivity_alert", payload);
   return payload;
 }
 
@@ -755,7 +755,7 @@ async function executeMonitorCycle({ trigger = "scheduler" } = {}) {
     at: new Date().toISOString(),
   };
 
-  socketService.broadcast("admin:technician_activity_cycle", result);
+  socketService.notifyAdmins("admin:technician_activity_cycle", result);
   return result;
 }
 

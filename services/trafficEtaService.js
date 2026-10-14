@@ -381,5 +381,15 @@ export function createTrafficEtaService({
     return { eta: isAttachable(cached, destination, now()) ? cached : null, refreshed: false };
   }
 
-  return { enabled, config, getTrafficAwareEta, peek, resolve, clear };
+  /** The shared cached ETA for a request, read without starting a new lookup (admin screens). */
+  async function readCachedEta(requestId) {
+    if (!enabled) return null;
+    try {
+      return await readCached(String(requestId));
+    } catch {
+      return null;
+    }
+  }
+
+  return { enabled, config, getTrafficAwareEta, peek, resolve, clear, readCachedEta };
 }

@@ -81,25 +81,25 @@ export async function adminExtendedManualCloseRequest({ requestId, status, reaso
     });
   }
 
-  socketService.broadcast("admin:dispatch_override", {
+  socketService.notifyAdmins("admin:dispatch_override", {
     requestId: parsedRequestId,
     status: result.status,
     reason: reason || null,
     at: new Date().toISOString(),
   });
-  socketService.broadcast("admin:request_status_updated", {
+  socketService.notifyAdmins("admin:request_status_updated", {
     requestId: parsedRequestId,
     status: result.status,
     previousStatus: result.previousStatus,
     at: new Date().toISOString(),
   });
-  socketService.broadcast("admin:payment_update", {
+  socketService.notifyAdmins("admin:payment_update", {
     requestId: parsedRequestId,
     status: result.status,
     paymentRowsUpdated: result.paymentRowsUpdated,
     at: new Date().toISOString(),
   });
-  socketService.broadcast("admin:analytics_update", {
+  socketService.notifyAdmins("admin:analytics_update", {
     requestId: parsedRequestId,
     status: result.status,
     at: new Date().toISOString(),

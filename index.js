@@ -8,6 +8,7 @@ import path from "path";
 
 import techniciansRouter from "./routes/technicians.js";
 import adminRouter from "./routes/admin.js";
+import adminMonitorRouter from "./routes/adminMonitor.js";
 import usersRouter from "./routes/users.js";
 import authRouter from "./routes/auth.js";
 import serviceRequestsRouter from "./routes/service_requests.js";
@@ -39,6 +40,7 @@ import {
 import { validateEnvironmentOrThrow, logEnvironmentSummary } from "./config/envValidation.js";
 import { socketService } from "./services/socket.js";
 import { notificationService } from "./services/notificationService.js";
+import { enableRequestEvents } from "./services/requestEvents.js";
 import { trafficEtaReadiness } from "./services/trafficEtaService.js";
 import {
   closeLiveTrackingRuntime,
@@ -264,6 +266,7 @@ function createApp() {
   // Route mounts
   app.use("/api/technicians", techniciansRouter);
   app.use("/api/technician", techniciansRouter);
+  app.use("/api/admin/monitor", adminMonitorRouter);
   app.use("/api/admin", adminRouter);
   app.use("/api/users", usersRouter);
   app.use("/api/auth", authRouter);
@@ -328,6 +331,7 @@ const liveTrackingPublisher = createLiveTrackingPublisher({
   publishLocation: (location) => socketService.publishTrackingLocation(location),
   trafficEta: liveTrackingRuntime.trafficEta,
 });
+enableRequestEvents();
 socketService.init(httpServer, {
   trackingIngestion: liveTrackingRuntime.ingestion,
   socketAdapter: liveTrackingRuntime.socketAdapter,

@@ -10,6 +10,7 @@ import {
 import { markTechnicianReserved, JobOwnershipError, isActiveJobStatus } from "./technicianStateService.js";
 import { estimateTechnicianEarningForRequest } from "./technicianEarningsService.js";
 import { getRoute } from "./routeService.js";
+import { recordAcceptedEvent } from "./requestEvents.js";
 import { isTowingServiceType } from "./towingServiceType.js";
 import { buildTechnicianJobDetails } from "./technicianJobDetails.js";
 import { requiredTowTruckType, evaluateTowTruckCapability, loadTechnicianFleetVehicles } from "./towTruckCapability.js";
@@ -643,6 +644,12 @@ export const jobDispatchService = {
         }
 
         if (shouldNotify) {
+            void recordAcceptedEvent({
+                requestId,
+                technicianId,
+                from: { lat: Number(tech?.latitude), lng: Number(tech?.longitude) },
+                to: { lat: Number(sourceJob?.location_lat), lng: Number(sourceJob?.location_lng) },
+            }, { getRoute });
             try {
                 const [userRows] = await pool.query(
                     "SELECT full_name FROM users WHERE id = ? LIMIT 1",

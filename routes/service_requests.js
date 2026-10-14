@@ -47,6 +47,7 @@ import {
     JobOwnershipError
 } from "../services/technicianStateService.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
+import { recordRequestEvent, recordStatusChange } from "../services/requestEvents.js";
 
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
 const RAZORPAY_KEY_SECRET = String(process.env.RAZORPAY_KEY_SECRET || "");
@@ -558,6 +559,7 @@ router.post("/", verifyUser, async (req, res) => {
             throw error;
         }
         const newRequestId = result.insertId;
+        void recordRequestEvent({ requestId: newRequestId, eventType: "created", status: initialStatus, actorType: "user", actorId: userId, metadata: { serviceType: canonicalServiceType, directTechnicianId: directTechnicianId || null } });
         console.log(`[Create Job] Created Request #${newRequestId}`);
 
         const [userRows] = await pool.query(
@@ -1212,6 +1214,11 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
         await conn.commit();
         committed = true;
         afterCommit.forEach(notify => notify());
+        if (normalized === 'rejected') {
+            void recordRequestEvent({ requestId, eventType: 'declined', status: newStatus, actorType: 'technician', actorId: technicianId, metadata: { technicianId: String(technicianId), nextTechnicianId: newTechId ? String(newTechId) : null } });
+        } else {
+            void recordStatusChange({ requestId, status: newStatus, previousStatus: request.status, actorType: 'technician', actorId: technicianId, metadata: { technicianId: String(technicianId) } });
+        }
 
         // Notify Customer via Socket
         if (request.user_id) {
@@ -1235,7 +1242,7 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
             if (towingEvent) {
                 socketService.notifyUser(request.user_id, towingEvent, statusPayload);
                 socketService.notifyTechnician(newTechId, towingEvent, statusPayload);
-                socketService.broadcast(`admin:${towingEvent}`, statusPayload);
+                socketService.notifyAdmins(`admin:${towingEvent}`, statusPayload);
             }
         }
 
@@ -1372,6 +1379,7 @@ export async function handleCustomerCancel(req, res, deps = {}) {
             await conn.commit();
 
             console.log('REQUEST STATUS UPDATED:', { requestId, status: 'cancelled' });
+            void recordRequestEvent({ requestId, eventType: 'cancelled', status: 'cancelled', actorType: 'user', actorId: userId, description: reason || null, metadata: { previousStatus: current.status, technicianId: current.technician_id ? String(current.technician_id) : null } });
 
             if (current.technician_id) {
                 sockets.notifyTechnician(current.technician_id, 'job:status_update', { requestId, status: 'cancelled', reason: reason || "User cancelled" });

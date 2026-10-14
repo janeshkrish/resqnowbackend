@@ -25,6 +25,7 @@ import {
 } from "../models/marketplaceConstants.js";
 import { isTowingServiceType } from "../services/towingServiceType.js";
 import { estimateTechnicianEarningForRequest } from "../services/technicianEarningsService.js";
+import { recordRequestEvent } from "../services/requestEvents.js";
 
 const router = express.Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -836,7 +837,8 @@ async function processFinalizedServicePaymentNotifications(finalized, { paymentM
         }
     }
 
-    socketService.broadcast("admin:payment_update", {
+    void recordRequestEvent({ requestId: finalized.requestId, eventType: "paid", status, actorType: "user", actorId: null, metadata: { paymentMethod } });
+    socketService.notifyAdmins("admin:payment_update", {
         requestId: finalized.requestId,
         paymentMethod,
         status,
@@ -1749,7 +1751,8 @@ router.post('/cash', verifyUser, async (req, res) => {
                 technicianAmount: techAmount,
                 couponCode: coupon.appliedCode || null
             });
-            socketService.broadcast("admin:payment_update", {
+            void recordRequestEvent({ requestId, eventType: "paid", status: paidRequestStatus, actorType: "user", actorId: userId, metadata: { paymentMethod: "cash", totalAmount: breakdown.totalAmount } });
+            socketService.notifyAdmins("admin:payment_update", {
                 requestId,
                 paymentMethod: "cash",
                 status: paidRequestStatus,
