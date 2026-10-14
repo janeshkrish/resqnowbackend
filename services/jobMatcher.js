@@ -1,10 +1,14 @@
 import * as db from "../db.js";
 import { jobDispatchService } from "./jobDispatchService.js";
+import { loadTechnicianFleetVehicles } from "./towTruckCapability.js";
+import { isTowingServiceType } from "./towingServiceType.js";
 
 export const jobMatcher = {
-    async findBestMatch(jobRequest, excludeTechnicianIds = []) {
+    async findBestMatch(jobRequest, excludeTechnicianIds = [], { pool: suppliedPool } = {}) {
         try {
-            const rows = await db.query("SELECT * FROM technicians");
+            const pool = suppliedPool || await db.getPool();
+            let [rows] = await pool.query("SELECT * FROM technicians");
+            if (isTowingServiceType(jobRequest.service_type)) rows = await loadTechnicianFleetVehicles(pool, rows);
             const { analysis } = jobDispatchService.analyzeTechnicians(jobRequest, rows, null);
             const excluded = new Set((excludeTechnicianIds || []).map((id) => String(id)));
 

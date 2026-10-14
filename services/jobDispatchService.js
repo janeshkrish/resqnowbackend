@@ -12,6 +12,7 @@ import { estimateTechnicianEarningForRequest } from "./technicianEarningsService
 import { getRoute } from "./routeService.js";
 import { isTowingServiceType } from "./towingServiceType.js";
 import { buildTechnicianJobDetails } from "./technicianJobDetails.js";
+import { requiredTowTruckType, evaluateTowTruckCapability, loadTechnicianFleetVehicles } from "./towTruckCapability.js";
 
 
 /**
@@ -103,7 +104,7 @@ export const jobDispatchService = {
         const reqType = canonicalizeDomain(reqRawType);
         const reqVehicle = canonicalizeVehicleFamily(jobRequest.vehicle_type);
         const globalRadius = Number.isFinite(Number(radiusKm)) ? Number(radiusKm) : null;
-        return { userLat, userLng, reqType, reqVehicle, globalRadius };
+        return { userLat, userLng, reqType, reqVehicle, globalRadius, requiredTowTruckType: requiredTowTruckType(jobRequest) };
     },
 
     evaluateTechnicianForRequest(tech, criteria) {
@@ -142,6 +143,11 @@ export const jobDispatchService = {
         if (techVehicles.length === 0) reasons.push("vehicle_profile_missing");
         if (techVehicles.length > 0 && !techVehicles.some((t) => canonicalizeVehicleFamily(t) === reqVehicle)) {
             reasons.push("vehicle_mismatch");
+        }
+
+        if (reqType === "towing") {
+            const capability = evaluateTowTruckCapability(criteria.requiredTowTruckType, tech.fleet_vehicles);
+            if (capability.code) reasons.push(capability.code);
         }
 
         let distKm = null;
@@ -196,7 +202,7 @@ export const jobDispatchService = {
      * 3. Sort by ETA (fastest first).
      * 4. Return top candidates.
      */
-    async findTopTechnicians(jobRequest, radiusKm = null) {
+    async findTopTechnicians(jobRequest, radiusKm = null, { pool: suppliedPool, routeProvider = getRoute } = {}) {
         console.log(`[Dispatch] Finding technicians for Job #${jobRequest.id} (Radius: ${radiusKm}km)`);
         const { userLat, userLng } = this.buildRequestCriteria(jobRequest, radiusKm);
 
@@ -207,7 +213,9 @@ export const jobDispatchService = {
 
         try {
             // 1. Get technicians from DB and analyze with strict eligibility rules
-            const rows = await db.query("SELECT * FROM technicians");
+            const pool = suppliedPool || await db.getPool();
+            let [rows] = await pool.query("SELECT * FROM technicians");
+            if (isTowingServiceType(jobRequest.service_type)) rows = await loadTechnicianFleetVehicles(pool, rows);
             const { criteria, analysis, reasonCounts } = this.analyzeTechnicians(jobRequest, rows, radiusKm);
 
             if (!criteria.reqType || !criteria.reqVehicle) {
@@ -249,7 +257,7 @@ export const jobDispatchService = {
                 // Fetch ETA for each candidate in parallel
                 await Promise.all(matrixCandidates.map(async (tech) => {
                     try {
-                        const route = await getRoute({
+                        const route = await routeProvider({
                             points: [
                                 { lat: tech.latitude, lng: tech.longitude },
                                 { lat: userLat, lng: userLng },
@@ -504,7 +512,7 @@ export const jobDispatchService = {
                     return { success: false, code: expired ? "offer_expired" : "offer_unavailable", reason: expired ? "This job offer has expired." : "This job offer is no longer available." };
                 }
             }
-            await markTechnicianReserved(conn, technicianId, requestId, { alreadyOwned: sameTechnician });
+            await markTechnicianReserved(conn, technicianId, requestId, { alreadyOwned: sameTechnician, request: sourceJob });
             const earningEstimate = await estimateEarning({
                 request: sourceJob,
                 technician: tech,

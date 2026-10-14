@@ -4,6 +4,8 @@ import { jobDispatchService } from "./jobDispatchService.js";
 import { releaseTechnicianAvailability } from "./technicianStateService.js";
 import { MonitoringWorkerQueue } from "./monitoringWorkerQueue.js";
 import { getRoute } from "./routeService.js";
+import { loadTechnicianFleetVehicles } from "./towTruckCapability.js";
+import { isTowingServiceType } from "./towingServiceType.js";
 
 const ACTIVE_MONITORING_STATUSES = new Set([
   "assigned",
@@ -1045,7 +1047,8 @@ export async function prepareTechnicianCall({ requestId }) {
 export async function reassignMonitoredRequest({ requestId, radiusKm = 35, maxCandidates = 5 }) {
   const requestRow = await fetchRequestWithTechnician(requestId);
   const pool = await getPool();
-  const [technicianRows] = await pool.query("SELECT * FROM technicians");
+  let [technicianRows] = await pool.query("SELECT * FROM technicians");
+  if (isTowingServiceType(requestRow.service_type)) technicianRows = await loadTechnicianFleetVehicles(pool, technicianRows);
   const { analysis } = jobDispatchService.analyzeTechnicians(requestRow, technicianRows, radiusKm);
 
   const currentTechnicianId = requestRow.technician_id == null ? null : Number(requestRow.technician_id);

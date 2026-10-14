@@ -354,6 +354,14 @@ export function mapStoredPricingRowToTechnicianPricing(row, requestedServiceType
   );
 
   if (serviceType === "towing") {
+    // Signup calls this towing_fleet_types; existing normalized rows can wrap it in metadata.
+    let fleetMetadata = metadata;
+    const seen = new Set();
+    while (fleetMetadata && typeof fleetMetadata === "object" && !seen.has(fleetMetadata)) {
+      seen.add(fleetMetadata);
+      if (Array.isArray(fleetMetadata.tow_truck_types) || Array.isArray(fleetMetadata.towing_fleet_types)) break;
+      fleetMetadata = safeParseJson(fleetMetadata.metadata, null);
+    }
     return {
       base_price: toNullableNumber(
         firstPresent(row?.base_price, metadata?.base_price, metadata?.basePrice, row?.service_charge)
@@ -373,7 +381,9 @@ export function mapStoredPricingRowToTechnicianPricing(row, requestedServiceType
       ),
       night_charge: nightCharge ?? 0,
       night_type: nightType,
-      tow_truck_types: Array.isArray(metadata?.tow_truck_types) ? metadata.tow_truck_types : [],
+      tow_truck_types: Array.isArray(fleetMetadata?.tow_truck_types)
+        ? fleetMetadata.tow_truck_types
+        : Array.isArray(fleetMetadata?.towing_fleet_types) ? fleetMetadata.towing_fleet_types : [],
       default_tow_truck_type: firstPresent(
         metadata?.default_tow_truck_type,
         metadata?.defaultTowTruckType

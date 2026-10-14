@@ -1,5 +1,6 @@
 import * as db from "../db.js";
 import { jobDispatchService } from "./jobDispatchService.js";
+import { loadTechnicianFleetVehicles } from "./towTruckCapability.js";
 import {
   canonicalizeServiceDomain,
   canonicalizeVehicleFamily,
@@ -162,7 +163,8 @@ export async function runDispatchMatrixAudit(options = {}) {
   ];
 
   const pool = poolOverride || (await db.getPool());
-  const [rows] = await pool.query("SELECT * FROM technicians");
+  let [rows] = await pool.query("SELECT * FROM technicians");
+  if (normalizedDomains.includes("towing")) rows = await loadTechnicianFleetVehicles(pool, rows);
   const technicians = rows || [];
 
   const matrix = [];

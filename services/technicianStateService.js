@@ -1,3 +1,5 @@
+import { requiredTowTruckType, evaluateTowTruckCapability } from "./towTruckCapability.js";
+
 const ACTIVE_JOB_STATUSES = new Set([
   "assigned",
   "accepted",
@@ -73,7 +75,7 @@ export async function createRequestWithReservation(pool, sql, values, technician
 
 // Call only on the connection used for the assignment transaction. The technician
 // row is the serialization point for all requests competing for this capacity.
-export async function markTechnicianReserved(connOrPool, technicianId, requestId, { alreadyOwned = false } = {}) {
+export async function markTechnicianReserved(connOrPool, technicianId, requestId, { alreadyOwned = false, request = null } = {}) {
   const techId = toPositiveInt(technicianId);
   const jobId = toPositiveInt(requestId);
   if (!techId || !jobId) return false;
@@ -99,6 +101,20 @@ export async function markTechnicianReserved(connOrPool, technicianId, requestId
     normalizeStatus(technician.status) !== "approved" || !Number(technician.is_active) || !Number(technician.is_available)
   )) {
     throw new JobOwnershipError("technician_unavailable", "Technician is not currently available.");
+  }
+
+  // Every assignment path shares this gate, including direct bookings and admin assignment.
+  const job = request || (await connOrPool.query("SELECT * FROM service_requests WHERE id = ? LIMIT 1", [jobId]))[0][0];
+  const requiredType = requiredTowTruckType(job);
+  const continuingOwnedJob = alreadyOwned && Number(job?.technician_id) === techId &&
+    isActiveJobStatus(job?.status) && normalizeStatus(job?.status) !== "assigned";
+  if (requiredType !== null && !continuingOwnedJob) {
+    const [fleet] = await connOrPool.query(
+      "SELECT vehicle_type, status FROM technician_fleet_vehicles WHERE technician_id = ? ORDER BY id FOR UPDATE",
+      [techId]
+    );
+    const capability = evaluateTowTruckCapability(requiredType, fleet);
+    if (capability.code) throw new JobOwnershipError(capability.code, capability.reason);
   }
 
   const [result] = await connOrPool.query(

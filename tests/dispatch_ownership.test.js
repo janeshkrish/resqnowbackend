@@ -108,9 +108,9 @@ test('release does not advertise an unapproved technician as available', async (
   assert.equal(db.technician.is_available, 0);
 });
 
-function acceptanceDatabase({ pointer = null, owner = null, status = 'pending', offerStatus = 'pending', expired = false } = {}) {
+function acceptanceDatabase({ pointer = null, owner = null, status = 'pending', offerStatus = 'pending', expired = false, jobOverrides = {}, fleets = [] } = {}) {
   const db = database({ pointer, available: pointer ? 0 : 1 });
-  const job = { id: 101, user_id: 41, technician_id: owner, status, amount: 300, service_type: 'car-flat-tire' };
+  const job = { id: 101, user_id: 41, technician_id: owner, status, amount: 300, service_type: 'car-flat-tire', ...jobOverrides };
   const offer = offerStatus ? { id: 1, technician_id: 7, status: offerStatus, expired: expired ? 1 : 0 } : null;
   const notifications = [];
   let commits = 0;
@@ -122,6 +122,7 @@ function acceptanceDatabase({ pointer = null, owner = null, status = 'pending', 
       const originalCommit = conn.commit;
       conn.commit = async () => { commits++; await originalCommit(); };
       conn.query = async (sql, params = []) => {
+        if (/FROM technician_fleet_vehicles/.test(sql)) return [fleets];
         if (/SELECT \* FROM service_requests/.test(sql)) return [[{ ...job }]];
         if (/SELECT .*FROM dispatch_offers/s.test(sql)) return [offer ? [{ ...offer }] : []];
         if (/UPDATE dispatch_offers/.test(sql)) {
@@ -144,7 +145,7 @@ function acceptanceDatabase({ pointer = null, owner = null, status = 'pending', 
     notifyTechnician: (...args) => notifications.push(args),
     notifyUser: (...args) => notifications.push(args),
   };
-  return { ...db, job, offer, pool, notifications, committed: () => commits,
+  return { ...db, job, offer, pool, notifications, fleets, committed: () => commits,
     accept: () => jobDispatchService.acceptJob(7, 101, { pool, sockets, estimateEarning: async () => ({ amount: 300 }) }) };
 }
 
@@ -155,6 +156,35 @@ test('acceptance returns a busy conflict without assigning a second request', as
   assert.equal(result.code, 'technician_busy');
   assert.equal(db.job.status, 'pending');
   assert.equal(db.committed(), 0);
+});
+
+test('towing acceptance rejects an old offer when the required equipment is missing', async () => {
+  const db = acceptanceDatabase({ jobOverrides: { service_type: 'car-towing', vehicle_type: 'car', tow_truck_type: 'flatbed' }, fleets: [{ vehicle_type: 'wheel-lift', status: 'available' }] });
+  const result = await db.accept();
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'tow_truck_mismatch');
+  assert.equal(db.job.status, 'pending');
+  assert.equal(db.job.technician_id, null);
+  assert.equal(db.technician.current_job_id, null);
+  assert.equal(db.offer.status, 'pending');
+  assert.equal(db.notifications.length, 0);
+});
+
+test('towing acceptance succeeds with the required available truck and recovers a lost response', async () => {
+  const db = acceptanceDatabase({ jobOverrides: { service_type: 'car-towing', vehicle_type: 'car', tow_truck_type: 'flatbed' }, fleets: [{ vehicle_type: 'flatbed', status: 'available' }] });
+  assert.equal((await db.accept()).success, true);
+  db.fleets[0].status = 'busy';
+  const retry = await db.accept();
+  assert.equal(retry.success, true);
+  assert.equal(retry.idempotent, true);
+  assert.equal(db.technician.current_job_id, 101);
+});
+
+test('manual acceptance cannot bypass towing equipment checks by skipping offer verification', async () => {
+  const db = acceptanceDatabase({ offerStatus: null, jobOverrides: { service_type: 'commercial-towing', vehicle_type: 'commercial', tow_truck_type: 'heavy-duty-wrecker' }, fleets: [{ vehicle_type: 'flatbed', status: 'available' }] });
+  const result = await jobDispatchService.acceptJob(7, 101, { pool: db.pool, sockets: { io: null }, requireOffer: false, estimateEarning: async () => ({ amount: 300 }) });
+  assert.equal(result.code, 'tow_truck_mismatch');
+  assert.equal(db.job.technician_id, null);
 });
 
 test('a committed acceptance retry returns the existing job without new notifications', async () => {

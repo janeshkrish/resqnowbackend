@@ -2602,6 +2602,8 @@ router.get("/me/payout-transactions", verifyTechnician, async (req, res) => {
 });
 
 router.post("/create", verifyAdmin, async (req, res) => {
+  let creationConnection;
+  let creationCommitted = false;
   try {
     const {
       name, email, password, phone,
@@ -2646,7 +2648,9 @@ router.post("/create", verifyAdmin, async (req, res) => {
     const vehicleTypesJson = JSON.stringify(normalizedVehicleTypes || {});
 
     const pool = await db.getPool();
-    const result = await pool.execute(
+    creationConnection = await pool.getConnection();
+    await creationConnection.beginTransaction();
+    const result = await creationConnection.execute(
       `INSERT INTO technicians(
         name, email, phone, upi_id, upi_name,
         proprietor_name, alternate_phone, whatsapp_number,
@@ -2695,16 +2699,29 @@ router.post("/create", verifyAdmin, async (req, res) => {
       ]
     );
     const id = result[0].insertId;
+    if (req.body.pricing_config || req.body.service_costs) {
+      const pricingPayload = req.body.pricing_config || req.body.service_costs;
+      await replaceTechnicianPricingRows(creationConnection, id, pricingPayload);
+      await replaceTechnicianFleetVehicles(creationConnection, id, pricingPayload);
+    }
+    if (req.body.dynamic_pricing_config) {
+      await technicianPricingController.replaceTechnicianServicePricing(creationConnection, id, req.body.dynamic_pricing_config);
+    }
+    await creationConnection.commit();
+    creationCommitted = true;
     await sendEventEmail("TECHNICIAN_REGISTER", {
       name: trimmedName,
       email: normalizedEmail,
     });
     return res.status(201).json({ id: String(id), message: "Technician added successfully." });
   } catch (err) {
+    if (creationConnection && !creationCommitted) await creationConnection.rollback();
     if (err.code === "ER_DUP_ENTRY" || err.message?.includes("Duplicate")) {
       return res.status(409).json({ error: "This email is already registered." });
     }
     return res.status(500).json({ error: err.message || "Failed to add technician." });
+  } finally {
+    creationConnection?.release();
   }
 });
 

@@ -8,7 +8,9 @@ import { getAdminCredentials, signAdminToken, verifyAdmin } from "../middleware/
 import { getFrontendUrl } from "../config/network.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../services/serviceNormalization.js";
 import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
-import { replaceTechnicianPricingRows, replaceTechnicianFleetVehicles } from "../services/technicianPricingStore.js";
+import { replaceTechnicianPricingRows } from "../services/technicianPricingStore.js";
+import { loadTechnicianFleetVehicles } from "../services/towTruckCapability.js";
+import { isTowingServiceType } from "../services/towingServiceType.js";
 import { normalizeTechnicianServiceConfiguration } from "../services/adminTechnicianServiceConfiguration.js";
 import { runDispatchMatrixAudit } from "../services/dispatchMatrixAudit.js";
 import { FuelPriceError, getFuelPriceService } from "../services/fuelPriceService.js";
@@ -555,7 +557,8 @@ router.get("/dispatch-audit/:requestId", async (req, res) => {
       return res.status(404).json({ error: "Service request not found." });
     }
 
-    const [technicianRows] = await pool.query("SELECT * FROM technicians");
+    let [technicianRows] = await pool.query("SELECT * FROM technicians");
+    if (isTowingServiceType(requestRow.service_type)) technicianRows = await loadTechnicianFleetVehicles(pool, technicianRows);
     const [offerRows] = await pool.query(
       "SELECT technician_id, status, sent_at, expires_at FROM dispatch_offers WHERE service_request_id = ?",
       [requestId]
@@ -564,14 +567,7 @@ router.get("/dispatch-audit/:requestId", async (req, res) => {
 
     const { jobDispatchService } = await import("../services/jobDispatchService.js");
     const { criteria, analysis, reasonCounts } = jobDispatchService.analyzeTechnicians(
-      {
-        id: requestRow.id,
-        location_lat: requestRow.location_lat,
-        location_lng: requestRow.location_lng,
-        service_type: requestRow.service_type,
-        vehicle_type: requestRow.vehicle_type,
-        address: requestRow.address
-      },
+      requestRow,
       technicianRows,
       null
     );
@@ -926,7 +922,7 @@ router.put("/update-technician/:id", async (req, res) => {
 
     if (serviceCostsInput != null) {
       await replaceTechnicianServicePricingRows(conn, technicianId, serviceCostsNormalized);
-      await replaceTechnicianFleetVehicles(conn, technicianId, serviceCostsInput);
+      // Inventory is managed through /technicians/vehicles. Profile/pricing edits preserve it.
     }
 
     await conn.commit();

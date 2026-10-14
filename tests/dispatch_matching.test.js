@@ -98,7 +98,9 @@ test("dispatch matrix covers every canonical combination when profiles do", asyn
     })
   );
   const pool = {
-    query: async () => [technicians],
+    query: async (sql) => /FROM technician_fleet_vehicles/.test(sql)
+      ? [["flatbed", "wheel-lift", "heavy-duty-wrecker"].map(vehicle_type => ({ technician_id: 1, vehicle_type, status: "available" }))]
+      : [technicians],
   };
 
   const report = await runDispatchMatrixAudit({ pool, simulateReady: true });

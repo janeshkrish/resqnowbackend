@@ -1,4 +1,5 @@
 import { getPool } from "../db.js";
+import { normalizeFleetTowTruckType } from "./towTruckCapability.js";
 import {
   findTechnicianPricingEntry,
   mapStoredPricingRowToTechnicianPricing,
@@ -205,7 +206,8 @@ export async function replaceTechnicianFleetVehicles(connectionOrPool, technicia
     if (!entry || typeof entry !== "object") continue;
     if (Array.isArray(entry.towing_fleet_types)) {
       for (const type of entry.towing_fleet_types) {
-        if (type && typeof type === "string") fleetsToInsert.add(type.trim());
+        const normalizedType = normalizeFleetTowTruckType(type);
+        if (normalizedType) fleetsToInsert.add(normalizedType);
       }
     }
   }
@@ -215,7 +217,7 @@ export async function replaceTechnicianFleetVehicles(connectionOrPool, technicia
     const params = Array.from(fleetsToInsert).flatMap((type) => [
       normalizedTechnicianId,
       type,
-      "TBD",
+      `TBD-${type.toUpperCase()}`,
       "available"
     ]);
 
