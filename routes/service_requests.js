@@ -21,6 +21,8 @@ import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPay
 import { buildTowingQuote, normalizeTowingQuoteError } from "../services/towingQuoteService.js";
 import { isTowingServiceType } from "../services/towingServiceType.js";
 import { buildTowingRouteResponseFields } from "../services/towingRouteResponse.js";
+import { acceptedPricingSnapshot, hasAcceptedRequestPricing, customerPricingView, readDispatchPricingSnapshot, buildDispatchPricingSnapshot } from "../services/dispatchPricingService.js";
+import { createPricedDispatchOffer, dispatchOfferPricingFields } from "../services/dispatchOfferService.js";
 import { estimateTechnicianEarningForRequest } from "../services/technicianEarningsService.js";
 import { answerValue, describeRequestDetails, sanitizeRequestDetails } from "../services/requestDetails.js";
 import { defaultTowTruckType, normalizeTowTruckType, normalizeVehicleSubtype } from "../services/vehicleClasses.js";
@@ -130,54 +132,12 @@ const safeParseObject = (value) => {
 const hasTowingRouteData = (row) =>
     isTowingServiceType(row?.service_type);
 
-async function resolveRequestBaseAmount(requestRow, pricingConfig = null) {
-    if (hasTowingRouteData(requestRow)) {
-        const stored = toPositiveMoney(requestRow?.amount ?? requestRow?.service_charge);
-        if (stored != null) return stored;
-    }
-
-    const technicianId = Number(requestRow?.technician_id);
-    let technicianProfile = null;
-
-    if (Number.isFinite(technicianId) && technicianId > 0) {
-        if (
-            requestRow?.technician_pricing != null ||
-            requestRow?.technician_service_costs != null ||
-            requestRow?.pricing != null ||
-            requestRow?.service_costs != null
-        ) {
-            technicianProfile = {
-                pricing: requestRow?.technician_pricing ?? requestRow?.pricing ?? null,
-                service_costs: requestRow?.technician_service_costs ?? requestRow?.service_costs ?? null
-            };
-        } else {
-            const pool = await getPool();
-            const [techRows] = await pool.query(
-                "SELECT pricing, service_costs FROM technicians WHERE id = ? LIMIT 1",
-                [technicianId]
-            );
-            if (techRows.length > 0) {
-                technicianProfile = techRows[0];
-            }
-        }
-    }
-
-    const techAmount = technicianProfile
-        ? estimateRequestAmount(
-            { service_type: requestRow?.service_type, vehicle_type: requestRow?.vehicle_type },
-            technicianProfile
-        )
-        : null;
-    if (techAmount != null) return techAmount;
-
-    const direct = toPositiveMoney(requestRow?.amount ?? requestRow?.service_charge);
-    if (direct != null) return direct;
-
-    return estimateRequestAmountAsync(
-        { service_type: requestRow?.service_type, vehicle_type: requestRow?.vehicle_type },
-        null,
-        pricingConfig
-    );
+export async function resolveRequestBaseAmount(requestRow) {
+    if (!hasAcceptedRequestPricing(requestRow)) return null;
+    const snapshot = acceptedPricingSnapshot(requestRow);
+    if (snapshot) return snapshot.customer_base_amount;
+    // Historical accepted jobs retain their recorded fare; never consult current rates.
+    return toPositiveMoney(requestRow?.amount) ?? toPositiveMoney(requestRow?.service_charge) ?? toPositiveMoney(requestRow?.price);
 }
 
 function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
@@ -233,7 +193,7 @@ router.get("/", verifyUser, async (req, res) => {
         const pool = await getPool();
 
         const [rows] = await pool.query(`
-      SELECT 
+      SELECT
         sr.*,
         t.name as technician_name,
         t.phone as technician_phone,
@@ -253,9 +213,13 @@ router.get("/", verifyUser, async (req, res) => {
       ORDER BY sr.created_at DESC
     `, [userId, userId]);
 
-        const requests = rows.map(row => ({
+        const requests = rows.map(row => customerPricingView({
             _id: String(row.id),
             id: row.id,
+            accepted_time: row.accepted_time,
+            amount: row.amount, service_charge: row.service_charge,
+            pricing_snapshot: row.pricing_snapshot,
+            final_price: row.final_price, technician_estimated_earning: row.technician_estimated_earning,
             service_type: row.service_type,
             vehicle_type: row.vehicle_type,
             vehicle_model: row.vehicle_model,
@@ -516,8 +480,8 @@ router.post("/", verifyUser, async (req, res) => {
         let result;
         try {
             result = await createRequestWithReservation(pool,
-            `INSERT INTO service_requests 
-      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_estimated_earning, technician_id, status, amount, vehicle_brand, vehicle_subtype, tow_truck_type, request_details_json) 
+            `INSERT INTO service_requests
+      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_estimated_earning, technician_id, status, amount, vehicle_brand, vehicle_subtype, tow_truck_type, request_details_json)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 userId,
@@ -551,13 +515,19 @@ router.post("/", verifyUser, async (req, res) => {
                 towTruckType,
                 requestDetails ? JSON.stringify(requestDetails) : null
             ],
-            directTechnicianId
+            directTechnicianId,
+            { afterReserve: async (conn, inserted) => {
+                if (!directTechnicianId) return;
+                inserted.dispatchOffer = await createPricedDispatchOffer(conn, { id: inserted.insertId }, selectedTechnician,
+                    { connection: conn, expiresAt: null });
+            } }
             );
         } catch (error) {
-            if (error instanceof JobOwnershipError) return res.status(409).json({ code: error.code, error: error.message });
+            if (error instanceof JobOwnershipError || error.code === "pricing_unavailable") return res.status(409).json({ code: error.code, error: error.message });
             throw error;
         }
         const newRequestId = result.insertId;
+        const directOffer = result.dispatchOffer;
         console.log(`[Create Job] Created Request #${newRequestId}`);
 
         const [userRows] = await pool.query(
@@ -588,10 +558,7 @@ router.post("/", verifyUser, async (req, res) => {
                 estimatedEarnings: technicianEstimatedEarning,
             }
             : {};
-        const technicianOfferAmount =
-            inferredDomain === "towing"
-                ? toPositiveMoney(technicianEstimatedEarning) ?? 0
-                : toPositiveMoney(initialAmount) ?? 0;
+        const technicianOfferAmount = directOffer?.pricing_snapshot?.technician_earning ?? 0;
 
         if (adminNotificationEmail) {
             void sendEventEmail("ADMIN_NEW_USER_REQUEST", {
@@ -694,7 +661,8 @@ router.post("/", verifyUser, async (req, res) => {
                         amount: technicianOfferAmount,
                         priceAmount: technicianOfferAmount,
                         technicianEstimatedEarning,
-                        estimatedEarnings: technicianEstimatedEarning
+                        estimatedEarnings: technicianEstimatedEarning,
+                        ...dispatchOfferPricingFields(directOffer),
                     };
                     if (socketService.io) {
                         socketService.io.to(`technician_${directTechnicianId}`).emit("JOB_ALERT", directAssignedPayload);
@@ -737,7 +705,7 @@ router.post("/", verifyUser, async (req, res) => {
             }
         })();
 
-        res.json({
+        res.json(customerPricingView({
             id: newRequestId,
             user_id: userId,
             isTowing: isTowingServiceType(canonicalServiceType),
@@ -754,7 +722,7 @@ router.post("/", verifyUser, async (req, res) => {
                 ? "Request created and assigned. Technician has been notified."
                 : "Request created. Dispatch queued for nearby technicians...",
             created_at: new Date()
-        });
+        }));
 
     } catch (err) {
         console.error("[Service Requests] Error creating request:", err);
@@ -777,7 +745,7 @@ router.post("/:id/accept", verifyTechnician, async (req, res) => {
         console.log(`[Accept Job] Tech ${technicianId} attempting to accept Request ${requestId}`);
 
         const { jobDispatchService } = await import("../services/jobDispatchService.js");
-        const result = await jobDispatchService.acceptJob(technicianId, requestId);
+        const result = await jobDispatchService.acceptJob(technicianId, requestId, { offerId: req.body?.offerId ?? req.body?.offer_id ?? null });
 
         if (!result.success) {
             if (result.code === "not_found") {
@@ -871,6 +839,9 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 sr.status,
                 sr.technician_id,
                 COALESCE(sr.amount, sr.service_charge, 0) AS amount,
+                sr.pricing_snapshot,
+                d.id AS offer_id,
+                d.pricing_snapshot AS offer_pricing_snapshot,
                 d.status AS offer_status,
                 d.expires_at AS offer_expires_at,
                 d.expires_at IS NOT NULL AND d.expires_at <= NOW() AS offer_expired,
@@ -895,16 +866,7 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
         }
 
         const row = rows[0];
-        const earningEstimate = await estimateTechnicianEarningForRequest({
-            request: row,
-            technicianId,
-            technician: {
-                id: technicianId,
-                pricing: row.technician_pricing,
-                service_costs: row.technician_service_costs
-            },
-        });
-        const resolvedOfferAmount = toPositiveMoney(earningEstimate?.amount) ?? toPositiveMoney(row.amount) ?? 0;
+        let savedPricing = acceptedPricingSnapshot(row) || readDispatchPricingSnapshot(row.offer_pricing_snapshot, { requestId, technicianId });
         const normalizedStatus = normalizeStatus(row?.status) || String(row?.status || "").trim().toLowerCase();
         const offerStatus = String(row?.offer_status || "").trim().toLowerCase();
         const assignedTechnicianId = row?.technician_id == null ? null : String(row.technician_id);
@@ -936,6 +898,22 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
             });
         }
 
+        // Installed clients can reopen an older direct assignment and receive a new,
+        // explicitly identified priced offer, instead of accepting an unsaved amount.
+        if (isAssignedToCurrentTechnician && normalizedStatus === "assigned" && (!savedPricing || !hasPendingOffer)) {
+            try {
+                const refreshed = await createPricedDispatchOffer(pool, { id: Number(requestId) }, { id: Number(technicianId) }, { expiresAt: null });
+                savedPricing = refreshed.pricing_snapshot;
+                row.offer_id = refreshed.id;
+                row.offer_status = "pending";
+            } catch (error) {
+                if (!["pricing_unavailable", "offer_unavailable"].includes(error.code)) throw error;
+                return res.status(409).json({ available: false, reason: "offer_price_unavailable", message: "This job offer needs valid registered pricing." });
+            }
+        }
+        if (!savedPricing) return res.status(409).json({ available: false, reason: "offer_price_unavailable", message: "This job offer needs a refreshed price." });
+        const resolvedOfferAmount = savedPricing.technician_earning;
+
         const customerLat = Number(row.location_lat);
         const customerLng = Number(row.location_lng);
         const technicianLat = Number(row.technician_lat);
@@ -963,7 +941,9 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 customerName: row.contact_name || "Customer",
                 address: row.address || "",
                 status: normalizedStatus,
-                offer_status: offerStatus || null,
+                offer_status: row.offer_status || null,
+                offerId: Number(row.offer_id),
+                offer_id: Number(row.offer_id),
                 location: {
                     lat: Number.isFinite(customerLat) ? customerLat : null,
                     lng: Number.isFinite(customerLng) ? customerLng : null,
@@ -979,8 +959,10 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 technicianEstimatedEarning: resolvedOfferAmount,
                 technician_estimated_earning: resolvedOfferAmount,
                 estimatedEarnings: resolvedOfferAmount,
-                earningsSource: earningEstimate?.source || null,
-                earningsBreakdown: earningEstimate?.breakdown || null,
+                earningsSource: savedPricing.earnings_source,
+                earningsBreakdown: savedPricing.pricing_breakdown,
+                pricingBreakdown: savedPricing.pricing_breakdown,
+                finalEstimatedPrice: savedPricing.customer_total_amount,
                 description: row.description || null,
                 ...buildTechnicianJobDetails(row),
             },
@@ -1015,7 +997,7 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
         // cannot both claim the same request.
         if (normalized === "accepted") {
             const { jobDispatchService } = await import("../services/jobDispatchService.js");
-            const acceptResult = await jobDispatchService.acceptJob(technicianId, requestId);
+            const acceptResult = await jobDispatchService.acceptJob(technicianId, requestId, { offerId: req.body?.offerId ?? req.body?.offer_id ?? null });
             if (!acceptResult.success) {
                 if (acceptResult.code === "not_found" || acceptResult.code === "technician_not_found") {
                     return res.status(404).json({ error: acceptResult.reason || "Request not found." });
@@ -1042,6 +1024,10 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
         }
         const request = requests[0];
         const currentRequestStatus = normalizeStatus(request.status);
+        if (["pending", "assigned", "technician_assigned"].includes(currentRequestStatus) && normalized !== "rejected") {
+            await conn.rollback();
+            return res.status(409).json({ code: "acceptance_required", error: "Accept the priced job offer before starting this service." });
+        }
         const rejectableOfferStatuses = new Set(["pending", "assigned", "technician_assigned"]);
         if (normalized === "rejected" && !rejectableOfferStatuses.has(currentRequestStatus)) {
             return res.status(409).json({
@@ -1084,37 +1070,22 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
             await releaseTechnicianAvailability(conn, technicianId, requestId);
             // ... (keep reassignment logic)
             const { jobMatcher } = await import("../services/jobMatcher.js");
-            const nextMatch = await jobMatcher.findBestMatch(request, [technicianId]);
+            let nextMatch = await jobMatcher.findBestMatch(request, [technicianId]);
+            let replacementPricing = null;
+            if (nextMatch) {
+                try { replacementPricing = await buildDispatchPricingSnapshot({ request, technician: nextMatch,
+                    technicianId: nextMatch.id, connection: conn }); }
+                catch (error) { if (error.code !== "pricing_unavailable") throw error; nextMatch = null; }
+            }
 
             if (nextMatch) {
                 newTechId = nextMatch.id;
                 newStatus = 'assigned';
-                reassignedAmount = hasTowingRouteData(request)
-                    ? toPositiveMoney(request.amount ?? request.service_charge)
-                    : await estimateRequestAmountAsync(
-                        { service_type: request.service_type, vehicle_type: request.vehicle_type },
-                        nextMatch
-                    );
                 await markTechnicianReserved(conn, newTechId, requestId);
-                await conn.query(
-                    "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id = ?",
-                    [requestId, technicianId]
-                );
-                const [existingNextOffer] = await conn.query(
-                    "SELECT id FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ? LIMIT 1",
-                    [requestId, newTechId]
-                );
-                if (existingNextOffer.length > 0) {
-                    await conn.query(
-                        "UPDATE dispatch_offers SET status = 'accepted' WHERE id = ?",
-                        [existingNextOffer[0].id]
-                    );
-                } else {
-                    await conn.query(
-                        "INSERT INTO dispatch_offers (service_request_id, technician_id, status) VALUES (?, ?, 'accepted')",
-                        [requestId, newTechId]
-                    );
-                }
+                await conn.query("UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id = ?", [requestId, technicianId]);
+                await conn.execute("UPDATE service_requests SET technician_id = ?, status = 'assigned', pricing_snapshot = NULL, accepted_time = NULL, technician_estimated_earning = NULL WHERE id = ?", [newTechId, requestId]);
+                const replacementOffer = await createPricedDispatchOffer(conn, { id: Number(requestId) }, nextMatch,
+                    { connection: conn, pricingSnapshot: replacementPricing, expiresAt: null });
                 afterCommit.push(() => {
                     // Notify new technician
                     const reassignedPayload = {
@@ -1134,8 +1105,7 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
                             ? `${Number(nextMatch.distance).toFixed(1)} km`
                             : (nextMatch.distanceText || "Nearby"),
                         distance: Number(nextMatch.distance) || 0,
-                        amount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0,
-                        priceAmount: reassignedAmount ?? request.amount ?? request.service_charge ?? 0
+                        ...dispatchOfferPricingFields(replacementOffer),
                     };
                     if (socketService.io) {
                         socketService.io.to(`technician_${newTechId}`).emit("JOB_ALERT", reassignedPayload);
@@ -1193,7 +1163,7 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
         }
 
         const shouldUpdateAmount = toPositiveMoney(reassignedAmount) != null;
-        const amountUpdateClause = shouldUpdateAmount ? ", amount = ?" : "";
+        const amountUpdateClause = normalized === "rejected" ? ", pricing_snapshot = NULL, accepted_time = NULL, technician_estimated_earning = NULL" : (shouldUpdateAmount ? ", amount = ?" : "");
         const updateParams = shouldUpdateAmount
             ? [newStatus, newTechId, reassignedAmount, requestId]
             : [newStatus, newTechId, requestId];
@@ -1382,10 +1352,10 @@ export async function handleCustomerCancel(req, res, deps = {}) {
             return res.json({
                 success: true,
                 request: updatedRows[0]
-                    ? {
+                    ? customerPricingView({
                         ...updatedRows[0],
                         ...buildTowingRouteResponseFields(updatedRows[0]),
-                    }
+                    })
                     : null,
             });
         } catch (txErr) {
@@ -1413,7 +1383,7 @@ router.get("/:id", verifyUser, async (req, res) => {
         const pool = await getPool();
 
         const [rows] = await pool.query(`
-      SELECT 
+      SELECT
         sr.*,
         t.name as technician_name,
         t.phone as technician_phone,
@@ -1475,7 +1445,7 @@ router.get("/:id", verifyUser, async (req, res) => {
             ...paymentDetails,
         };
 
-        if (request.technician) {
+        if (request.technician && hasAcceptedRequestPricing(row)) {
             const liveLocation = await getLiveTrackingRuntime().ingestion.getRecoverySnapshot({
                 technicianId: row.technician_id,
                 requestId,
@@ -1498,7 +1468,7 @@ router.get("/:id", verifyUser, async (req, res) => {
             }
         }
 
-        res.json(request);
+        res.json(customerPricingView(request));
     } catch (err) {
         console.error("[Service Requests] Error fetching request:", err);
         res.status(500).json({ error: "Failed to fetch request." });

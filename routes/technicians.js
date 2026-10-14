@@ -20,8 +20,8 @@ import {
   indexTechnicianPricingRows,
   resolveTechnicianDisplayPrice,
 } from "../services/technicianPriceDisplay.js";
-import { estimateTechnicianPayoutAsync } from "../services/pricingEstimator.js";
 import { getPlatformPricingConfig } from "../services/platformPricing.js";
+import { acceptedPricingSnapshot, hasAcceptedRequestPricing, readDispatchPricingSnapshot } from "../services/dispatchPricingService.js";
 import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js";
 import { replaceTechnicianPricingRows, replaceTechnicianFleetVehicles } from "../services/technicianPricingStore.js";
 import {
@@ -730,26 +730,49 @@ function resolveBroadcastTechnicianStatus(row) {
   return "offline";
 }
 
-async function resolveTechnicianJobAmount(jobRow, technicianProfile, _pricingConfig = null) {
-  if (isTowingServiceType(jobRow?.service_type)) {
-    const stored = toPositiveMoney(
-      jobRow?.technician_estimated_earning ??
-      jobRow?.technicianEstimatedEarning ??
-      jobRow?.estimatedEarnings ??
-      jobRow?.amount ??
-      jobRow?.service_charge
-    );
-    if (stored != null) return stored;
+export async function resolveTechnicianJobPricing(jobRow, { technicianId = jobRow?.technician_id, connection = null } = {}) {
+  const confirmed = hasAcceptedRequestPricing(jobRow);
+  const accepted = acceptedPricingSnapshot(jobRow);
+  if (accepted && Number(accepted.technician_id) === Number(technicianId)) {
+    return { amount: accepted.technician_earning, snapshot: accepted, offerId: accepted.offer_id ?? null, confirmed };
   }
+  if (confirmed) {
+    // Historical jobs retain their recorded earnings. Current profile rates belong
+    // only to new offers and must never reprice an accepted job's dashboard/history.
+    const amount = [jobRow?.technician_estimated_earning, jobRow?.technicianEstimatedEarning,
+      jobRow?.estimatedEarnings, jobRow?.amount, jobRow?.service_charge]
+      .map(toPositiveMoney).find((value) => value != null) ?? null;
+    return { amount, snapshot: null, offerId: null, confirmed };
+  }
+  const pending = ["pending", "assigned", "technician_assigned"].includes(String(jobRow?.status || "").toLowerCase());
+  if (pending && jobRow?.id && technicianId) {
+    const executor = connection || await db.getPool();
+    const [offers] = await executor.query(`SELECT id, status, pricing_snapshot, expires_at,
+        expires_at IS NOT NULL AND expires_at <= NOW() AS expired
+      FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ? AND status = 'pending'
+        AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY id DESC LIMIT 1`, [jobRow.id, technicianId]);
+    const offer = offers?.[0];
+    const expiry = offer?.expires_at == null ? null : new Date(offer.expires_at).getTime();
+    const expired = Number(offer?.expired) === 1 || (Number.isFinite(expiry) && expiry <= Date.now());
+    const snapshot = !expired && offer?.status === "pending"
+      ? readDispatchPricingSnapshot(offer.pricing_snapshot, { requestId: jobRow.id, technicianId }) : null;
+    if (snapshot) return { amount: snapshot.technician_earning, snapshot, offerId: offer.id, confirmed: false };
+  }
+  return { amount: null, snapshot: null, offerId: null, confirmed: false };
+}
 
-  const techAmount = await estimateTechnicianPayoutAsync(
-    { service_type: jobRow?.service_type, vehicle_type: jobRow?.vehicle_type },
-    technicianProfile || null,
-    { technicianId: technicianProfile?.id ?? jobRow?.technician_id ?? null }
-  );
-  if (techAmount != null) return techAmount;
-
-  return null;
+export function technicianJobPricingFields(jobRow, pricing) {
+  const earning = pricing?.amount ?? null;
+  const snapshot = pricing?.snapshot;
+  return { amount: earning, priceAmount: earning, technician_estimated_earning: earning,
+    technicianEstimatedEarning: earning, estimatedEarnings: earning,
+    earningsSource: snapshot?.earnings_source ?? (pricing?.confirmed ? "stored" : null),
+    offerId: pricing?.offerId ?? null, offer_id: pricing?.offerId ?? null,
+    pricing_status: pricing?.confirmed ? "confirmed" : "pending", pricing_finalized: !!pricing?.confirmed,
+    customer_base_amount: snapshot?.customer_base_amount ?? toPositiveMoney(jobRow?.amount ?? jobRow?.service_charge),
+    customer_total_amount: snapshot?.customer_total_amount ?? toPositiveMoney(jobRow?.final_price),
+    ...(snapshot ? { pricing_snapshot: snapshot, pricingBreakdown: snapshot.pricing_breakdown,
+      pricing_breakdown: snapshot.pricing_breakdown, pricing_breakdown_json: snapshot.pricing_breakdown } : {}) };
 }
 
 const ACTIVE_TECHNICIAN_JOB_STATUSES = Object.freeze([
@@ -794,7 +817,7 @@ const toOptionalPhone = (value) => {
   return compact || null;
 };
 
-function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
+function buildActiveJobResponse(jobRow, pricing, paymentRow = null) {
   if (!jobRow) return null;
 
   const id = String(jobRow.id ?? "");
@@ -816,9 +839,8 @@ function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
   const paymentDetails = buildServiceRequestPaymentDetails({
     requestRow: jobRow,
     paymentRow,
-    baseAmount: resolvedAmount,
+    baseAmount: pricing?.snapshot?.customer_base_amount ?? jobRow.amount ?? jobRow.service_charge,
   });
-  const amount = toPositiveMoney(paymentDetails.baseAmount);
 
   return {
     id,
@@ -835,9 +857,9 @@ function buildActiveJobResponse(jobRow, resolvedAmount, paymentRow = null) {
     destinationLongitude,
     destinationAddress: routeFields.dropAddress,
     jobStatus: status,
-    amount,
     ...paymentDetails,
     ...routeFields,
+    ...technicianJobPricingFields(jobRow, pricing),
     address,
     description,
     status,
@@ -890,10 +912,6 @@ async function fetchActiveTechnicianJob(technicianId) {
   if (!Array.isArray(rows) || rows.length === 0) return null;
 
   const job = rows[0];
-  const [techRows] = await pool.query(
-    "SELECT pricing, service_costs FROM technicians WHERE id = ? LIMIT 1",
-    [normalizedTechnicianId]
-  );
   const [paymentRows] = await pool.query(
     `SELECT payment_method, amount, base_amount, platform_fee, payment_fee, is_settled, status, currency
      FROM payments
@@ -902,9 +920,8 @@ async function fetchActiveTechnicianJob(technicianId) {
      LIMIT 1`,
     [job.id]
   );
-  const pricingConfig = await getPlatformPricingConfig();
-  const resolvedAmount = await resolveTechnicianJobAmount(job, techRows?.[0] || null, pricingConfig);
-  return buildActiveJobResponse(job, resolvedAmount, paymentRows[0] || null);
+  const pricing = await resolveTechnicianJobPricing(job, { technicianId: normalizedTechnicianId, connection: pool });
+  return buildActiveJobResponse(job, pricing, paymentRows[0] || null);
 }
 
 router.get("/", verifyAdmin, async (req, res) => {
@@ -984,15 +1001,9 @@ router.get("/requests", verifyTechnician, async (req, res) => {
   try {
     const technicianId = req.technicianId;
     const pool = await db.getPool();
-    const [techRows] = await pool.query(
-      "SELECT pricing, service_costs FROM technicians WHERE id = ? LIMIT 1",
-      [technicianId]
-    );
-    const technicianProfile = techRows?.[0] || null;
-    const pricingConfig = await getPlatformPricingConfig();
 
     // Fetch requests assigned to this technician, include user contact details for dashboard
-    const rows = await db.query(
+    const [rows] = await pool.query(
       `SELECT sr.*, u.full_name as user_full_name, u.phone as user_phone
        FROM service_requests sr
        LEFT JOIN users u ON sr.user_id = u.id
@@ -1003,7 +1014,7 @@ router.get("/requests", verifyTechnician, async (req, res) => {
 
     // Map to cleaner shape for frontend
     const mapped = await Promise.all(rows.map(async (r) => {
-      const resolvedAmount = await resolveTechnicianJobAmount(r, technicianProfile, pricingConfig);
+      const pricing = await resolveTechnicianJobPricing(r, { technicianId, connection: pool });
       return {
         id: String(r.id),
         service_type: r.service_type,
@@ -1012,7 +1023,6 @@ router.get("/requests", verifyTechnician, async (req, res) => {
         address: r.address,
         status: r.status,
         payment_status: r.payment_status,
-        amount: resolvedAmount,
         created_at: r.created_at,
         updated_at: r.updated_at,
         started_at: r.started_at,
@@ -1028,7 +1038,8 @@ router.get("/requests", verifyTechnician, async (req, res) => {
         description: r.description,
         location_lat: r.location_lat,
         location_lng: r.location_lng,
-        ...buildTechnicianRouteFields(r)
+        ...buildTechnicianRouteFields(r),
+        ...technicianJobPricingFields(r, pricing)
       };
     }));
 
@@ -1988,13 +1999,6 @@ router.get('/jobs/history', verifyTechnician, async (req, res) => {
   try {
     const technicianId = req.technicianId;
     const pool = await db.getPool();
-    const [techRows] = await pool.query(
-      "SELECT pricing, service_costs FROM technicians WHERE id = ? LIMIT 1",
-      [technicianId]
-    );
-    const technicianProfile = techRows?.[0] || null;
-    const pricingConfig = await getPlatformPricingConfig();
-
     const [rows] = await pool.query(
       "SELECT * FROM service_requests WHERE technician_id = ? ORDER BY created_at DESC",
       [technicianId]
@@ -2002,11 +2006,11 @@ router.get('/jobs/history', verifyTechnician, async (req, res) => {
 
     const enrichedRows = await Promise.all(
       rows.map(async (row) => {
-        const resolvedAmount = await resolveTechnicianJobAmount(row, technicianProfile, pricingConfig);
+        const pricing = await resolveTechnicianJobPricing(row, { technicianId, connection: pool });
         return {
           ...row,
-          amount: resolvedAmount,
-          ...buildTechnicianRouteFields(row)
+          ...buildTechnicianRouteFields(row),
+          ...technicianJobPricingFields(row, pricing)
         };
       })
     );
@@ -2263,7 +2267,7 @@ router.get("/nearby", async (req, res) => {
     // AI Recommendation Logic (Ranking)
     const ranked = filtered.map(t => {
       // Prioritize rating, closer distance, and completed jobs
-      // If distance is 0 (unknown), give slight penalty compared to very close known? 
+      // If distance is 0 (unknown), give slight penalty compared to very close known?
       // Actually, 0 distance is good score.
       const score = (t.rating * 20)
         - (t.distance * 2)
@@ -2503,7 +2507,7 @@ router.get("/me/active-job-legacy", verifyTechnician, async (req, res) => {
     // Exclude completed or cancelled matches
     // Also include 'awaiting_payment/payment_pending' to keep payment-gated lifecycle visible.
     const [rows] = await pool.query(
-      `SELECT * FROM service_requests 
+      `SELECT * FROM service_requests
        WHERE technician_id = ?
       AND status IN('assigned', 'accepted', 'en_route_pickup', 'arrived_pickup', 'vehicle_loaded', 'enroute_drop', 'arrived_drop', 'service_completed', 'processing', 'en-route', 'in_progress', 'in-progress', 'awaiting_payment', 'payment_pending')
        ORDER BY created_at DESC LIMIT 1`,
@@ -2514,10 +2518,8 @@ router.get("/me/active-job-legacy", verifyTechnician, async (req, res) => {
       return res.json(null);
     }
 
-    res.json({
-      ...rows[0],
-      ...buildTechnicianRouteFields(rows[0]),
-    });
+    const pricing = await resolveTechnicianJobPricing(rows[0], { technicianId, connection: pool });
+    res.json({ ...rows[0], ...buildTechnicianRouteFields(rows[0]), ...technicianJobPricingFields(rows[0], pricing) });
   } catch (err) {
     console.error("Fetch active job error:", err);
     res.status(500).json({ error: "Failed to fetch active job" });
@@ -2730,9 +2732,9 @@ router.get("/me/reviews", verifyTechnician, async (req, res) => {
     const technicianId = req.technicianId;
     const pool = await db.getPool();
     const [rows] = await pool.query(
-      `SELECT r.*, u.full_name as reviewer_name 
-       FROM reviews r 
-       JOIN users u ON r.user_id = u.id 
+      `SELECT r.*, u.full_name as reviewer_name
+       FROM reviews r
+       JOIN users u ON r.user_id = u.id
        WHERE r.technician_id = ?
       ORDER BY r.created_at DESC`,
       [technicianId]

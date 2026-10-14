@@ -12,19 +12,21 @@ import {
     getSubscriptionPlanById,
     listSubscriptionPlans
 } from "../services/platformPricing.js";
-import { estimateRequestAmount, estimateRequestAmountAsync } from "../services/pricingEstimator.js";
 import { releaseTechnicianAvailability } from "../services/technicianStateService.js";
 import { buildMarketplacePricingSnapshot, findReusablePendingOrder } from "../services/marketplacePaymentService.js";
 import { creditTechnicianWalletForPayment } from "../services/marketplaceWalletService.js";
 import {
     computeServiceRequestPaymentAmounts,
+    buildServiceRequestPaymentDetails,
+    resolveServiceRequestBillingBase,
+    resolveServiceRequestTechnicianAmount,
 } from "../services/serviceRequestPaymentService.js";
 import {
     PAYMENT_LEDGER_STATUS,
     PAYMENT_TO_TECHNICIAN_STATUS,
 } from "../models/marketplaceConstants.js";
 import { isTowingServiceType } from "../services/towingServiceType.js";
-import { estimateTechnicianEarningForRequest } from "../services/technicianEarningsService.js";
+import { acceptedPricingSnapshot, hasAcceptedRequestPricing } from "../services/dispatchPricingService.js";
 
 const router = express.Router();
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
@@ -94,17 +96,70 @@ const serializeServiceRequestRow = (row) =>
         : null;
 
 async function resolveTechnicianPaymentAmount({ requestRow, technicianProfile = null, connection = null }) {
-    if (!requestRow?.technician_id) {
-        return null;
-    }
+    if (!requestRow?.technician_id) return null;
+    return resolveServiceRequestTechnicianAmount(requestRow);
+}
 
-    const earning = await estimateTechnicianEarningForRequest({
-        request: requestRow,
-        technician: technicianProfile,
-        technicianId: requestRow.technician_id,
-        connection,
-    });
-    return toPositiveMoney(earning?.amount);
+function ensureRequestAcceptedForPayment(res, requestRow) {
+    if (hasAcceptedRequestPricing(requestRow) &&
+        !["cancelled", "canceled", "rejected", "expired"].includes(String(requestRow?.status || "").toLowerCase())) {
+        const base = resolveServiceRequestBillingBase(requestRow);
+        const earning = resolveServiceRequestTechnicianAmount(requestRow);
+        if (base == null || earning == null || base <= 0 || earning <= 0 || earning > base) {
+            res.status(409).json({ code: "UNFUNDED_ACCEPTED_PRICE", error: "This recorded price cannot fund the technician's agreed earnings. Contact support to reconcile the request." });
+            return false;
+        }
+        return true;
+    }
+    res.status(409).json({ error: "The service price is available only after a technician accepts the request.", code: "PRICE_NOT_ACCEPTED" });
+    return false;
+}
+
+function paymentMatchesAcceptedPrice(requestRow, paymentRow) {
+    const snapshot = acceptedPricingSnapshot(requestRow || {});
+    if (!snapshot) return true; // Historical accepted jobs retain their recorded payment contract.
+    return paymentRow?.base_amount != null && paymentRow?.technician_amount != null &&
+        Math.abs(Number(paymentRow.base_amount) - snapshot.customer_base_amount) < 0.005 &&
+        Math.abs(Number(paymentRow.technician_amount) - snapshot.technician_earning) < 0.005 &&
+        String(paymentRow.currency || "INR").toUpperCase() === snapshot.currency;
+}
+
+function gatewayPaymentMismatch(paymentRow, gatewayPayment, { orderId, paymentId, requestRow = null, requireCaptured = true } = {}) {
+    if (String(gatewayPayment?.order_id || "") !== String(orderId) ||
+        String(gatewayPayment?.id || "") !== String(paymentId) ||
+        String(paymentRow?.razorpay_order_id || "") !== String(orderId)) return "payment_order_mismatch";
+    const gatewayAmount = Number(gatewayPayment?.amount);
+    const storedAmount = Number(paymentRow?.amount);
+    const checkoutFields = ["base_amount", "platform_fee", "payment_fee", "technician_amount"];
+    if (checkoutFields.some(field => paymentRow?.[field] == null || !Number.isFinite(Number(paymentRow[field])) || Number(paymentRow[field]) < 0) ||
+        !Number.isFinite(storedAmount) || storedAmount <= 0 || Number(paymentRow.technician_amount) <= 0 ||
+        Number(paymentRow.technician_amount) > Number(paymentRow.base_amount) ||
+        Math.round((Number(paymentRow.base_amount) + Number(paymentRow.platform_fee) + Number(paymentRow.payment_fee)) * 100) !== Math.round(storedAmount * 100)) return "invalid_checkout_contract";
+    if (gatewayPayment?.amount == null || typeof gatewayPayment.amount === "boolean" ||
+        !Number.isSafeInteger(gatewayAmount) || gatewayAmount <= 0 ||
+        paymentRow?.amount == null || !Number.isFinite(storedAmount) || storedAmount <= 0 ||
+        typeof gatewayPayment?.currency !== "string" || !gatewayPayment.currency.trim()) return "invalid_captured_price";
+    if (gatewayAmount !== Math.round(storedAmount * 100)) return "captured_amount_mismatch";
+    if (gatewayPayment.currency.toUpperCase() !== String(paymentRow.currency || "INR").toUpperCase()) return "captured_currency_mismatch";
+    const requestId = String(paymentRow.service_request_id ?? "");
+    const userId = String(paymentRow.user_id ?? "");
+    const notedRequestId = gatewayPayment?.notes?.requestId ?? gatewayPayment?.notes?.request_id;
+    const notedUserId = gatewayPayment?.notes?.userId ?? gatewayPayment?.notes?.user_id;
+    if (!requestId || !userId ||
+        (requestRow && (requestId !== String(requestRow.id) || userId !== String(requestRow.user_id))) ||
+        (notedRequestId != null && String(notedRequestId) !== requestId) ||
+        (notedUserId != null && String(notedUserId) !== userId)) return "payment_request_mismatch";
+    const gatewayStatus = String(gatewayPayment.status || "").toLowerCase();
+    const isCaptured = gatewayStatus === "captured" && gatewayPayment.captured !== false;
+    if (requireCaptured && !isCaptured) return "payment_not_captured";
+    if (!requireCaptured && !["authorized", "captured"].includes(gatewayStatus)) return "payment_not_successful";
+    if (["paid", "completed"].includes(String(paymentRow.status || "").toLowerCase()) &&
+        paymentRow.razorpay_payment_id && String(paymentRow.razorpay_payment_id) !== String(paymentId)) return "payment_id_mismatch";
+    return null;
+}
+
+function paymentVerificationError(code, message) {
+    return Object.assign(new Error(message), { statusCode: 409, code });
 }
 
 const normalizeCouponCode = (value) => String(value || "").trim().toUpperCase();
@@ -264,52 +319,9 @@ async function buildServiceRequestPaymentQuote({
 }
 
 async function resolveRequestBaseAmount(requestRow, pricingConfig) {
-    if (isTowingServiceType(requestRow?.service_type)) {
-        const stored = toPositiveMoney(requestRow?.amount ?? requestRow?.service_charge);
-        if (stored != null) return stored;
-    }
-
-    const technicianId = Number(requestRow?.technician_id);
-    let technicianProfile = null;
-
-    if (Number.isFinite(technicianId) && technicianId > 0) {
-        if (
-            requestRow?.technician_pricing != null ||
-            requestRow?.technician_service_costs != null ||
-            requestRow?.pricing != null ||
-            requestRow?.service_costs != null
-        ) {
-            technicianProfile = {
-                pricing: requestRow?.technician_pricing ?? requestRow?.pricing ?? null,
-                service_costs: requestRow?.technician_service_costs ?? requestRow?.service_costs ?? null
-            };
-        } else {
-            const pool = await getPool();
-            const [techRows] = await pool.query(
-                "SELECT pricing, service_costs FROM technicians WHERE id = ? LIMIT 1",
-                [technicianId]
-            );
-            if (techRows.length > 0) {
-                technicianProfile = techRows[0];
-            }
-        }
-    }
-
-    const techAmount = technicianProfile
-        ? estimateRequestAmount(
-            { service_type: requestRow?.service_type, vehicle_type: requestRow?.vehicle_type },
-            technicianProfile
-        )
-        : null;
-    if (techAmount != null) return techAmount;
-
-    const direct = toPositiveMoney(requestRow?.amount ?? requestRow?.service_charge);
-    if (direct != null) return direct;
-    return estimateRequestAmountAsync(
-        { service_type: requestRow?.service_type, vehicle_type: requestRow?.vehicle_type },
-        null,
-        pricingConfig
-    );
+    const amount = resolveServiceRequestBillingBase(requestRow);
+    if (amount == null || amount < 0) throw new Error("Accepted service price is missing; registered rates cannot be substituted at payment.");
+    return amount;
 }
 
 function timingSafeEqualHex(left, right) {
@@ -328,8 +340,8 @@ async function upsertPendingRazorpayPayment({
     coupon = null,
     technicianAmount = null,
 }) {
-    const pricingSnapshot = buildMarketplacePricingSnapshot({ breakdown, coupon });
     const resolvedTechnicianAmount = toPositiveMoney(technicianAmount) ?? breakdown.baseAmount;
+    const pricingSnapshot = { ...buildMarketplacePricingSnapshot({ breakdown, coupon }), technician_amount: resolvedTechnicianAmount };
     const [existing] = await pool.query(
         `SELECT id
          FROM payments
@@ -404,19 +416,14 @@ async function upsertPendingRazorpayPayment({
 
 async function markClientSideVerification({
     pool,
-    userId,
     requestId,
     orderId,
     paymentId,
     signature,
-    breakdown,
-    coupon = null,
-    technicianAmount = null,
+    requestRow = null,
 }) {
-    const pricingSnapshot = buildMarketplacePricingSnapshot({ breakdown, coupon });
-    const resolvedTechnicianAmount = toPositiveMoney(technicianAmount) ?? breakdown.baseAmount;
     const [existing] = await pool.query(
-        `SELECT id
+        `SELECT *
          FROM payments
          WHERE service_request_id = ? AND razorpay_order_id = ?
          ORDER BY id DESC
@@ -424,7 +431,29 @@ async function markClientSideVerification({
         [requestId, orderId]
     );
 
+    // A signature binds gateway IDs, not a price. Without our persisted checkout
+    // agreement there is no safe amount to reconstruct from today's request.
+    if (existing.length === 0) {
+        throw paymentVerificationError("PAYMENT_ORDER_NOT_FOUND", "The original checkout agreement is missing. Contact support to reconcile this payment.");
+    }
+
     if (existing.length > 0) {
+        const storedPayment = existing[0];
+        if (!paymentMatchesAcceptedPrice(requestRow, storedPayment)) {
+            const error = new Error("This payment order has an older service price. Create a new order for the accepted price.");
+            error.statusCode = 409;
+            error.code = "STALE_PAYMENT_QUOTE";
+            throw error;
+        }
+        const gatewayPayment = await razorpay.payments.fetch(paymentId);
+        const mismatch = gatewayPaymentMismatch(storedPayment, gatewayPayment,
+            { orderId, paymentId, requestRow, requireCaptured: false });
+        if (mismatch) throw paymentVerificationError(mismatch.toUpperCase(), "The gateway payment does not match the saved checkout agreement.");
+        const recordedBreakdown = buildServiceRequestPaymentDetails({ paymentRow: storedPayment, fallbackPaymentMode: "upi" });
+        const recordedTechnicianAmount = Number(storedPayment.technician_amount);
+        const recordedSnapshot = safeParseObject(storedPayment.pricing_snapshot) ?? {
+            ...buildMarketplacePricingSnapshot({ breakdown: recordedBreakdown }), technician_amount: recordedTechnicianAmount,
+        };
         await pool.execute(
             `UPDATE payments
              SET status = ?, razorpay_payment_id = ?, razorpay_signature = ?, currency = ?, amount = ?, base_amount = ?,
@@ -434,63 +463,18 @@ async function markClientSideVerification({
                 "PROCESSING",
                 paymentId,
                 signature,
-                breakdown.currency,
-                breakdown.totalAmount,
-                breakdown.baseAmount,
-                breakdown.platformFee,
-                breakdown.paymentFee,
-                resolvedTechnicianAmount,
-                JSON.stringify(pricingSnapshot),
+                recordedBreakdown.currency,
+                recordedBreakdown.totalAmount,
+                recordedBreakdown.baseAmount,
+                recordedBreakdown.platformFee,
+                recordedBreakdown.paymentFee,
+                recordedTechnicianAmount,
+                JSON.stringify(recordedSnapshot),
                 existing[0].id
             ]
         );
-        return existing[0].id;
+        return { id: existing[0].id, gatewayPayment };
     }
-
-    const [insertResult] = await pool.execute(
-        `INSERT INTO payments (
-            user_id,
-            service_request_id,
-            payment_method,
-            status,
-            currency,
-            amount,
-            base_amount,
-            platform_fee,
-            payment_fee,
-            technician_amount,
-            is_settled,
-            payment_to_technician_status,
-            ledger_status,
-            pricing_snapshot,
-            razorpay_order_id,
-            razorpay_payment_id,
-            razorpay_signature,
-            verified_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-            userId,
-            requestId,
-            "razorpay",
-            "PROCESSING",
-            breakdown.currency,
-            breakdown.totalAmount,
-            breakdown.baseAmount,
-            breakdown.platformFee,
-            breakdown.paymentFee,
-            resolvedTechnicianAmount,
-            true,
-            PAYMENT_TO_TECHNICIAN_STATUS.pending,
-            PAYMENT_LEDGER_STATUS.pending,
-            JSON.stringify(pricingSnapshot),
-            orderId,
-            paymentId,
-            signature,
-            new Date()
-        ]
-    );
-
-    return insertResult.insertId;
 }
 
 function buildInvoiceData({ invoiceId, request, breakdown, paymentId, orderId }) {
@@ -535,7 +519,7 @@ async function sendInvoiceEmailFromDatabase({ pool, invoiceId, toEmail, invoiceD
     return true;
 }
 
-async function finalizeCapturedServicePayment({ orderId, paymentId }) {
+async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayment }) {
     const pool = await getPool();
     const conn = await pool.getConnection();
 
@@ -589,7 +573,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
 
         const [requestRows] = await conn.query(
             `SELECT sr.id, sr.user_id, sr.technician_id, sr.service_type, sr.vehicle_type, sr.amount, sr.service_charge,
-                    sr.technician_estimated_earning,
+                    sr.technician_estimated_earning, sr.pricing_snapshot, sr.accepted_time,
                     sr.address, sr.drop_address, sr.drop_latitude, sr.drop_longitude,
                     sr.route_distance_km, sr.estimated_duration, sr.route_metadata_json,
                     sr.pricing_breakdown_json, sr.estimated_price, sr.final_price,
@@ -617,23 +601,24 @@ async function finalizeCapturedServicePayment({ orderId, paymentId }) {
         }
 
         const request = requestRows[0];
+        if (!hasAcceptedRequestPricing(request)) {
+            await conn.rollback();
+            return { ...result, processed: false, duplicate: false, reason: "request_not_accepted" };
+        }
+        if (!paymentMatchesAcceptedPrice(request, paymentRow)) {
+            await conn.rollback();
+            return { ...result, processed: false, duplicate: false, reason: "stale_payment_quote" };
+        }
+        const mismatch = gatewayPaymentMismatch(paymentRow, gatewayPayment, { orderId, paymentId, requestRow: request });
+        if (mismatch) {
+            await conn.rollback();
+            return { ...result, processed: false, duplicate: false, reason: mismatch };
+        }
         const pricingConfig = await getPlatformPricingConfig();
-        const baseAmount = await resolveRequestBaseAmount(request, pricingConfig);
-        const breakdown = computeServiceRequestPaymentAmounts(baseAmount, {
-            currency: pricingConfig?.currency,
-            paymentMode: "upi",
-            ...getStoredDiscountOptions(request),
-        });
-        const technicianAmount = await resolveTechnicianPaymentAmount({
-            requestRow: request,
-            technicianProfile: {
-                id: request.technician_id,
-                pricing: request.technician_pricing,
-                service_costs: request.technician_service_costs,
-            },
-            connection: conn,
-        });
-        const resolvedTechnicianAmount = technicianAmount ?? breakdown.baseAmount;
+        // The gateway captured an existing order. Its stored checkout amounts
+        // remain authoritative even if coupon/profile fields changed meanwhile.
+        const breakdown = buildServiceRequestPaymentDetails({ paymentRow, currency: pricingConfig?.currency, fallbackPaymentMode: "upi" });
+        const resolvedTechnicianAmount = Number(paymentRow.technician_amount);
         const isTowingRequest = isTowingServiceType(request?.service_type);
         const paidRequestStatus = isTowingRequest ? "payment_pending" : "completed";
 
@@ -910,56 +895,7 @@ export async function razorpayWebhookHandler(req, res) {
     }
 
     try {
-        let finalized = await finalizeCapturedServicePayment({ orderId, paymentId });
-
-        // Backfill support: if no payment row exists yet, attempt to reconstruct it from Razorpay notes.
-        if (!finalized.processed && finalized.reason === "payment_row_not_found") {
-            const requestIdFromNotes = Number(paymentEntity?.notes?.requestId || paymentEntity?.notes?.request_id);
-            const userIdFromNotes = Number(paymentEntity?.notes?.userId || paymentEntity?.notes?.user_id);
-
-            if (Number.isFinite(requestIdFromNotes) && requestIdFromNotes > 0 && Number.isFinite(userIdFromNotes) && userIdFromNotes > 0) {
-                const pool = await getPool();
-                const pricingConfig = await getPlatformPricingConfig();
-                const [reqRows] = await pool.query(
-                    `SELECT sr.id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type, sr.technician_id,
-                            sr.technician_estimated_earning, sr.drop_address, sr.route_distance_km,
-                            sr.applied_coupon_code, sr.applied_discount_percent, sr.applied_discount_amount,
-                            t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
-                     FROM service_requests sr
-                     LEFT JOIN technicians t ON t.id = sr.technician_id
-                     WHERE sr.id = ? AND sr.user_id = ?
-                     LIMIT 1`,
-                    [requestIdFromNotes, userIdFromNotes]
-                );
-
-                if (reqRows.length > 0) {
-                    const baseAmount = await resolveRequestBaseAmount(reqRows[0], pricingConfig);
-                    const breakdown = computeServiceRequestPaymentAmounts(baseAmount, {
-                        currency: pricingConfig?.currency,
-                        paymentMode: "upi",
-                        ...getStoredDiscountOptions(reqRows[0]),
-                    });
-                    const technicianAmount = await resolveTechnicianPaymentAmount({
-                        requestRow: reqRows[0],
-                        technicianProfile: {
-                            id: reqRows[0].technician_id,
-                            pricing: reqRows[0].technician_pricing,
-                            service_costs: reqRows[0].technician_service_costs,
-                        },
-                        connection: pool,
-                    });
-                    await upsertPendingRazorpayPayment({
-                        pool,
-                        userId: userIdFromNotes,
-                        requestId: requestIdFromNotes,
-                        orderId,
-                        breakdown,
-                        technicianAmount,
-                    });
-                    finalized = await finalizeCapturedServicePayment({ orderId, paymentId });
-                }
-            }
-        }
+        const finalized = await finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayment: paymentEntity });
 
         if (!finalized.processed && finalized.reason) {
             paymentDiag("webhook_not_processed", { orderId, paymentId, reason: finalized.reason });
@@ -1129,6 +1065,7 @@ router.post('/quote', verifyUser, async (req, res) => {
         const [rows] = await pool.query(
             `SELECT id, user_id, amount, service_charge, service_type, vehicle_type, technician_id, status, payment_status,
                     drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, pricing_breakdown_json,
+                    pricing_snapshot, accepted_time, technician_estimated_earning,
                     applied_coupon_code, applied_discount_percent, applied_discount_amount
              FROM service_requests
              WHERE id = ? AND user_id = ?
@@ -1138,6 +1075,7 @@ router.post('/quote', verifyUser, async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: 'Request not found' });
 
         const requestRow = rows[0];
+        if (!ensureRequestAcceptedForPayment(res, requestRow)) return;
         if (isRequestAlreadyPaid(requestRow)) {
             return res.status(409).json({ error: 'Request already paid' });
         }
@@ -1204,7 +1142,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
         const pricingConfig = await getPlatformPricingConfig();
         const [rows] = await pool.query(
             `SELECT sr.id, sr.user_id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type, sr.technician_id,
-                    sr.technician_estimated_earning, sr.status, sr.payment_status,
+                    sr.technician_estimated_earning, sr.pricing_snapshot, sr.accepted_time, sr.status, sr.payment_status,
                     sr.drop_address, sr.drop_latitude, sr.drop_longitude, sr.route_distance_km, sr.estimated_duration,
                     sr.pricing_breakdown_json, sr.applied_coupon_code, sr.applied_discount_percent, sr.applied_discount_amount,
                     t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
@@ -1219,6 +1157,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
         }
 
         const requestRow = rows[0];
+        if (!ensureRequestAcceptedForPayment(res, requestRow)) return;
         const technicianAmount = await resolveTechnicianPaymentAmount({
             requestRow,
             technicianProfile: {
@@ -1432,7 +1371,7 @@ router.post('/confirm', verifyUser, async (req, res) => {
         const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
             `SELECT sr.id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type, sr.technician_id,
-                    sr.technician_estimated_earning, sr.user_id, sr.status, sr.payment_status,
+                    sr.technician_estimated_earning, sr.pricing_snapshot, sr.accepted_time, sr.user_id, sr.status, sr.payment_status,
                     sr.drop_address, sr.route_distance_km, sr.applied_coupon_code, sr.applied_discount_percent,
                     sr.applied_discount_amount, t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
              FROM service_requests sr
@@ -1444,39 +1383,18 @@ router.post('/confirm', verifyUser, async (req, res) => {
         if (reqRows.length === 0) return res.status(404).json({ error: 'Request not found' });
 
         const requestRow = reqRows[0];
+        if (!ensureRequestAcceptedForPayment(res, requestRow)) return;
         if (isRequestAlreadyPaid(requestRow)) {
             return res.json({ success: true, alreadyPaid: true });
         }
-        const technicianAmount = await resolveTechnicianPaymentAmount({
-            requestRow,
-            technicianProfile: {
-                id: requestRow.technician_id,
-                pricing: requestRow.technician_pricing,
-                service_costs: requestRow.technician_service_costs,
-            },
-            connection: pool,
-        });
 
-        const baseAmount = await resolveRequestBaseAmount(requestRow, pricingConfig);
-        const breakdown = computeServiceRequestPaymentAmounts(baseAmount, {
-            currency: pricingConfig?.currency,
-            paymentMode: "upi",
-            ...getStoredDiscountOptions(requestRow),
-        });
-
-        await markClientSideVerification({
+        const verification = await markClientSideVerification({
             pool,
-            userId: authUserId,
             requestId,
             orderId: razorpay_order_id,
             paymentId: razorpay_payment_id,
             signature: razorpay_signature,
-            breakdown,
-            coupon: {
-                appliedCode: requestRow.applied_coupon_code || null,
-                discountPercent: requestRow.applied_discount_percent || 0,
-            },
-            technicianAmount,
+            requestRow,
         });
 
         await pool.execute(
@@ -1484,25 +1402,9 @@ router.post('/confirm', verifyUser, async (req, res) => {
             ["razorpay", requestId]
         );
 
-        let finalized = await finalizeCapturedServicePayment({
-            orderId: razorpay_order_id,
-            paymentId: razorpay_payment_id
-        });
-
-        if (!finalized.processed && finalized.reason === "payment_row_not_found") {
-            await upsertPendingRazorpayPayment({
-                pool,
-                userId: authUserId,
-                requestId,
-                orderId: razorpay_order_id,
-                breakdown,
-                technicianAmount,
-            });
-            finalized = await finalizeCapturedServicePayment({
-                orderId: razorpay_order_id,
-                paymentId: razorpay_payment_id
-            });
-        }
+        const finalized = String(verification.gatewayPayment.status || "").toLowerCase() === "captured"
+            ? await finalizeCapturedServicePayment({ orderId: razorpay_order_id, paymentId: razorpay_payment_id, gatewayPayment: verification.gatewayPayment })
+            : { processed: false, reason: "awaiting_capture" };
 
         if (finalized.processed) {
             await processFinalizedServicePaymentNotifications(finalized, { paymentMethod: "razorpay" });
@@ -1552,7 +1454,7 @@ router.post('/confirm', verifyUser, async (req, res) => {
     } catch (err) {
         console.error('Confirm payment error:', err);
         paymentDiag("confirm_payment_failed", { requestId: req?.body?.requestId, userId: req?.user?.userId, error: err?.message || String(err) });
-        res.status(500).json({ error: 'Failed to confirm payment' });
+        res.status(err.statusCode || 500).json({ error: err.statusCode === 409 ? err.message : 'Failed to confirm payment', ...(err.code ? { code: err.code } : {}) });
     }
 });
 
@@ -1568,7 +1470,7 @@ router.post('/cash', verifyUser, async (req, res) => {
         const pricingConfig = await getPlatformPricingConfig();
         const [reqRows] = await pool.query(
             `SELECT sr.id, sr.user_id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type,
-                    sr.technician_id, sr.technician_estimated_earning, sr.status, sr.payment_status,
+                    sr.technician_id, sr.technician_estimated_earning, sr.pricing_snapshot, sr.accepted_time, sr.status, sr.payment_status,
                     sr.address, sr.drop_address, sr.drop_latitude, sr.drop_longitude, sr.route_distance_km,
                     sr.estimated_duration, sr.pricing_breakdown_json, sr.applied_coupon_code,
                     sr.applied_discount_percent, sr.applied_discount_amount,
@@ -1584,6 +1486,7 @@ router.post('/cash', verifyUser, async (req, res) => {
         }
 
         const requestRow = reqRows[0];
+        if (!ensureRequestAcceptedForPayment(res, requestRow)) return;
         const technicianId = requestRow.technician_id;
         const userId = requestRow.user_id;
         const { breakdown, coupon } = await buildServiceRequestPaymentQuote({
@@ -1676,7 +1579,7 @@ router.post('/cash', verifyUser, async (req, res) => {
                     false,
                     PAYMENT_TO_TECHNICIAN_STATUS.notApplicable,
                     PAYMENT_LEDGER_STATUS.skipped,
-                    JSON.stringify(buildMarketplacePricingSnapshot({ breakdown, coupon })),
+                    JSON.stringify({ ...buildMarketplacePricingSnapshot({ breakdown, coupon }), technician_amount: techAmount }),
                 ]
             );
 

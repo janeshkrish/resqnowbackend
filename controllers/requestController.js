@@ -4,6 +4,8 @@ import { socketService } from "../services/socket.js";
 import { closeRequestWithFinanceSync } from "../services/requestClosureService.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
 import { markTechnicianReserved, releaseTechnicianAvailability, JobOwnershipError, isTerminalJobStatus } from "../services/technicianStateService.js";
+import { createPricedDispatchOffer, dispatchOfferPricingFields } from "../services/dispatchOfferService.js";
+import { acceptedPricingSnapshot, customerPricingView, hasAcceptedRequestPricing } from "../services/dispatchPricingService.js";
 
 const ACTIVE_REQUEST_STATES = [
   "assigned",
@@ -386,12 +388,22 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
     }
 
     const conn = await pool.getConnection();
+    let assignmentOffer;
+    let previousTechnicianId;
     try {
       await conn.beginTransaction();
       const [lockedRequests] = await conn.query("SELECT * FROM service_requests WHERE id = ? FOR UPDATE", [requestId]);
       requestRow = lockedRequests[0];
       if (!requestRow) throw new JobOwnershipError("not_found", "Request not found.");
       if (isTerminalJobStatus(requestRow.status)) throw new JobOwnershipError("job_closed", "This request is already closed.");
+      previousTechnicianId = requestRow.technician_id;
+      if (hasAcceptedRequestPricing(requestRow) && Number(previousTechnicianId) === technicianId) {
+        await conn.commit();
+        return res.json({ success: true, requestId, technicianId, idempotent: true, message: "This technician already accepted the request." });
+      }
+      if (hasAcceptedRequestPricing(requestRow)) {
+        throw new JobOwnershipError("job_already_accepted", "The accepted technician and agreed price cannot be replaced through assignment.");
+      }
       // Lock both capacity rows in ID order when replacing an owner.
       const technicianIds = [...new Set([technicianId, Number(requestRow.technician_id)].filter(Boolean))].sort((a, b) => a - b);
       await conn.query(`SELECT id FROM technicians WHERE id IN (${technicianIds.map(() => "?").join(",")}) ORDER BY id FOR UPDATE`, technicianIds);
@@ -399,14 +411,16 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
       await conn.execute(
         `UPDATE service_requests
          SET technician_id = ?,
-             status = CASE
-               WHEN LOWER(COALESCE(status, '')) IN ('pending', 'open', 'assigned') THEN 'assigned'
-               ELSE status
-             END,
+             status = 'assigned',
+             accepted_time = NULL,
+             pricing_snapshot = NULL,
+             technician_estimated_earning = NULL,
              updated_at = NOW()
          WHERE id = ?`,
         [technicianId, requestId]
       );
+      assignmentOffer = await createPricedDispatchOffer(conn, requestRow, { ...technicianRows[0], id: technicianId },
+        { connection: conn, expiresAt: null });
       if (requestRow.technician_id && Number(requestRow.technician_id) !== technicianId) {
         await releaseTechnicianAvailability(conn, requestRow.technician_id, requestId);
       }
@@ -468,12 +482,13 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
       status: "assigned",
       assignedByAdmin: true,
     };
-    if (requestRow.technician_id && Number(requestRow.technician_id) !== technicianId) {
-      socketService.notifyTechnician(requestRow.technician_id, "job:revoked", assignmentPayload);
+    const technicianAssignmentPayload = { ...assignmentPayload, ...dispatchOfferPricingFields(assignmentOffer) };
+    if (previousTechnicianId && Number(previousTechnicianId) !== technicianId) {
+      socketService.notifyTechnician(previousTechnicianId, "job:revoked", assignmentPayload);
     }
-    socketService.notifyTechnician(technicianId, "job:assigned", assignmentPayload);
-    socketService.notifyUser(requestRow.user_id, "job:status_update", assignmentPayload);
-    socketService.broadcast("admin:request_status_updated", assignmentPayload);
+    socketService.notifyTechnician(technicianId, "job:assigned", technicianAssignmentPayload);
+    socketService.notifyUser(requestRow.user_id, "job:status_update", customerPricingView(technicianAssignmentPayload));
+    socketService.broadcast("admin:request_status_updated", technicianAssignmentPayload);
     socketService.broadcast("admin:technician_update", assignmentPayload);
 
     return res.json({
@@ -484,6 +499,7 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
     });
   } catch (error) {
     if (error instanceof JobOwnershipError) return res.status(error.code === "not_found" ? 404 : 409).json({ code: error.code, error: error.message });
+    if (error.statusCode === 409) return res.status(409).json({ code: error.code || "pricing_unavailable", error: error.message });
     console.error("[admin.requests.assign] failed:", error?.message || error);
     return res.status(500).json({ error: "Failed to assign request." });
   }
@@ -697,7 +713,7 @@ export async function closeRequest(req, res) {
   }
 }
 
-export async function overrideRequestPricing(req, res) {
+export async function overrideRequestPricing(req, res, { getPool: resolvePool = getPool } = {}) {
   try {
     const requestId = toPositiveInt(req.params?.requestId ?? req.body?.requestId ?? req.body?.request_id, 0, {
       min: 1,
@@ -717,88 +733,86 @@ export async function overrideRequestPricing(req, res) {
       return res.status(400).json({ error: "reason must be 1000 characters or fewer." });
     }
 
-    const pool = await getPool();
-    const [rows] = await pool.query(
-      `SELECT id, user_id, technician_id, status, payment_status, pricing_breakdown_json
-       FROM service_requests
-       WHERE id = ?
-       LIMIT 1`,
-      [requestId]
-    );
-    const requestRow = rows?.[0] || null;
-    if (!requestRow) {
-      return res.status(404).json({ error: "Request not found." });
-    }
+    const pool = await resolvePool();
+    const conn = await pool.getConnection();
+    let requestRow;
+    let mergedBreakdown;
+    let override;
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query("SELECT * FROM service_requests WHERE id = ? FOR UPDATE", [requestId]);
+      requestRow = rows?.[0] || null;
+      if (!requestRow) throw new JobOwnershipError("not_found", "Request not found.");
+      if (hasAcceptedRequestPricing(requestRow)) {
+        throw new JobOwnershipError("pricing_locked", "This request has an accepted pricing agreement and cannot be silently repriced.");
+      }
+      const paidStatus = new Set(["paid", "completed"]);
+      if (paidStatus.has(String(requestRow.status || "").toLowerCase()) ||
+          paidStatus.has(String(requestRow.payment_status || "").toLowerCase())) {
+        throw new JobOwnershipError("pricing_paid", "Cannot override pricing after payment is complete.");
+      }
+      const existingBreakdown = safeParseObject(requestRow.pricing_breakdown_json) || {};
+      override = {
+        base_amount: baseAmount,
+        final_estimated_price: finalPrice ?? existingBreakdown.final_estimated_price ?? null,
+        admin_override: true,
+        override_reason: reason || null,
+        overridden_by: resolveAdminId(req),
+        overridden_at: new Date().toISOString(),
+      };
+      mergedBreakdown = {
+        ...existingBreakdown,
+        ...override,
+      };
 
-    const paidStatus = new Set(["paid", "completed"]);
-    if (
-      paidStatus.has(String(requestRow.status || "").toLowerCase()) ||
-      paidStatus.has(String(requestRow.payment_status || "").toLowerCase())
-    ) {
-      return res.status(409).json({ error: "Cannot override pricing after payment is complete." });
-    }
+      await conn.execute(
+        `UPDATE service_requests
+         SET amount = ?,
+             estimated_price = COALESCE(?, estimated_price),
+             final_price = COALESCE(?, final_price),
+             pricing_breakdown_json = ?,
+             pricing_override_json = ?,
+             pricing_overridden_by = ?,
+             pricing_overridden_at = NOW(),
+             updated_at = NOW()
+         WHERE id = ?`,
+        [baseAmount, finalPrice, finalPrice, JSON.stringify(mergedBreakdown),
+          JSON.stringify(override), resolveAdminId(req), requestId]
+      );
 
-    const existingBreakdown = safeParseObject(requestRow.pricing_breakdown_json) || {};
-    const override = {
-      base_amount: baseAmount,
-      final_estimated_price: finalPrice ?? existingBreakdown.final_estimated_price ?? null,
-      admin_override: true,
-      override_reason: reason || null,
-      overridden_by: resolveAdminId(req),
-      overridden_at: new Date().toISOString(),
-    };
-    const mergedBreakdown = {
-      ...existingBreakdown,
-      ...override,
-    };
-
-    await pool.execute(
-      `UPDATE service_requests
-       SET amount = ?,
-           estimated_price = COALESCE(?, estimated_price),
-           final_price = COALESCE(?, final_price),
-           pricing_breakdown_json = ?,
-           pricing_override_json = ?,
-           pricing_overridden_by = ?,
-           pricing_overridden_at = NOW(),
-           updated_at = NOW()
-       WHERE id = ?`,
-      [
-        baseAmount,
-        finalPrice,
-        finalPrice,
-        JSON.stringify(mergedBreakdown),
-        JSON.stringify(override),
-        resolveAdminId(req),
+      await logAction({
+        pool: conn,
+        adminId: resolveAdminId(req),
+        actionType: "overrideRequestPricing",
+        targetId: requestId,
+        metadata: override,
+      });
+      await appendRequestTimeline({
+        pool: conn,
         requestId,
-      ]
-    );
+        eventType: "fare_overridden",
+        title: "Fare Overridden",
+        status: requestRow.status,
+        description: reason || null,
+        actorId: resolveAdminId(req),
+        metadata: override,
+      });
+      await conn.commit();
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
+    }
 
-    await logAction({
-      pool,
-      adminId: resolveAdminId(req),
-      actionType: "overrideRequestPricing",
-      targetId: requestId,
-      metadata: override,
-    });
-    await appendRequestTimeline({
-      pool,
+    socketService.notifyUser(requestRow.user_id, "request:pricing_updated", customerPricingView({
       requestId,
-      eventType: "fare_overridden",
-      title: "Fare Overridden",
       status: requestRow.status,
-      description: reason || null,
-      actorId: resolveAdminId(req),
-      metadata: override,
-    });
-
-    socketService.notifyUser(requestRow.user_id, "request:pricing_updated", {
-      requestId,
       amount: baseAmount,
       finalPrice,
       pricingBreakdown: mergedBreakdown,
-    });
-    if (requestRow.technician_id) {
+    }));
+    if (requestRow.technician_id && hasAcceptedRequestPricing(requestRow)) {
       socketService.notifyTechnician(requestRow.technician_id, "request:pricing_updated", {
         requestId,
         amount: baseAmount,
@@ -821,6 +835,7 @@ export async function overrideRequestPricing(req, res) {
       pricingBreakdown: mergedBreakdown,
     });
   } catch (error) {
+    if (error instanceof JobOwnershipError) return res.status(error.code === "not_found" ? 404 : 409).json({ code: error.code, error: error.message });
     console.error("[admin.requests.pricingOverride] failed:", error?.message || error);
     return res.status(500).json({ error: "Failed to override pricing." });
   }

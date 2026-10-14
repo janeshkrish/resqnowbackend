@@ -13,6 +13,8 @@ import { getRoute } from "./routeService.js";
 import { isTowingServiceType } from "./towingServiceType.js";
 import { buildTechnicianJobDetails } from "./technicianJobDetails.js";
 import { requiredTowTruckType, evaluateTowTruckCapability, loadTechnicianFleetVehicles } from "./towTruckCapability.js";
+import { createPricedDispatchOffer, dispatchOfferPricingFields } from "./dispatchOfferService.js";
+import { buildDispatchPricingSnapshot, readDispatchPricingSnapshot, customerPricingView } from "./dispatchPricingService.js";
 
 
 /**
@@ -290,13 +292,13 @@ export const jobDispatchService = {
      * Dispatch Job to Technicians.
      * Creates offers and sends socket notifications.
      */
-    async dispatchJob(jobRequest, technicians) {
+    async dispatchJob(jobRequest, technicians, { pool: suppliedPool, sockets = socketService, estimateEarning = estimateTechnicianEarningForRequest } = {}) {
         if (!technicians || technicians.length === 0) return;
-        const pool = await db.getPool();
+        const pool = suppliedPool || await db.getPool();
 
         // De-duplicate by existing offers so a technician gets one active alert per request
         const [existingOffers] = await pool.query(
-            "SELECT technician_id FROM dispatch_offers WHERE service_request_id = ?",
+            "SELECT technician_id FROM dispatch_offers WHERE service_request_id = ? AND status = 'pending' AND pricing_snapshot IS NOT NULL AND (expires_at IS NULL OR expires_at > NOW())",
             [jobRequest.id]
         );
         const offeredSet = new Set((existingOffers || []).map((o) => String(o.technician_id)));
@@ -306,23 +308,15 @@ export const jobDispatchService = {
             return;
         }
 
-        // 1. Create Offers
-        const values = freshTechnicians.map(t => [jobRequest.id, t.id, 'pending', new Date(Date.now() + 20_000)]);
-        if (values.length > 0) {
-            const sql = "INSERT INTO dispatch_offers (service_request_id, technician_id, status, expires_at) VALUES ?";
-            const q = pool.format(sql, [values]);
-            await pool.query(q);
-            console.log(`[Dispatch] Created ${values.length} offer(s) for request #${jobRequest.id}.`);
-        }
-
-        // 2. Send WebSocket Alerts
+        // Invalid/missing registered rates cannot become zero or platform-priced offers.
         for (const t of freshTechnicians) {
-            const earningEstimate = await estimateTechnicianEarningForRequest({
-                request: jobRequest,
-                technician: t,
-                technicianId: t.id,
-            });
-            const resolvedOfferAmount = toPositiveMoney(earningEstimate?.amount) ?? 0;
+            let offer;
+            try { offer = await createPricedDispatchOffer(pool, jobRequest, t, { estimateEarning }); }
+            catch (error) {
+                if (!["pricing_unavailable", "offer_unavailable"].includes(error.code)) throw error;
+                console.warn(`[Dispatch] Skipped technician ${t.id}: ${error.code}`);
+                continue;
+            }
             const offerPayload = {
                 requestId: jobRequest.id,
                 isTowing: isTowingServiceType(jobRequest.service_type),
@@ -334,12 +328,7 @@ export const jobDispatchService = {
                 ...buildTowingDispatchFields(jobRequest),
                 ...buildTechnicianJobDetails(jobRequest),
                 description: jobRequest.description || null,
-                amount: resolvedOfferAmount,
-                priceAmount: resolvedOfferAmount,
-                technicianEstimatedEarning: resolvedOfferAmount,
-                estimatedEarnings: resolvedOfferAmount,
-                earningsSource: earningEstimate?.source || null,
-                earningsBreakdown: earningEstimate?.breakdown || null,
+                ...dispatchOfferPricingFields(offer),
                 distance: t.distanceText,
                 locationDistance: t.distanceText,
                 eta: t.etaText,
@@ -347,16 +336,16 @@ export const jobDispatchService = {
             };
 
             // Emit to technician room and push notification
-            socketService.io.to(`technician_${t.id}`).emit("JOB_ALERT", offerPayload);
-            socketService.notifyTechnician(t.id, "job_offer", offerPayload);
-            socketService.io.to(`technician_${t.id}`).emit("job:list_update", {
+            sockets.io?.to(`technician_${t.id}`).emit("JOB_ALERT", offerPayload);
+            sockets.notifyTechnician(t.id, "job_offer", offerPayload);
+            sockets.io?.to(`technician_${t.id}`).emit("job:list_update", {
                 requestId: jobRequest.id,
                 action: "created"
             });
             console.log(`[Dispatch] Notified technician ${t.id} for request #${jobRequest.id}.`);
 
             // Push Notification (Simulated)
-            db.query("INSERT INTO notifications (type, title, message, created_at) VALUES (?, ?, ?, NOW())", [
+            pool.query("INSERT INTO notifications (type, title, message, created_at) VALUES (?, ?, ?, NOW())", [
                 'job_offer',
                 'New Job Alert!',
                 `Service: ${jobRequest.service_type}. ETA: ${t.etaText}`
@@ -367,7 +356,7 @@ export const jobDispatchService = {
     /**
      * Technician Accepts Job (Atomic Locking)
      */
-    async getAcceptanceOutcome(technicianId, requestId, { pool: suppliedPool } = {}) {
+    async getAcceptanceOutcome(technicianId, requestId, { pool: suppliedPool, offerId = null } = {}) {
         const pool = suppliedPool || await db.getPool();
         const conn = await pool.getConnection();
         try {
@@ -375,7 +364,7 @@ export const jobDispatchService = {
             const [jobs] = await conn.query("SELECT * FROM service_requests WHERE id = ? FOR UPDATE", [requestId]);
             const job = jobs[0];
             const [offers] = await conn.query(
-                `SELECT id, status, expires_at IS NOT NULL AND expires_at <= NOW() AS expired
+                `SELECT id, status, pricing_snapshot, expires_at IS NOT NULL AND expires_at <= NOW() AS expired
                  FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ? ORDER BY id DESC LIMIT 1`,
                 [requestId, technicianId]
             );
@@ -387,7 +376,9 @@ export const jobDispatchService = {
             } else if (["completed", "paid", "closed", "cancelled", "rejected", "expired"].includes(String(job.status).trim().toLowerCase())) {
                 result = { state: "closed" };
             } else if (job.technician_id != null && !ownsJob) result = { state: "taken" };
-            else if (ownsJob && String(job.status).trim().toLowerCase() === "assigned") result = { state: "available" };
+            else if (offerId != null && String(offers[0]?.id) !== String(offerId)) result = { state: "expired", code: "offer_unavailable" };
+            else if (!readDispatchPricingSnapshot(offers[0]?.pricing_snapshot, { requestId, technicianId })) result = { state: "expired", code: "offer_price_unavailable" };
+            else if (ownsJob && String(job.status).trim().toLowerCase() === "assigned" && offers[0]?.status === "pending" && !Number(offers[0].expired)) result = { state: "available" };
             else if (offers[0]?.status === "pending" && !Number(offers[0].expired) && String(job.status).trim().toLowerCase() === "pending") {
                 result = { state: "available" };
             } else result = { state: "expired" };
@@ -423,7 +414,7 @@ export const jobDispatchService = {
         } finally { conn.release(); }
     },
 
-    async acceptJob(technicianId, requestId, { pool: suppliedPool, estimateEarning = estimateTechnicianEarningForRequest, sockets = socketService, requireOffer = true } = {}) {
+    async acceptJob(technicianId, requestId, { pool: suppliedPool, estimateEarning = estimateTechnicianEarningForRequest, sockets = socketService, requireOffer = true, offerId = null } = {}) {
         const pool = suppliedPool || await db.getPool();
         const conn = await pool.getConnection();
         let acceptedJob = null;
@@ -433,6 +424,7 @@ export const jobDispatchService = {
         let shouldNotify = false;
         let shouldRevokeOffers = false;
         let assignedAmount = null;
+        let winningOffer = null;
 
         try {
             await conn.beginTransaction();
@@ -498,9 +490,13 @@ export const jobDispatchService = {
                 await conn.rollback();
                 return { success: false, code: "job_taken", reason: "Job already accepted by another technician." };
             }
-            if (!sameTechnician && requireOffer) {
+            if (requireOffer) {
+                if (offerId == null || !Number.isSafeInteger(Number(offerId)) || Number(offerId) <= 0) {
+                    await conn.rollback();
+                    return { success: false, code: "offer_required", reason: "Please open the latest priced offer before accepting this job." };
+                }
                 const [offers] = await conn.query(
-                    `SELECT id, status, expires_at IS NOT NULL AND expires_at <= NOW() AS expired
+                    `SELECT id, status, pricing_snapshot, expires_at IS NOT NULL AND expires_at <= NOW() AS expired
                      FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ?
                      ORDER BY id DESC LIMIT 1 FOR UPDATE`,
                     [requestId, technicianId]
@@ -511,120 +507,61 @@ export const jobDispatchService = {
                     const expired = offer?.status === "expired" || Number(offer?.expired);
                     return { success: false, code: expired ? "offer_expired" : "offer_unavailable", reason: expired ? "This job offer has expired." : "This job offer is no longer available." };
                 }
+                if (offerId != null && String(offer.id) !== String(offerId)) {
+                    await conn.rollback();
+                    return { success: false, code: "offer_unavailable", reason: "This offer has been replaced. Please open the latest job offer." };
+                }
+                winningOffer = offer;
             }
             await markTechnicianReserved(conn, technicianId, requestId, { alreadyOwned: sameTechnician, request: sourceJob });
-            const earningEstimate = await estimateEarning({
-                request: sourceJob,
-                technician: tech,
-                technicianId,
-                connection: conn,
-            });
-            const isTowingJob = isTowingServiceType(sourceJob?.service_type);
-            assignedAmount =
-                toPositiveMoney(earningEstimate?.amount) ??
-                toPositiveMoney(sourceJob?.amount) ??
-                toPositiveMoney(sourceJob?.service_charge);
-            const customerAmount = isTowingJob
-                ? toPositiveMoney(sourceJob?.amount) ?? toPositiveMoney(sourceJob?.service_charge)
-                : null;
-            const resolvedAmount = customerAmount ?? assignedAmount ?? sourceJob?.amount ?? sourceJob?.service_charge ?? null;
-
-            if (terminalStatuses.has(currentStatus)) {
+            let pricingSnapshot = readDispatchPricingSnapshot(winningOffer?.pricing_snapshot, { requestId, technicianId });
+            if (!pricingSnapshot && requireOffer) {
                 await conn.rollback();
-                return {
-                    success: false,
-                    code: "conflict",
-                    reason: `Job is already ${currentStatus}.`
-                };
+                return { success: false, code: "offer_price_unavailable", reason: "This offer has no valid saved price. Please wait for a refreshed offer." };
             }
-
-            // Idempotent branch: already accepted/owned by same technician.
-            if (sameTechnician && sameTechIdempotentStatuses.has(currentStatus)) {
-                idempotent = true;
-
-                // Legacy compatibility: convert stale "assigned" into "accepted".
-                if (currentStatus === "assigned") {
-                    await conn.query(
-                        "UPDATE service_requests SET status = 'accepted', amount = COALESCE(amount, ?), technician_estimated_earning = ?, accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ?",
-                        [resolvedAmount, assignedAmount, requestId]
-                    );
-                    await conn.query(
-                        "UPDATE dispatch_offers SET status = 'accepted' WHERE service_request_id = ? AND technician_id = ?",
-                        [requestId, technicianId]
-                    );
-                    await conn.query(
-                        "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id != ? AND status = 'pending'",
-                        [requestId, technicianId]
-                    );
-                    shouldNotify = true;
-                    shouldRevokeOffers = true;
-                    acceptedJob = {
-                        ...sourceJob,
-                        technician_id: technicianId,
-                        status: "accepted",
-                        amount: resolvedAmount,
-                        technician_estimated_earning: assignedAmount,
-                        updated_at: new Date().toISOString(),
-                    };
-                } else {
-                    acceptedJob = {
-                        ...sourceJob,
-                        technician_id: technicianId,
-                        amount: resolvedAmount,
-                    };
-                }
-
-                await conn.commit();
-            } else {
-                // Conflict: already owned by another technician in non-pending states.
-                if (currentStatus !== "pending" || (existingTechnicianId && !sameTechnician)) {
-                    await conn.rollback();
-                    return {
-                        success: false,
-                        code: "job_taken",
-                        reason: "Job already accepted by another technician."
-                    };
-                }
-
-                // Fresh accept path.
-                const [acceptUpdateResult] = await conn.query(
-                    "UPDATE service_requests SET technician_id = ?, status = 'accepted', amount = ?, technician_estimated_earning = ?, accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ? AND status = 'pending'",
-                    [technicianId, resolvedAmount, assignedAmount, requestId]
+            if (!pricingSnapshot) {
+                pricingSnapshot = await buildDispatchPricingSnapshot({ request: sourceJob, technician: tech, technicianId, connection: conn, estimateEarning });
+                const [created] = await conn.query(
+                    "INSERT INTO dispatch_offers (service_request_id, technician_id, status, sent_at, expires_at, pricing_snapshot) VALUES (?, ?, 'pending', NOW(), DATE_ADD(NOW(), INTERVAL 20 SECOND), ?)",
+                    [requestId, technicianId, JSON.stringify(pricingSnapshot)]
                 );
-                const updatedRows = Number(acceptUpdateResult?.affectedRows || 0);
-                console.log(
-                    `[Dispatch Accept] requestId=${requestId} technicianId=${technicianId} affectedRows=${updatedRows}`
-                );
-                if (updatedRows !== 1) {
-                    await conn.rollback();
-                    return {
-                        success: false,
-                        code: "job_taken",
-                        reason: "Job already accepted by another technician."
-                    };
-                }
-
-                await conn.query(
-                    "UPDATE dispatch_offers SET status = 'accepted' WHERE service_request_id = ? AND technician_id = ?",
-                    [requestId, technicianId]
-                );
-                await conn.query(
-                    "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id != ? AND status = 'pending'",
-                    [requestId, technicianId]
-                );
-
-                acceptedJob = {
-                    ...sourceJob,
-                    technician_id: technicianId,
-                    status: "accepted",
-                    amount: resolvedAmount,
-                    technician_estimated_earning: assignedAmount,
-                    updated_at: new Date().toISOString(),
-                };
-                shouldNotify = true;
-                shouldRevokeOffers = true;
-                await conn.commit();
+                winningOffer = { id: created.insertId };
             }
+            pricingSnapshot = { ...pricingSnapshot, offer_id: Number(winningOffer.id) };
+            assignedAmount = pricingSnapshot.technician_earning;
+            const resolvedAmount = pricingSnapshot.customer_base_amount;
+
+            const [acceptUpdateResult] = await conn.query(
+                "UPDATE service_requests SET technician_id = ?, status = 'accepted', amount = ?, service_charge = ?, price = ?, technician_estimated_earning = ?, estimated_price = ?, final_price = ?, pricing_snapshot = ?, pricing_breakdown_json = ?, accepted_time = COALESCE(accepted_time, NOW()), updated_at = NOW() WHERE id = ? AND status IN ('pending', 'assigned')",
+                [technicianId, resolvedAmount, resolvedAmount, resolvedAmount, assignedAmount,
+                    pricingSnapshot.customer_total_amount, pricingSnapshot.customer_total_amount,
+                    JSON.stringify(pricingSnapshot), JSON.stringify(pricingSnapshot.pricing_breakdown), requestId]
+            );
+            if (Number(acceptUpdateResult.affectedRows) !== 1) {
+                await conn.rollback();
+                return { success: false, code: "job_taken", reason: "Job already accepted by another technician." };
+            }
+            await conn.query("UPDATE dispatch_offers SET status = 'accepted' WHERE id = ? AND status = 'pending'", [winningOffer.id]);
+            await conn.query(
+                "UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND id != ? AND status = 'pending'",
+                [requestId, winningOffer.id]
+            );
+            acceptedJob = {
+                ...sourceJob, technician_id: technicianId, status: "accepted",
+                amount: resolvedAmount, service_charge: resolvedAmount, price: resolvedAmount,
+                technician_estimated_earning: assignedAmount,
+                estimated_price: pricingSnapshot.customer_total_amount,
+                final_price: pricingSnapshot.customer_total_amount,
+                pricing_snapshot: pricingSnapshot,
+                pricing_breakdown_json: pricingSnapshot.pricing_breakdown,
+                accepted_time: sourceJob.accepted_time || new Date().toISOString(),
+                offerId: Number(winningOffer.id), offer_id: Number(winningOffer.id),
+                pricing_status: "confirmed", pricing_finalized: true,
+                updated_at: new Date().toISOString(),
+            };
+            shouldNotify = true;
+            shouldRevokeOffers = true;
+            await conn.commit();
 
             acceptedJob = {
                 ...acceptedJob,
@@ -633,7 +570,7 @@ export const jobDispatchService = {
 
         } catch (err) {
             try { await conn.rollback(); } catch { /* ignore rollback errors */ }
-            if (err instanceof JobOwnershipError) return { success: false, code: err.code, reason: err.message };
+            if (err instanceof JobOwnershipError || err.code === "pricing_unavailable") return { success: false, code: err.code, reason: err.message };
             if (err.code === "ER_LOCK_DEADLOCK" || err.code === "ER_LOCK_WAIT_TIMEOUT" || Number(err.errno) === 1213) {
                 return { success: false, code: "acceptance_retry", reason: "Another job action is being processed. Please check the job and retry." };
             }
@@ -704,11 +641,12 @@ export const jobDispatchService = {
                     location: { lat: tech.latitude, lng: tech.longitude }
                 };
 
-                sockets.io.emit(`job_update_${requestId}`, { status: "accepted", technician: techInfo });
+                sockets.io?.to(`request_${requestId}`).emit(`job_update_${requestId}`, { ...customerPricingView(acceptedJob), status: "accepted", technician: techInfo });
                 sockets.notifyUser(sourceJob?.user_id, "job:status_update", {
                     requestId,
                     status: "accepted",
-                    technicianId
+                    technicianId,
+                    ...customerPricingView(acceptedJob),
                 });
 
                 const acceptedPayload = {
@@ -717,7 +655,7 @@ export const jobDispatchService = {
                     request: acceptedJob
                 };
 
-                sockets.io.to(`technician_${technicianId}`).emit("job_assigned", acceptedPayload);
+                sockets.io?.to(`technician_${technicianId}`).emit("job_assigned", acceptedPayload);
                 sockets.notifyTechnician(technicianId, "job:assigned", {
                     ...acceptedPayload,
                     id: String(requestId),
@@ -728,8 +666,10 @@ export const jobDispatchService = {
                     customerName,
                     serviceType: sourceJob?.service_type,
                     locationDistance,
-                    ...buildTowingDispatchFields(sourceJob),
-                    ...buildTechnicianJobDetails(sourceJob),
+                    ...buildTowingDispatchFields(acceptedJob),
+                    ...buildTechnicianJobDetails(acceptedJob),
+                    offerId: acceptedJob.offerId,
+                    offer_id: acceptedJob.offer_id,
                     priceAmount: assignedAmount ?? 0,
                     amount: assignedAmount ?? 0,
                     technicianEstimatedEarning: assignedAmount ?? 0,
