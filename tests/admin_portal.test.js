@@ -323,3 +323,10 @@ test("the portal router is admin-only, answers 404 for a missing customer and re
   await handler(failing, "/today")({ query: {} }, error);
   assert.equal(error.statusCode, 500);
 });
+
+test("portal SQL avoids subqueries inside a join condition, which TiDB in production rejects", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../services/adminPortalService.js", import.meta.url), "utf8");
+  const joins = source.match(/JOIN\s+\w+\s+\w+\s+ON\s+[^\n]*\(\s*SELECT/gi) || [];
+  assert.deepEqual(joins, []);
+});

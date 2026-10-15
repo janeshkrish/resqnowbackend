@@ -259,7 +259,8 @@ export async function listRequests({ pool, query = {}, now = Date.now() }) {
        FROM service_requests sr
        LEFT JOIN users u ON u.id = sr.user_id
        LEFT JOIN technicians t ON t.id = sr.technician_id
-       LEFT JOIN payments p ON p.id = (SELECT MAX(p2.id) FROM payments p2 WHERE p2.service_request_id = sr.id)
+       LEFT JOIN (SELECT service_request_id, MAX(id) AS id FROM payments GROUP BY service_request_id) lp ON lp.service_request_id = sr.id
+       LEFT JOIN payments p ON p.id = lp.id
        WHERE ${where.join(" AND ")}
        ORDER BY sr.created_at DESC
        LIMIT 5000`, params);
