@@ -9,8 +9,8 @@ import { answerValue, readRequestDetails } from "./requestDetails.js";
 import { roundMoney } from "../utils/money.js";
 import { getPool } from "../db.js";
 import { mapStoredPricingRowToTechnicianPricing, normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
-import { pricingSubcategoryFor } from "./vehicleClasses.js";
 import { normalizeFleetTowTruckType, requiredTowTruckType } from "./towTruckCapability.js";
+import { getVehicleServicePolicy, pricingSubtypeContext, chargingCompatibility, hasSubtypeTariff, applyStandardPricingSubtype } from "./vehicleServiceCompatibility.js";
 
 const toPositiveMoney = (value) => {
   const parsed = Number(value);
@@ -37,7 +37,7 @@ function toIsoTimestamp(value) {
 
 function resolveVehicleType(request = {}) {
   return (
-    canonicalizeVehicleFamily(request.vehicle_type || request.vehicleType) ||
+    getVehicleServicePolicy(request).family ||
     canonicalizeVehicleFamily(String(request.service_type || request.serviceType || "").split("-")[0]) ||
     "car"
   );
@@ -142,31 +142,72 @@ const nonNegativeNumber = (value) => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 };
 
-async function loadRegisteredServicePricingRow({ technicianId, domain, vehicle, technician = null, connection }) {
+async function loadRegisteredServicePricingRow({ technicianId, domain, vehicle, technician = null, connection, request = null }) {
   const executor = connection || await getPool();
-  const [rows] = await executor.query(`SELECT * FROM technician_services
+  const policy = request ? getVehicleServicePolicy(request) : null;
+  if (policy?.invalidCode) return null;
+  const candidates = policy?.pricingCandidates ?? [{ vehicle_type: vehicle, vehicle_subtype: request?.vehicle_subtype }];
+  let entries = null;
+  const profileEntries = async () => {
+    if (entries) return entries;
+    let profile = technician;
+    if (!profile?.service_costs) {
+      const [profiles] = await executor.query("SELECT service_costs FROM technicians WHERE id = ? LIMIT 1", [technicianId]);
+      profile = profiles?.[0];
+    }
+    entries = normalizeTechnicianPricingEntries(profile?.service_costs, { preserveInvalid: true });
+    return entries;
+  };
+  for (const candidate of candidates) {
+    const [rows] = await executor.query(`SELECT * FROM technician_services
     WHERE technician_id = ? AND service_domain = ? AND (vehicle_type = ? OR vehicle_type = '')
     ORDER BY CASE WHEN vehicle_type = ? THEN 0 ELSE 1 END, updated_at DESC, id DESC LIMIT 1`,
-  [technicianId, domain, vehicle, vehicle]);
-  const stored = Array.isArray(rows) ? rows[0] : null;
-  if (stored) return stored;
-  let profile = technician;
-  if (!profile?.service_costs) {
-    const [profiles] = await executor.query("SELECT service_costs FROM technicians WHERE id = ? LIMIT 1", [technicianId]);
-    profile = profiles?.[0];
+      [technicianId, domain, candidate.vehicle_type, candidate.vehicle_type]);
+    const stored = Array.isArray(rows) ? rows[0] : null;
+    if (stored && !(policy?.family === 'ev' && candidate.vehicle_type === 'ev' && !stored.vehicle_type) &&
+        pricingSubtypeContext(stored, candidate, policy?.family === 'ev').eligible) {
+      return { ...stored, _pricing_vehicle_type: candidate.vehicle_type,
+        _pricing_vehicle_subtype: candidate.vehicle_subtype, _pricing_base_subtype: candidate.vehicle_base_subtype,
+        _shared_ev_service: Boolean(candidate.shared) };
+    }
+    const legacy = await profileEntries();
+    const entry = legacy.find(item => item.service_domain === domain && item.vehicle_type === candidate.vehicle_type &&
+        pricingSubtypeContext(item, candidate, policy?.family === 'ev').eligible)
+      ?? (!(policy?.family === 'ev' && candidate.vehicle_type === 'ev')
+        ? legacy.find(item => item.service_domain === domain && !item.vehicle_type &&
+          pricingSubtypeContext(item, candidate, policy?.family === 'ev').eligible) : null);
+    if (entry) return { ...entry, _pricing_vehicle_type: candidate.vehicle_type,
+      _pricing_vehicle_subtype: candidate.vehicle_subtype, _pricing_base_subtype: candidate.vehicle_base_subtype,
+      _shared_ev_service: Boolean(candidate.shared) };
   }
-  return normalizeTechnicianPricingEntries(profile?.service_costs)
-    .find((entry) => entry.service_domain === domain && (!entry.vehicle_type || entry.vehicle_type === vehicle)) ?? null;
+  return null;
 }
 
 async function estimateRegisteredTowingEarning({ request, technicianId, connection }) {
   const distance = toPositiveDistance(request.route_distance_km ?? request.routeDistanceKm);
   if (!distance || !technicianId) return null;
   const vehicleType = resolveVehicleType(request);
-  const row = await loadRegisteredServicePricingRow({ technicianId, domain: "towing", vehicle: vehicleType, connection });
-  if (!row) return null;
-  const registered = mapStoredPricingRowToTechnicianPricing(row, "towing");
-  let metadata = parseObject(row.metadata);
+  const row = await loadRegisteredServicePricingRow({ technicianId, domain: "towing", vehicle: vehicleType, connection, request });
+  if (!row || row._invalid_pricing) return null;
+  const context = pricingSubtypeContext(row, { vehicle_subtype: row._pricing_vehicle_subtype,
+    vehicle_base_subtype: row._pricing_base_subtype }, getVehicleServicePolicy(request).family === 'ev');
+  const tier = context.subcategory;
+  const selectedRow = tier ? { ...row, ...tier,
+    base_price: tier.base_price ?? tier.base_charge,
+    free_km: tier.free_km ?? tier.free_distance,
+    per_km_price: tier.per_km_price ?? tier.per_km_charge,
+    extra_km_charge: tier.per_km_price ?? tier.per_km_charge,
+    service_charge: tier.base_price ?? tier.base_charge,
+    metadata: { ...context.metadata, ...tier } } : row;
+  const registered = mapStoredPricingRowToTechnicianPricing(selectedRow, "towing");
+  if (tier) {
+    // Legacy metadata can contain parent minimums as well as SQL columns.
+    // Missing fields on an explicitly selected tier must remain missing.
+    registered.base_price = tier.base_price ?? tier.base_charge ?? null;
+    registered.free_km = tier.free_km ?? tier.free_distance ?? null;
+    registered.per_km_price = tier.per_km_price ?? tier.per_km_charge ?? null;
+  }
+  let metadata = parseObject(selectedRow.metadata);
   const seen = new Set();
   while (metadata && typeof metadata === "object" && !seen.has(metadata)) {
     seen.add(metadata);
@@ -195,7 +236,9 @@ async function estimateRegisteredTowingEarning({ request, technicianId, connecti
     distance_km: distance, time_of_day: toIsoTimestamp(request.scheduled_time || request.created_at),
   });
   return { amount: roundMoney(engine.subtotal), currency: "INR", source: entry ? "technician_fleet" : "technician",
-    breakdown: { distance_km: distance, base_price: engine.base_price, included_km: price.free_km,
+    breakdown: { pricing_vehicle_type: row._pricing_vehicle_type, pricing_vehicle_subtype: context.key || row._pricing_vehicle_subtype,
+      shared_ev_service: row._shared_ev_service,
+      distance_km: distance, base_price: engine.base_price, included_km: price.free_km,
       per_km_rate: price.per_km_price, distance_charge: engine.distance_charge, night_charge: engine.night_charge,
       subtotal: engine.subtotal, tow_truck_type: requiredType } };
 }
@@ -205,27 +248,30 @@ async function estimateRegisteredStandardEarning({ request, technician, technici
   const vehicle = resolveVehicleType(request);
   const domain = canonicalizeServiceDomain(String(request.service_type ?? request.serviceType ?? "").replace(/^(car|bike|ev|commercial)-/i, ""));
   if (!domain || !vehicle) return null;
-  const row = await loadRegisteredServicePricingRow({ technicianId, domain, vehicle, technician, connection });
-  if (!row) return null;
-  let metadata = parseObject(row.metadata) || {};
-  const seen = new Set();
-  while (metadata && typeof metadata === "object" && !seen.has(metadata) && !metadata.subcategories && metadata.metadata) {
-    seen.add(metadata); metadata = parseObject(metadata.metadata) || metadata;
-  }
-  const subtype = request.vehicle_subtype ?? request.vehicleSubtype;
-  const subcategory = metadata.subcategories?.[subtype] ?? metadata.subcategories?.[pricingSubcategoryFor(subtype)];
-  if (subtype && metadata.subcategories && Object.keys(metadata.subcategories).length && !subcategory) return null;
-  const selected = { ...row, ...(subcategory || {}), metadata };
+  const policy = getVehicleServicePolicy(request);
+  if (policy.invalidCode) return null;
+  const row = await loadRegisteredServicePricingRow({ technicianId, domain, vehicle, technician, connection, request });
+  if (!row || row._invalid_pricing) return null;
+  const subtype = row._pricing_vehicle_subtype ?? request.vehicle_subtype ?? request.vehicleSubtype;
+  const context = pricingSubtypeContext(row, { vehicle_subtype: subtype, vehicle_base_subtype: row._pricing_base_subtype }, policy.family === 'ev');
+  const { metadata, key: selectedSubtype, subcategory, hasSubcategories } = context;
+  if ((subtype || policy.family === 'ev') && hasSubcategories && !subcategory) return null;
+  if (!hasSubtypeTariff(context)) return null;
+  if (!chargingCompatibility(request, { metadata: hasSubcategories ? subcategory : metadata }).eligible) return null;
+  const selected = applyStandardPricingSubtype(row, context);
   for (const field of ["visit_charge", "service_charge", "delivery_charge", "labour_min", "price_2w_min", "price_2w_max",
     "price_4w_min", "price_4w_max", "tube_tyre_price", "tubeless_price"]) {
     if (selected[field] != null && nonNegativeNumber(selected[field]) == null) return null;
   }
   const details = readRequestDetails(request.request_details_json ?? request.requestDetails);
-  const amount = calculateTechnicianServiceRowPayout(selected, vehicle, { vehicleSubtype: subtype,
+  const pricingVehicle = row._pricing_vehicle_type || vehicle;
+  const amount = calculateTechnicianServiceRowPayout(selected, pricingVehicle, { vehicleSubtype: selectedSubtype || subtype,
     tyreType: answerValue(details, "tyretype") });
   if (amount == null || amount <= 0) return null;
   return { amount, currency: "INR", source: "technician_pricing", breakdown: {
-    service_type: domain, vehicle_type: vehicle, vehicle_subtype: subtype ?? null,
+    service_type: domain, vehicle_type: vehicle, vehicle_subtype: request.vehicle_subtype ?? request.vehicleSubtype ?? null,
+    pricing_vehicle_type: pricingVehicle, pricing_vehicle_subtype: selectedSubtype || subtype || null,
+    shared_ev_service: row._shared_ev_service,
     visit_charge: nonNegativeNumber(selected.visit_charge) ?? 0,
     delivery_charge: nonNegativeNumber(selected.delivery_charge) ?? 0,
     subtotal: amount,

@@ -1,4 +1,5 @@
 import { requiredTowTruckType, evaluateTowTruckCapability } from "./towTruckCapability.js";
+import { getVehicleServicePolicy, evaluateVehicleServiceSupport, loadChargingServiceProfiles } from './vehicleServiceCompatibility.js';
 
 const ACTIVE_JOB_STATUSES = new Set([
   "assigned",
@@ -109,6 +110,12 @@ export async function markTechnicianReserved(connOrPool, technicianId, requestId
   const requiredType = requiredTowTruckType(job);
   const continuingOwnedJob = alreadyOwned && Number(job?.technician_id) === techId &&
     isActiveJobStatus(job?.status) && normalizeStatus(job?.status) !== "assigned";
+  const vehiclePolicy = getVehicleServicePolicy(job);
+  if (!continuingOwnedJob && (vehiclePolicy.family === 'ev' || vehiclePolicy.invalidCode)) {
+    const [profile] = await loadChargingServiceProfiles(connOrPool, job, [technician]);
+    const support = evaluateVehicleServiceSupport(job, profile);
+    if (!support.eligible) throw new JobOwnershipError(support.code, 'This technician does not support this vehicle and service combination.');
+  }
   if (requiredType !== null && !continuingOwnedJob) {
     const [fleet] = await connOrPool.query(
       "SELECT vehicle_type, status FROM technician_fleet_vehicles WHERE technician_id = ? ORDER BY id FOR UPDATE",

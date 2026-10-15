@@ -1,6 +1,9 @@
 import * as db from "../db.js";
 import { jobDispatchService } from "./jobDispatchService.js";
 import { loadTechnicianFleetVehicles } from "./towTruckCapability.js";
+import { getVehicleServicePolicy, loadChargingServiceProfiles, readPricingMetadata } from './vehicleServiceCompatibility.js';
+import { normalizeTechnicianPricingEntries } from '../models/technicianPricing.js';
+import { normalizeVehicleSubtype } from './vehicleClasses.js';
 import {
   canonicalizeServiceDomain,
   canonicalizeVehicleFamily,
@@ -35,6 +38,24 @@ const hasValidCoords = (tech) =>
   Number.isFinite(Number(tech?.latitude)) && Number.isFinite(Number(tech?.longitude));
 
 const toBool = (value) => value === true || value === 1 || value === "1";
+
+function chargingProbe(technicians) {
+  for (const technician of technicians) {
+    const rows = technician.service_pricing_rows?.length ? technician.service_pricing_rows : normalizeTechnicianPricingEntries(technician.service_costs);
+    for (const row of rows.filter(row => row.service_domain === 'ev-charging' && row.vehicle_type === 'ev')) {
+      const metadata = readPricingMetadata(row.metadata);
+      for (const [subtype, capability] of Object.entries(metadata.subcategories || { '': metadata })) {
+        const connectors = Array.isArray(capability.supported_connectors) ? capability.supported_connectors : String(capability.supported_connectors || '').split(',');
+        const connector = connectors.map(value => String(value).trim().toLowerCase()).find(value => ['ccs2', 'type2', 'home', 'brand'].includes(value));
+        const brand = String(capability.supported_ev_brands || '').split(',')[0].trim();
+        if (!connector || (connector === 'brand' && !brand)) continue;
+        return { vehicle_subtype: normalizeVehicleSubtype('ev', subtype), vehicle_brand: brand,
+          request_details_json: { answers: [{ id: 'port', question: 'Connector', value: connector, label: connector }], vehicle_base_subtype: subtype } };
+      }
+    }
+  }
+  return {};
+}
 
 function normalizeReasons(reasonCounts) {
   return Object.entries(reasonCounts || {})
@@ -165,9 +186,11 @@ export async function runDispatchMatrixAudit(options = {}) {
   const pool = poolOverride || (await db.getPool());
   let [rows] = await pool.query("SELECT * FROM technicians");
   if (normalizedDomains.includes("towing")) rows = await loadTechnicianFleetVehicles(pool, rows);
+  if (normalizedDomains.includes('ev-charging')) rows = await loadChargingServiceProfiles(pool, { service_type: 'ev-charging', vehicle_type: 'ev' }, rows);
   const technicians = rows || [];
 
   const matrix = [];
+  const unsupportedCombinations = [];
   const statusCounts = {
     PASS: 0,
     NO_CONFIGURED_TECHNICIAN: 0,
@@ -176,6 +199,11 @@ export async function runDispatchMatrixAudit(options = {}) {
 
   for (const serviceDomain of normalizedDomains) {
     for (const vehicleType of normalizedVehicleTypes) {
+      const policy = getVehicleServicePolicy({ service_type: serviceDomain, vehicle_type: vehicleType });
+      if (policy.invalidCode) {
+        unsupportedCombinations.push({ service_domain: serviceDomain, vehicle_type: vehicleType, reason: policy.invalidCode });
+        continue;
+      }
       const configuredTechs = technicians.filter((tech) => supportsCombo(tech, serviceDomain, vehicleType));
       const configuredCount = configuredTechs.length;
       const readyTechsWithCoords = configuredTechs.filter(
@@ -208,6 +236,7 @@ export async function runDispatchMatrixAudit(options = {}) {
           vehicle_type: vehicleType,
           location_lat: location.lat,
           location_lng: location.lng,
+          ...(serviceDomain === 'ev-charging' ? chargingProbe(configuredTechs) : {}),
         };
 
         const { criteria, analysis, reasonCounts } = jobDispatchService.analyzeTechnicians(
@@ -249,7 +278,7 @@ export async function runDispatchMatrixAudit(options = {}) {
     }
   }
 
-  const totalCombinations = normalizedDomains.length * normalizedVehicleTypes.length;
+  const totalCombinations = matrix.length;
   const missingCoverage = matrix.filter((row) => row.status !== "PASS");
 
   return {
@@ -268,6 +297,7 @@ export async function runDispatchMatrixAudit(options = {}) {
       configured_but_not_dispatchable_count: statusCounts.CONFIGURED_BUT_NOT_DISPATCHABLE,
     },
     matrix,
+    unsupported_combinations: unsupportedCombinations,
     missing_coverage: missingCoverage,
   };
 }

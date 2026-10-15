@@ -246,3 +246,25 @@ test('rejects invalid identifiers and negative prices', async () => {
   await assert.rejects(replaceTechnicianServicePricing(connection, 42, [{ service_id: 0, vehicle_category_id: 1, pricing_json: {} }]), /Invalid/);
   await assert.rejects(replaceTechnicianServicePricing(connection, 42, [{ service_id: 1, vehicle_category_id: 1, pricing_json: { visit_charge: -1 } }]), /non-negative/);
 });
+
+for (const connectors of ['home,brand', ['home', 'brand']]) {
+  test(`charging metadata survives dynamic pricing persistence as ${typeof connectors}`, async () => {
+    const calls = [];
+    const connection = { execute: async (sql, values) => { calls.push({ sql, values }); return [{}]; } };
+    const pricing = { service_domain: 'ev-charging', vehicle_type: 'ev', vehicle_subtype: 'scooter',
+      service_charge: 400, supported_connectors: connectors, supported_ev_brands: 'Ather, Ola' };
+    await replaceTechnicianServicePricing(connection, 42, [{ service_id: 8, vehicle_category_id: 4, pricing_json: pricing }]);
+    assert.deepEqual(JSON.parse(calls.at(-1).values[5]), pricing);
+  });
+}
+for (const capability of [
+  { supported_connectors: 'unknown' },
+  { supported_connectors: 'brand' },
+  { supported_connectors: 'home', supported_ev_brands: { brand: 'Ather' } },
+]) {
+  test(`invalid charging capability is rejected: ${JSON.stringify(capability)}`, async () => {
+    await assert.rejects(replaceTechnicianServicePricing({ execute: async () => [{}] }, 42,
+      [{ service_id: 8, vehicle_category_id: 4, pricing_json: { service_domain: 'ev-charging', vehicle_type: 'ev',
+        vehicle_subtype: 'scooter', service_charge: 400, ...capability } }]), /charging|brands/i);
+  });
+}

@@ -48,6 +48,7 @@ import {
 } from "../services/technicianActivityService.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
 import * as technicianPricingController from "../controllers/technicianPricingController.js";
+import { getVehicleServicePolicy, evaluateVehicleServiceSupport } from '../services/vehicleServiceCompatibility.js';
 
 
 const router = Router();
@@ -2156,6 +2157,12 @@ router.get("/nearby", async (req, res) => {
     const userLng = lng ? parseFloat(lng) : null;
     const serviceType = canonicalizeServiceDomain((service_type || "").toLowerCase().replace(/^(car|bike|ev|commercial)-/i, ""));
     const requestedVehicleType = canonicalizeVehicleFamily(vehicle_type);
+    const nearbyRequest = { service_type: serviceType, vehicle_type,
+      vehicle_subtype: req.query.vehicle_subtype ?? req.query.vehicleSubtype,
+      vehicle_brand: req.query.vehicle_brand ?? req.query.vehicleBrand,
+      request_details_json: req.query.details ?? req.query.request_details_json };
+    const vehiclePolicy = getVehicleServicePolicy(nearbyRequest);
+    nearbyRequest.vehicle_subtype = vehiclePolicy.subtype ?? nearbyRequest.vehicle_subtype;
     const pricingConfig = await getPlatformPricingConfig();
     const currency = pricingConfig.currency || "INR";
 
@@ -2226,14 +2233,18 @@ router.get("/nearby", async (req, res) => {
         const storedRows = pricingRowsByTechnician.get(Number(t.id)) || [];
         const candidateRows = storedRows.length > 0
           ? storedRows
-          : normalizeTechnicianPricingEntries(t.service_costs);
+          : normalizeTechnicianPricingEntries(t.service_costs, { preserveInvalid: true });
         const resolvedPrice = resolveTechnicianDisplayPrice(candidateRows, {
           serviceType,
           vehicleType: requestedVehicleType,
+          vehicleSubtype: nearbyRequest.vehicle_subtype,
+          requestDetails: nearbyRequest.request_details_json,
+          vehicleBrand: nearbyRequest.vehicle_brand,
         });
 
         return {
           ...t,
+          service_pricing_rows: candidateRows,
           price: resolvedPrice?.price ?? null,
           base_price: resolvedPrice?.price ?? null,
           price_breakdown: resolvedPrice?.breakdown ?? null,
@@ -2243,12 +2254,14 @@ router.get("/nearby", async (req, res) => {
 
     // Apply Service Type Filter
     const filtered = technicians.filter(t => {
+      if ((vehiclePolicy.family === 'ev' || vehiclePolicy.invalidCode) &&
+          (!evaluateVehicleServiceSupport(nearbyRequest, t).eligible || t.price == null)) return false;
       // If no service type requested, show all
       if (requestedVehicleType && t.vehicle_types && typeof t.vehicle_types === "object") {
         const supported = Object.entries(t.vehicle_types)
           .filter(([, enabled]) => !!enabled)
           .map(([k]) => canonicalizeVehicleFamily(k));
-        if (supported.length > 0 && !supported.includes(requestedVehicleType)) {
+        if (supported.length > 0 && !supported.some(family => vehiclePolicy.allowedFamilies.includes(family))) {
           return false;
         }
       }

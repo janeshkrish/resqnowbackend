@@ -51,7 +51,7 @@ const clean = (value) => String(value || "").trim().toLowerCase().replace(/[_\s]
 
 /** The subclass id for this family, from a current id or an old body-type label; null when unknown. */
 export function normalizeVehicleSubtype(family, value) {
-  const raw = clean(value);
+  const raw = clean(value).replace(/^ev[ -]+/, "electric ");
   if (!raw) return null;
   const dashed = raw.replace(/\s+/g, "-");
   const familyClasses = VEHICLE_CLASSES[family] || ALL_CLASSES;
@@ -64,6 +64,8 @@ export function normalizeVehicleSubtype(family, value) {
     if (["hatchback", "sedan"].includes(dashed) || legacy === "hatchback" || legacy === "sedan") return "electric-car";
     if (["compact-suv", "big-suv"].includes(dashed) || legacy === "big-suv") return "electric-suv";
     if (dashed === "scooter" || legacy === "scooter") return "electric-scooter";
+    if (["commuter-bike", "sports-bike", "premium-bike", "bike", "motorcycle"].includes(dashed) ||
+        ["commuter-bike", "sports-bike", "premium-bike"].includes(legacy)) return "electric-bike";
   }
   return null;
 }

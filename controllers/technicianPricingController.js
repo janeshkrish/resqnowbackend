@@ -1,4 +1,14 @@
 import * as db from "../db.js";
+import { canonicalizeServiceDomain } from '../services/serviceNormalization.js';
+
+const CAPABILITY_FIELDS = new Set(['supported_connectors', 'supported_ev_brands']);
+function chargingTokens(value, label) {
+    if (value == null) return [];
+    if (!(typeof value === 'string' || (Array.isArray(value) && value.every(item => typeof item === 'string')))) {
+        throw new Error(`Invalid charging ${label}.`);
+    }
+    return (Array.isArray(value) ? value : value.split(',')).map(item => item.trim().toLowerCase()).filter(Boolean);
+}
 
 // Accept an existing transaction so signup and its prices are committed together.
 export async function replaceTechnicianServicePricing(conn, technicianId, rows) {
@@ -10,8 +20,18 @@ export async function replaceTechnicianServicePricing(conn, technicianId, rows) 
             !item.pricing_json || typeof item.pricing_json !== "object" || Array.isArray(item.pricing_json)) {
             throw new Error("Invalid service pricing row.");
         }
+        const pricing = item.pricing_json;
+        if (canonicalizeServiceDomain(pricing.service_domain) === 'ev-charging' ||
+            [...CAPABILITY_FIELDS].some(key => key in pricing)) {
+            const connectors = chargingTokens(pricing.supported_connectors, 'connectors');
+            const brands = chargingTokens(pricing.supported_ev_brands, 'brands');
+            if (!connectors.length || connectors.some(value => !['ccs2', 'type2', 'home', 'brand'].includes(value))) {
+                throw new Error('Choose supported charging connectors.');
+            }
+            if (connectors.includes('brand') && !brands.length) throw new Error('Enter supported EV charging brands.');
+        }
         for (const [key, value] of Object.entries(item.pricing_json)) {
-            if (["service_domain", "vehicle_type", "vehicle_subtype", "vehicle_subtype_label"].includes(key)) continue;
+            if (["service_domain", "vehicle_type", "vehicle_subtype", "vehicle_subtype_label"].includes(key) || CAPABILITY_FIELDS.has(key)) continue;
             if (value === "" || value == null) continue;
             if (!Number.isFinite(Number(value)) || Number(value) < 0) throw new Error("Prices must be non-negative numbers.");
         }

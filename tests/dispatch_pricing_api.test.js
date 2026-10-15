@@ -163,6 +163,45 @@ test("request creation returns no customer-specific price before a technician ac
   } finally { matcher.mock.restore(); process.env.REDIS_URL = previousRedisUrl; }
 });
 
+for (const [service, vehicle, subtype, port, code] of [
+  ['ev-fuel', 'ev', 'electric-scooter', null, 'ev_fuel_not_supported'],
+  ['car-fuel', 'car', 'electric-car', null, 'ev_fuel_not_supported'],
+  ['ev-charging', 'car', 'sedan', 'ccs2', 'ev_vehicle_required'],
+  ['ev-ev-charging', 'ev', 'electric-car', 'dk', 'ev_connector_required'],
+  ['ev-ev-charging', 'ev', 'electric-car', 'brand', 'ev_brand_required'],
+]) {
+  test(`booking refuses invalid EV service ${service}/${vehicle}/${port} before database writes`, async () => {
+    const handler = serviceRoutes.default.stack.find(entry => entry.route?.path === '/' && entry.route.methods.post).route.stack.at(-1).handle;
+    const res = response();
+    await handler({ user: { userId: 3 }, body: { service_type: service, vehicle_type: vehicle, vehicle_subtype: subtype,
+      address: 'Simulated pickup', details: { answers: port ? [{ id: 'port', question: 'Port', label: port, value: port }] : [] } } }, res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.code, code);
+    assert.equal(state.executions.length, 0);
+    assert.equal(state.profileQueries, 0);
+  });
+}
+
+test('booking preserves EV identity and known body while keeping the waiting price hidden', async () => {
+  state.creating = true;
+  const previousRedisUrl = process.env.REDIS_URL;
+  delete process.env.REDIS_URL;
+  const matcher = mock.method(jobDispatchService, 'findTopTechnicians', async () => []);
+  try {
+    const result = await call(serviceRoutes.default, '/', 'post', { body: {
+      service_type: 'car-flat-tire', vehicle_type: 'car', vehicle_subtype: 'electric-car',
+      vehicle_brand: 'Tata', vehicle_model: 'Tiago EV', address: 'Simulated pickup', location_lat: 11, location_lng: 76,
+      details: { vehicle_base_subtype: 'hatchback', answers: [{ id: 'tyretype', question: 'Tyre', value: 'tubeless', label: 'Tubeless' }] },
+    } });
+    assert.equal(state.request.service_type, 'ev-flat-tire');
+    assert.equal(state.request.vehicle_type, 'ev');
+    assert.equal(state.request.vehicle_subtype, 'electric-car');
+    assert.equal(JSON.parse(state.request.request_details_json).vehicle_base_subtype, 'hatchback');
+    assert.equal(result.pricing_status, 'pending');
+    assert.equal(result.amount, undefined);
+  } finally { matcher.mock.restore(); process.env.REDIS_URL = previousRedisUrl; }
+});
+
 for (const status of ["pending", "accepted"]) {
   test(`cancelling a ${status} request returns the appropriate customer pricing visibility`, async () => {
     state.request = row({ status, technician_id: status === "accepted" ? 7 : null,

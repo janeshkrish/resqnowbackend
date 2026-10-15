@@ -7,6 +7,7 @@ import adminRouter from "../routes/admin.js";
 import { reassignMonitoredRequest } from "../services/operationsCommandCenterService.js";
 import { jobDispatchService } from "../services/jobDispatchService.js";
 import EmailTemplate from "../models/EmailTemplate.js";
+import { readPricingMetadata } from '../services/vehicleServiceCompatibility.js';
 
 // Replace the database driver before any route opens a pool. No real DB or mail provider is used.
 process.env.DB_HOST = "simulated.invalid";
@@ -41,6 +42,14 @@ async function query(sql, params = []) {
 }
 
 async function execute(sql, params = []) {
+  if (/INSERT INTO technician_service_pricing\s*\(/.test(sql)) {
+    state.dynamicPricing.push(JSON.parse(params[5]));
+    return [{ affectedRows: 1 }];
+  }
+  if (/INSERT INTO technician_services\s*\(/.test(sql)) {
+    for (let index = 0; index < params.length; index += 19) state.normalizedPricing.push(JSON.parse(params[index + 18]));
+    return [{ affectedRows: 1 }];
+  }
   if (/INSERT INTO technicians\s*\(/.test(sql)) {
     const columns = sql.match(/INSERT INTO technicians\s*\(([^)]*)\)/s)[1].split(",").map(column => column.trim());
     state.technicians.push({ id: 7, ...Object.fromEntries(columns.map((column, index) => [column, params[index]])) });
@@ -76,7 +85,7 @@ const pool = { query, execute, end: async () => {}, getConnection: async () => {
 } };
 const driverMock = mock.method(mysql, "createPool", () => pool);
 const emailTemplateMock = mock.method(EmailTemplate, "findOne", async () => null);
-beforeEach(() => { state = { technicians: [], fleet: [], request: null, commits: 0, rollbacks: 0 }; });
+beforeEach(() => { state = { technicians: [], fleet: [], request: null, commits: 0, rollbacks: 0, dynamicPricing: [], normalizedPricing: [] }; });
 after(async () => { await db.closePool(); driverMock.mock.restore(); emailTemplateMock.mock.restore(); });
 
 function handler(router, path, method) {
@@ -87,6 +96,23 @@ function handler(router, path, method) {
 const response = () => ({ statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } });
 
 for (const path of ["/register", "/create"]) {
+  test(`${path} commits charging capabilities in profile, normalized rates and dynamic pricing JSON`, async () => {
+    const tier = { vehicle_subtype: 'scooter', service_charge: 400, visit_charge: 100,
+      supported_connectors: 'home,brand', supported_ev_brands: 'Ather, Ola' };
+    const costs = [{ service_domain: 'ev-charging', vehicle_categories: ['ev'],
+      vehicle_pricing: { ev: { service_charge: 400, visit_charge: 100, selected_subcategories: ['scooter'], subcategories: { scooter: tier } } } }];
+    const res = response();
+    await handler(techniciansRouter, path, 'post')({ body: { ...payload(), specialties: ['ev-charging'], vehicle_types: { ev: true },
+      consent: { agreed: true }, technician_agreement_accepted: true,
+      service_costs: costs, pricing_config: costs, dynamic_pricing_config: [{ service_id: 8, vehicle_category_id: 4,
+        pricing_json: { service_domain: 'ev-charging', vehicle_type: 'ev', ...tier } }] } }, res);
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.equal(state.commits, 1);
+    assert.equal(state.dynamicPricing[0].supported_connectors, 'home,brand');
+    assert.equal(state.dynamicPricing[0].supported_ev_brands, 'Ather, Ola');
+    assert.equal(readPricingMetadata(state.normalizedPricing[0]).subcategories.scooter.supported_connectors, 'home,brand');
+    assert.deepEqual(JSON.parse(state.technicians[0].service_costs), costs);
+  });
   test(`${path} stores every selected towing truck in the registration transaction`, async () => {
     const res = response();
     await handler(techniciansRouter, path, "post")({ body: payload() }, res);
