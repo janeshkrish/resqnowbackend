@@ -61,6 +61,17 @@ test('the actual queue worker advertises the persisted technician earnings and o
   assert.equal(sockets.alerts[0].offerId, db.offers[0].id);
   assert.equal(JSON.parse(db.offers[0].pricing_snapshot).technician_earning, 1200);
 });
+test('the queue forwards the EV brand and structured service details to candidate selection', async () => {
+  const db = storage({ service_type: 'ev-ev-charging', vehicle_type: 'ev', vehicle_subtype: 'electric-scooter', vehicle_brand: 'Ather',
+    request_details_json: { answers: [{ id: 'port', value: 'brand', label: 'Brand', question: 'Connector' }] } });
+  db.offers.length = 0;
+  await processNewDispatchJob({ jobId: 101 }, { pool: db.pool,
+    findTechnicians: async input => {
+      assert.equal(input.vehicle_brand, 'Ather');
+      assert.equal(input.request_details_json.answers[0].value, 'brand');
+      return [];
+    }, requeue: async () => {} });
+});
 
 test('the fallback dispatcher advertises the same persisted technician earnings as the queue', async () => {
   const db = storage();

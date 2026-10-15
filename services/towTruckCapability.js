@@ -1,7 +1,7 @@
-import { canonicalizeVehicleFamily } from "./serviceNormalization.js";
 import { isTowingServiceType } from "./towingServiceType.js";
 import { answerValue, readRequestDetails } from "./requestDetails.js";
-import { defaultTowTruckType, normalizeTowTruckType, normalizeVehicleSubtype } from "./vehicleClasses.js";
+import { defaultTowTruckType, normalizeTowTruckType } from "./vehicleClasses.js";
+import { getVehicleServicePolicy } from "./vehicleServiceCompatibility.js";
 
 export function normalizeFleetTowTruckType(value) {
   // The fleet editor calls a heavy-duty wrecker "heavy-duty".
@@ -14,8 +14,7 @@ export function requiredTowTruckType(request) {
   const explicit = request.tow_truck_type ?? request.towTruckType;
   if (explicit != null && String(explicit).trim()) return normalizeTowTruckType(explicit) || "";
   // Older requests use the same conservative defaults as request creation.
-  const family = canonicalizeVehicleFamily(request.vehicle_type || String(request.service_type).split("-")[0]);
-  const subtype = normalizeVehicleSubtype(family, request.vehicle_subtype);
+  const { family, subtype } = getVehicleServicePolicy(request);
   const details = readRequestDetails(request.request_details_json);
   return defaultTowTruckType({ family, subtype, canRoll: answerValue(details, "roll") });
 }

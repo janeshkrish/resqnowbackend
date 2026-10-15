@@ -126,6 +126,9 @@ export function canonicalizeServiceDomain(input) {
 export function canonicalizeVehicleFamily(input) {
   const n = normalizeText(input);
   if (!n) return "";
+  // Exact EV identities and explicit electric words take precedence over generic
+  // bike/scooter/car aliases inside the same phrase.
+  if (/\b(?:ev|electric|bev)\b/.test(n) || /^(?:electric|ev)(?:bike|scooter|car|suv|bus|truck|vehicle)s?$/.test(n)) return "ev";
   for (const [family, aliases] of Object.entries(VEHICLE_FAMILY_ALIASES)) {
     if (
       aliases.some((alias) => {

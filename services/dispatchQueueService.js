@@ -358,6 +358,7 @@ export async function processNewDispatchJob(data, options = {}) {
     id: requestRow.id,
     service_type: requestRow.service_type,
     vehicle_type: requestRow.vehicle_type,
+    vehicle_brand: requestRow.vehicle_brand,
     vehicle_subtype: requestRow.vehicle_subtype,
     tow_truck_type: requestRow.tow_truck_type,
     request_details_json: requestRow.request_details_json,

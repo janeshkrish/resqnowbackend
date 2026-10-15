@@ -196,7 +196,10 @@ const hasPricingValue = (entry) => [
   entry.night_charge,
 ].some((value) => value != null);
 
-const normalizeTechnicianPricingEntry = (input) => {
+const PRICE_KEYS = new Set(['visitcharge', 'servicecharge', 'amount', 'price', 'baseprice', 'basecharge',
+  'perkmprice', 'perkmcharge', 'extrakmcharge', 'freedistance', 'freekm', 'nightcharge', 'labourmin', 'labourmax',
+  'deliverycharge', 'price2w', 'price2wmin', 'price2wmax', 'price4w', 'price4wmin', 'price4wmax', 'tubetyreprice', 'tubelessprice']);
+const normalizeTechnicianPricingEntry = (input, { preserveInvalid = false } = {}) => {
   const row = input && typeof input === "object" ? input : {};
   const storedServiceDomain = toStoredPricingServiceDomain(
     row.service_domain ||
@@ -276,8 +279,11 @@ const normalizeTechnicianPricingEntry = (input) => {
     night_type: nightType,
     metadata: row,
   };
-
-  return hasPricingValue(normalizedEntry) ? normalizedEntry : null;
+  const invalidPricing = preserveInvalid && (row._invalid_pricing === true || Object.entries(row).some(([key, value]) =>
+    PRICE_KEYS.has(key.replace(/_/g, '').toLowerCase()) && value != null && String(value).trim() !== '' &&
+    (typeof value === 'boolean' || !Number.isFinite(Number(value)) || Number(value) < 0)));
+  if (invalidPricing) normalizedEntry._invalid_pricing = true;
+  return hasPricingValue(normalizedEntry) || invalidPricing ? normalizedEntry : null;
 };
 
 export const SUPPORTED_PRICING_SERVICE_TYPES = Object.freeze(Object.keys(ENGINE_TO_STORED_SERVICE_TYPE));
@@ -306,8 +312,8 @@ export function normalizePricingVehicleType(value) {
   return normalizeStoredVehicleType(value);
 }
 
-export function normalizeTechnicianPricingEntries(value) {
-  return normalizeRawEntries(value).map(normalizeTechnicianPricingEntry).filter(Boolean);
+export function normalizeTechnicianPricingEntries(value, options = {}) {
+  return normalizeRawEntries(value).map(row => normalizeTechnicianPricingEntry(row, options)).filter(Boolean);
 }
 
 export function findTechnicianPricingEntry(entries, { serviceType, vehicleType }) {

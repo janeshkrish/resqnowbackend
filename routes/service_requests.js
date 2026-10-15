@@ -50,6 +50,7 @@ import {
 } from "../services/technicianStateService.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
 import { recordRequestEvent, recordStatusChange } from "../services/requestEvents.js";
+import { getVehicleServicePolicy, chargingCompatibility } from '../services/vehicleServiceCompatibility.js';
 
 const RAZORPAY_KEY_ID = String(process.env.RAZORPAY_KEY_ID || "");
 const RAZORPAY_KEY_SECRET = String(process.env.RAZORPAY_KEY_SECRET || "");
@@ -300,15 +301,23 @@ router.post("/", verifyUser, async (req, res) => {
 
         const rawService = String(service_type || "").trim();
         const rawVehicle = String(vehicle_type || "").trim();
-        const inferredVehicle = canonicalizeVehicleFamily(rawVehicle || rawService.split("-")[0]);
+        const requestDetails = sanitizeRequestDetails(details ?? req.body.request_details);
+        const vehicleBrand = String(vehicle_brand || "").trim().slice(0, 100) || null;
+        const policyRequest = { service_type: rawService, vehicle_type: rawVehicle || rawService.split('-')[0],
+            vehicle_subtype, vehicle_brand: vehicleBrand, request_details_json: requestDetails };
+        const vehiclePolicy = getVehicleServicePolicy(policyRequest);
+        const inferredVehicle = vehiclePolicy.family;
         const inferredDomain = canonicalizeServiceDomain(rawService.replace(/^(car|bike|ev|commercial)-/i, ""));
         if (!inferredVehicle || !inferredDomain) {
             return res.status(400).json({ error: "Invalid service_type or vehicle_type for dispatch." });
         }
+        if (vehiclePolicy.invalidCode) return res.status(400).json({ code: vehiclePolicy.invalidCode,
+            error: vehiclePolicy.invalidCode === 'ev_fuel_not_supported' ? 'Electric vehicles need charging or towing instead of fuel delivery.' : 'EV charging is available only for electric vehicles.' });
+        const charging = chargingCompatibility(policyRequest);
+        if (!charging.eligible) return res.status(400).json({ code: charging.code,
+            error: 'Choose the charging connector and vehicle brand, or request towing to a charging station.' });
         const canonicalServiceType = `${inferredVehicle}-${inferredDomain}`;
-        const vehicleBrand = String(vehicle_brand || "").trim().slice(0, 100) || null;
-        const vehicleSubtype = normalizeVehicleSubtype(inferredVehicle, vehicle_subtype);
-        const requestDetails = sanitizeRequestDetails(details ?? req.body.request_details);
+        const vehicleSubtype = vehiclePolicy.subtype || normalizeVehicleSubtype(inferredVehicle, vehicle_subtype);
         const towTruckType = inferredDomain === "towing"
             ? normalizeTowTruckType(tow_truck_type) ||
                 defaultTowTruckType({ family: inferredVehicle, subtype: vehicleSubtype, canRoll: answerValue(requestDetails, "roll") })

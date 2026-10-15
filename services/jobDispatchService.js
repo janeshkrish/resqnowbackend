@@ -16,6 +16,7 @@ import { buildTechnicianJobDetails } from "./technicianJobDetails.js";
 import { requiredTowTruckType, evaluateTowTruckCapability, loadTechnicianFleetVehicles } from "./towTruckCapability.js";
 import { createPricedDispatchOffer, dispatchOfferPricingFields } from "./dispatchOfferService.js";
 import { buildDispatchPricingSnapshot, readDispatchPricingSnapshot, customerPricingView } from "./dispatchPricingService.js";
+import { getVehicleServicePolicy, evaluateVehicleServiceSupport, loadChargingServiceProfiles } from "./vehicleServiceCompatibility.js";
 
 
 /**
@@ -105,9 +106,10 @@ export const jobDispatchService = {
         const userLng = Number(jobRequest.location_lng);
         const reqRawType = normalizeText((jobRequest.service_type || "").replace(/^(car|bike|ev|commercial)-/i, ""));
         const reqType = canonicalizeDomain(reqRawType);
-        const reqVehicle = canonicalizeVehicleFamily(jobRequest.vehicle_type);
+        const vehiclePolicy = getVehicleServicePolicy(jobRequest);
+        const reqVehicle = vehiclePolicy.family;
         const globalRadius = Number.isFinite(Number(radiusKm)) ? Number(radiusKm) : null;
-        return { userLat, userLng, reqType, reqVehicle, globalRadius, requiredTowTruckType: requiredTowTruckType(jobRequest) };
+        return { userLat, userLng, reqType, reqVehicle, globalRadius, vehiclePolicy, jobRequest, requiredTowTruckType: requiredTowTruckType(jobRequest) };
     },
 
     evaluateTechnicianForRequest(tech, criteria) {
@@ -144,10 +146,8 @@ export const jobDispatchService = {
         if (domains.length > 0 && !domains.includes(reqType)) reasons.push("service_mismatch");
 
         const techVehicles = parseVehicleTypes(tech.vehicle_types);
-        if (techVehicles.length === 0) reasons.push("vehicle_profile_missing");
-        if (techVehicles.length > 0 && !techVehicles.some((t) => canonicalizeVehicleFamily(t) === reqVehicle)) {
-            reasons.push("vehicle_mismatch");
-        }
+        const vehicleSupport = evaluateVehicleServiceSupport(criteria.jobRequest || { service_type: reqType, vehicle_type: reqVehicle }, tech);
+        if (!vehicleSupport.eligible) reasons.push(vehicleSupport.code);
 
         if (reqType === "towing") {
             const capability = evaluateTowTruckCapability(criteria.requiredTowTruckType, tech.fleet_vehicles);
@@ -219,6 +219,7 @@ export const jobDispatchService = {
             // 1. Get technicians from DB and analyze with strict eligibility rules
             const pool = suppliedPool || await db.getPool();
             let [rows] = await pool.query("SELECT * FROM technicians");
+            rows = await loadChargingServiceProfiles(pool, jobRequest, rows);
             if (isTowingServiceType(jobRequest.service_type)) rows = await loadTechnicianFleetVehicles(pool, rows);
             const { criteria, analysis, reasonCounts } = this.analyzeTechnicians(jobRequest, rows, radiusKm);
 

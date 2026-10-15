@@ -8,6 +8,7 @@ const MAX_LONG_TEXT = 500;
 const MAX_ATTACHMENTS = 4;
 const ATTACHMENT_URL = /^\/api\/upload\/files\/[A-Za-z0-9._-]+$/;
 const ID = /^[a-z0-9_-]{1,40}$/i;
+const BODY_SUBTYPES = new Set(['scooter', 'commuter-bike', 'sports-bike', 'premium-bike', 'hatchback', 'sedan', 'compact-suv', 'big-suv']);
 
 const text = (value, max = MAX_TEXT) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -51,13 +52,14 @@ export function sanitizeRequestDetails(input) {
     .map((a) => ({ type: a.type, url: String(a.url) }));
   const details = {
     answers,
+    ...(BODY_SUBTYPES.has(raw.vehicle_base_subtype) ? { vehicle_base_subtype: raw.vehicle_base_subtype } : {}),
     landmark: text(raw.landmark),
     plate: text(raw.plate, 20).toUpperCase(),
     note: text(raw.note, MAX_LONG_TEXT),
     urgent: raw.urgent === true || answers.some((a) => (a.id === "inside" || a.id === "hurt") && a.value === "yes"),
     attachments,
   };
-  const hasContent = details.answers.length || details.landmark || details.plate || details.note || details.attachments.length || details.urgent;
+  const hasContent = details.answers.length || details.landmark || details.plate || details.note || details.attachments.length || details.urgent || details.vehicle_base_subtype;
   return hasContent ? details : null;
 }
 

@@ -79,7 +79,7 @@ test("a single-domain technician is not offered another service domain", () => {
   assert.deepEqual(nonMatching.reasons, ["service_mismatch"]);
 });
 
-test("dispatch matrix covers every canonical combination when profiles do", async () => {
+test("dispatch matrix covers every supported combination using a declared charging connector", async () => {
   const domains = [
     "towing",
     "flat-tire",
@@ -95,18 +95,23 @@ test("dispatch matrix covers every canonical combination when profiles do", asyn
       id: index + 1,
       service_type: domain,
       specialties: JSON.stringify([domain]),
+      ...(domain === 'ev-charging' ? { service_costs: JSON.stringify([{ service_domain: 'ev-charging', vehicle_type: 'ev',
+        service_charge: 200, supported_connectors: 'ccs2' }]) } : {}),
     })
   );
   const pool = {
     query: async (sql) => /FROM technician_fleet_vehicles/.test(sql)
       ? [["flatbed", "wheel-lift", "heavy-duty-wrecker"].map(vehicle_type => ({ technician_id: 1, vehicle_type, status: "available" }))]
-      : [technicians],
+      : /FROM technician_services/.test(sql) ? [[]] : [technicians],
   };
 
   const report = await runDispatchMatrixAudit({ pool, simulateReady: true });
 
-  assert.equal(report.summary.pass_count, 32);
+  assert.equal(report.summary.pass_count, 28);
   assert.equal(report.summary.missing_count, 0);
+  assert.equal(report.dimensions.total_combinations, 28);
+  assert.equal(report.unsupported_combinations.length, 4);
+  assert.equal(report.matrix.some(row => row.service_domain === 'fuel' && row.vehicle_type === 'ev'), false);
 });
 
 test("queue handoff requires a registered dispatch worker", async () => {

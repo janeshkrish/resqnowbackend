@@ -1,4 +1,5 @@
 import { buildDispatchPricingSnapshot, readDispatchPricingSnapshot } from './dispatchPricingService.js';
+import { getVehicleServicePolicy, evaluateVehicleServiceSupport, chargingCompatibility, loadChargingServiceProfiles } from './vehicleServiceCompatibility.js';
 
 function unavailable(message, code = 'offer_unavailable') {
   const error = new Error(message);
@@ -21,6 +22,16 @@ export async function createPricedDispatchOffer(pool, request, technician, optio
         (current.technician_id != null && Number(current.technician_id) !== technicianId)) {
       throw unavailable('This request is no longer available for this technician.');
     }
+    const policy = getVehicleServicePolicy(current);
+    if (policy.family === 'ev' || policy.invalidCode) {
+      let profile = technician;
+      if (profile.vehicle_types == null) profile = (await conn.query('SELECT * FROM technicians WHERE id = ? LIMIT 1', [technicianId]))[0][0];
+      if (profile) [profile] = await loadChargingServiceProfiles(conn, current, [profile]);
+      const support = evaluateVehicleServiceSupport(current, profile);
+      if (!support.eligible) throw unavailable('This technician does not support this vehicle and service combination.', support.code);
+    }
+    const charging = chargingCompatibility(current);
+    if (!charging.eligible) throw unavailable('Choose a supported EV charging connector and vehicle brand.', charging.code);
     const snapshot = options.pricingSnapshot
       ? readDispatchPricingSnapshot(options.pricingSnapshot, { requestId: current.id, technicianId })
       : await buildDispatchPricingSnapshot({ request: current, technician, technicianId, connection: conn,
