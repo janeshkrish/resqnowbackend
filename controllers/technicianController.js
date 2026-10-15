@@ -314,6 +314,7 @@ export async function toggleTechnicianVisibility(req, res) {
       ]
     );
 
+    await pool.execute("UPDATE technicians SET admin_hidden = ? WHERE id = ?", [isVisible ? 0 : 1, technicianId]);
     await logAction(pool, resolveAdminId(req), "toggleTechnicianVisibility", technicianId, metadata);
 
     return res.json({

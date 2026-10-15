@@ -125,6 +125,7 @@ export const jobDispatchService = {
         if (!tech.is_active) reasons.push("inactive");
         if (!tech.is_available) reasons.push("unavailable");
         if (tech.current_job_id != null) reasons.push("busy");
+        if (tech.admin_hidden != null && Boolean(Number(tech.admin_hidden))) reasons.push("hidden_by_admin");
 
         const tLat = Number(tech.latitude);
         const tLng = Number(tech.longitude);

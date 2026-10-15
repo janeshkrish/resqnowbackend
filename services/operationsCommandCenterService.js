@@ -115,6 +115,24 @@ function clampInterval(value) {
   return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, Math.floor(parsed)));
 }
 
+// What the monitor watches for, with the thresholds it really uses. Read-only: these are code
+// constants and environment settings, shown to admins so the Alerts page says the truth.
+export function getMonitoringRules() {
+  return {
+    intervalSeconds: Math.round(getMonitorIntervalMs() / 1000),
+    rules: [
+      { code: "start_delay", label: "Not moving after accepting", threshold: "3 min after accepting" },
+      { code: "movement_stationary", label: "Stopped on the way", threshold: "under 80 m in 8 min, more than 300 m from the customer" },
+      { code: "gps_inactive", label: "GPS stopped updating", threshold: `${GPS_INACTIVITY_MINUTES} min without a position` },
+      { code: "arrival_delay", label: "Arrival past the deadline", threshold: "live arrival later than the deadline" },
+      { code: "sla_risk", label: "Deadline close", threshold: `${SLA_WARNING_MINUTES} min or less left, little margin` },
+      { code: "movement_away", label: "Moving away from the customer", threshold: "250 m further between two positions" },
+      { code: "progress_delay", label: "Work running long", threshold: `over 60 min, no update for ${PROGRESS_STALE_MINUTES} min` },
+      { code: "scheduled_start_miss", label: "Scheduled job not started", threshold: `${SCHEDULE_GRACE_MINUTES} min grace after the latest start` },
+    ],
+  };
+}
+
 function getMonitorIntervalMs() {
   return clampInterval(process.env.OPS_MONITOR_INTERVAL_MS || DEFAULT_INTERVAL_MS);
 }

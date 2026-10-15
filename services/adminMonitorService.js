@@ -1,3 +1,4 @@
+import { istDayStart } from "./istTime.js";
 import { normalizeRequestStatus } from "./requestStatusWorkflow.js";
 import { titleForEvent } from "./requestEvents.js";
 
@@ -301,8 +302,7 @@ export async function getLiveRequests({ pool, runtime = null, now = Date.now() }
   const extras = await loadExtras(pool, rows, runtime);
   const requests = rows.map((row) => summarise(row, extras, now));
 
-  const startOfDay = new Date(now);
-  startOfDay.setHours(0, 0, 0, 0);
+  const startOfDay = new Date(istDayStart(now));
   const [[today]] = await pool.query(
     `SELECT
        SUM(CASE WHEN completed_at >= ? AND LOWER(COALESCE(status, '')) NOT IN ('cancelled', 'rejected') THEN 1 ELSE 0 END) AS completed,

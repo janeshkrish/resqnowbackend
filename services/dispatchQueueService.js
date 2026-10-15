@@ -29,6 +29,16 @@ const DISPATCH_RECOVERY_LIMIT = Math.max(
 );
 const DEFAULT_CUSTOMER_NAME = "Customer";
 
+// Shown read-only on the admin Settings page; set through the server environment.
+export function getDispatchSettings() {
+  return {
+    offerTimeoutSeconds: Math.round(DISPATCH_OFFER_TIMEOUT_MS / 1000),
+    retryDelaySeconds: Math.round(DISPATCH_RETRY_DELAY_MS / 100) / 10,
+    maxRetries: DISPATCH_MAX_RETRIES,
+    recoveryWindowMinutes: DISPATCH_RECOVERY_WINDOW_MINUTES,
+  };
+}
+
 let queue = null;
 let worker = null;
 let queueEvents = null;

@@ -761,6 +761,8 @@ export async function updateTechniciansTableSchema() {
   await addColumnIfNotExists(p, 'technicians', 'acceptance_rate DECIMAL(5,2) DEFAULT 0.00');
   await addColumnIfNotExists(p, 'technicians', 'skill_set JSON');
   await addColumnIfNotExists(p, 'technicians', 'current_job_id INT');
+  // Hidden by an admin: kept, but offered no new jobs and left off the customers' nearby map.
+  await addColumnIfNotExists(p, 'technicians', 'admin_hidden BOOLEAN DEFAULT FALSE');
   // New columns for comprehensive technician data model
   await addColumnIfNotExists(p, 'technicians', 'resume_url VARCHAR(1024)');
   await addColumnIfNotExists(p, 'technicians', 'documents JSON');

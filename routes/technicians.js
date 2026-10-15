@@ -396,10 +396,12 @@ function rowToTechnician(row) {
     longitude: row.longitude ? parseFloat(row.longitude) : null,
     is_active: !!row.is_active,
     is_available: !!row.is_available,
+    admin_hidden: row.admin_hidden != null && Boolean(Number(row.admin_hidden)),
     is_logged_in: !!row.is_logged_in,
     last_login_at: row.last_login_at || null,
     last_logout_at: row.last_logout_at || null,
-    last_seen_at: row.last_seen_at || null
+    last_seen_at: row.last_seen_at || null,
+    created_at: row.created_at || null
   };
 }
 
@@ -1050,47 +1052,145 @@ router.get("/requests", verifyTechnician, async (req, res) => {
   }
 });
 
+// One record shape for every technician sign-up, whether it comes from the app or an admin.
+function technicianSignupColumns(body, credentials, passwordHash) {
+  const {
+    name, phone, proprietor_name, alternate_phone, whatsapp_number,
+    address, region, district, state, locality, google_maps_link,
+    aadhaar_number, pan_number, business_type, gst_number, trade_license_number,
+    working_hours, service_costs, payment_details, app_readiness, vehicle_types,
+    serviceAreaRange, experience, specialties, pricing, resume_url, documents,
+  } = body;
+  const trimmedName = (name || "").trim();
+  const normalizedSpecialties = normalizeSpecialties(specialties);
+  return {
+    name: trimmedName,
+    email: credentials.storageEmail,
+    phone: (phone || "").trim(),
+    upi_id: String(payment_details?.upi_id || body?.upi_id || "").trim() || null,
+    upi_name: String(payment_details?.upi_name || body?.upi_name || proprietor_name || trimmedName).trim() || null,
+    proprietor_name: (proprietor_name || "").trim(),
+    alternate_phone: (alternate_phone || "").trim(),
+    whatsapp_number: (whatsapp_number || "").trim(),
+    service_type: normalizedSpecialties[0] || "other",
+    location: (locality || address || "").trim() || "—",
+    password_hash: passwordHash,
+    address: (address || "").trim(),
+    region: (region || "").trim(),
+    district: (district || "").trim(),
+    state: (state || "").trim(),
+    locality: (locality || "").trim(),
+    google_maps_link: (google_maps_link || "").trim(),
+    aadhaar_number: (aadhaar_number || "").trim(),
+    pan_number: (pan_number || "").trim(),
+    business_type: (business_type || "").trim(),
+    gst_number: (gst_number || "").trim(),
+    trade_license_number: (trade_license_number || "").trim(),
+    service_area_range: Number(serviceAreaRange) || 10,
+    experience: Number(experience) || 0,
+    specialties: JSON.stringify(normalizedSpecialties),
+    pricing: JSON.stringify(pricing && typeof pricing === "object" ? pricing : {}),
+    working_hours: JSON.stringify(working_hours || {}),
+    service_costs: JSON.stringify(normalizeServiceCosts(service_costs) || {}),
+    payment_details: JSON.stringify(payment_details || {}),
+    app_readiness: JSON.stringify(app_readiness || {}),
+    vehicle_types: JSON.stringify(normalizeVehicleTypes(vehicle_types) || {}),
+    resume_url: normalizeUploadResourcePath(resume_url),
+    documents: JSON.stringify(sanitizeTechnicianDocuments(documents)),
+    latitude: body.latitude || null,
+    longitude: body.longitude || null,
+  };
+}
+
+async function syncTechnicianSignupPricing(connection, technicianId, body) {
+  if (body.pricing_config || body.service_costs) {
+    const payloadToSync = body.pricing_config || body.service_costs;
+    const normalizedEntries = normalizeTechnicianPricingEntries(payloadToSync);
+    await replaceTechnicianPricingRows(connection, technicianId, normalizedEntries);
+    await replaceTechnicianFleetVehicles(connection, technicianId, payloadToSync);
+  }
+  if (body.dynamic_pricing_config) {
+    await technicianPricingController.replaceTechnicianServicePricing(connection, technicianId, body.dynamic_pricing_config);
+  }
+}
+
+async function insertTechnicianSignup(connection, body, credentials) {
+  const passwordHash = credentials.password ? await bcrypt.hash(credentials.password, 10) : null;
+  const record = { ...technicianSignupColumns(body, credentials, passwordHash), status: "pending", is_active: false, is_available: false };
+  const columns = Object.keys(record);
+  const result = await connection.execute(
+    `INSERT INTO technicians (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+    columns.map((column) => record[column])
+  );
+  const insertedId = result[0].insertId;
+  try {
+    await syncTechnicianSignupPricing(connection, insertedId, body);
+  } catch (pricingError) {
+    console.error("[Register] Failed to sync technician pricing", pricingError);
+    throw pricingError;
+  }
+  return insertedId;
+}
+
+const signupAgreementsAccepted = (body) => !body.dynamic_pricing_config || (body.consent?.agreed === true && body.technician_agreement_accepted === true);
+
+// The approval itself: used by Applications and by an admin who adds and approves in one go.
+async function approveTechnicianRecord(pool, id, { reason, adminEmail }) {
+  const [existing] = await pool.query("SELECT id, name, email, status FROM technicians WHERE id = ? LIMIT 1", [id]);
+  if (existing.length === 0) return { notFound: true };
+  const previousStatus = String(existing[0].status || "pending");
+  await pool.execute(
+    "UPDATE technicians SET status = 'approved', is_active = TRUE, is_available = CASE WHEN current_job_id IS NULL THEN TRUE ELSE FALSE END WHERE id = ?",
+    [id]
+  );
+  await pool.execute(
+    `INSERT INTO technician_approval_audit
+    (technician_id, action, previous_status, new_status, reason, admin_email)
+    VALUES (?, 'approved', ?, 'approved', ?, ?)`,
+    [id, previousStatus, reason || "Approved by admin", adminEmail || "unknown-admin"]
+  );
+  await pool.execute(
+    `INSERT INTO notifications (type, title, message, is_read)
+     VALUES (?, ?, ?, 0)`,
+    [
+      ADMIN_NOTIFICATION_TYPES.TECHNICIAN_APPROVED,
+      "Technician Approved",
+      `${existing[0]?.name || "Technician"} has been approved.`,
+    ]
+  );
+  const techRows = await db.query("SELECT name, email FROM technicians WHERE id = ?", [id]);
+  const tech = techRows[0];
+  if (tech?.email && !/@resqnow\.invalid$/i.test(tech.email)) {
+    await sendEventEmail("TECHNICIAN_APPLICATION_APPROVED", {
+      name: tech.name || "there",
+      email: tech.email,
+      status: "approved",
+    });
+  }
+  socketService.notifyAdmins("admin:technician_audit_update", {
+    technicianId: id,
+    action: "approved",
+    adminEmail: adminEmail || "unknown-admin",
+    reason: reason || "Approved by admin",
+    createdAt: new Date().toISOString()
+  });
+  return { approved: true };
+}
+
 router.post("/register", async (req, res) => {
   let registrationConnection;
   let registrationCommitted = false;
   try {
-    const {
-      name, email, password, phone,
-      proprietor_name, alternate_phone, whatsapp_number,
-      address, region, district, state, locality, google_maps_link,
-      aadhaar_number, pan_number, business_type, gst_number, trade_license_number,
-      working_hours, service_costs, payment_details, app_readiness, vehicle_types,
-      serviceAreaRange, experience, specialties, pricing, resume_url, documents
-    } = req.body;
+    const { name, email, password, phone } = req.body;
 
     const credentials = resolveTechnicianSignupCredentials({ name, phone, email, password });
     if (credentials.error) return res.status(400).json({ error: credentials.error });
-    if (req.body.dynamic_pricing_config && (req.body.consent?.agreed !== true || req.body.technician_agreement_accepted !== true)) {
+    if (!signupAgreementsAccepted(req.body)) {
       return res.status(400).json({ error: "Accept both agreements before submitting your application." });
     }
     const normalizedEmail = credentials.email;
     const storageEmail = credentials.storageEmail;
     const trimmedName = (name || "").trim();
-
-    const password_hash = credentials.password ? await bcrypt.hash(credentials.password, 10) : null;
-    const normalizedSpecialties = normalizeSpecialties(specialties);
-    const normalizedVehicleTypes = normalizeVehicleTypes(vehicle_types);
-    const normalizedServiceCosts = normalizeServiceCosts(service_costs);
-    const service_type = normalizedSpecialties[0] || "other";
-    const location = (locality || address || "").trim() || "â€”";
-    const normalizedDocuments = sanitizeTechnicianDocuments(documents);
-    const normalizedResumeUrl = normalizeUploadResourcePath(resume_url);
-    const upiId = String(payment_details?.upi_id || req.body?.upi_id || "").trim();
-    const upiName = String(payment_details?.upi_name || req.body?.upi_name || proprietor_name || trimmedName).trim();
-
-    const specialtiesJson = JSON.stringify(normalizedSpecialties);
-    const pricingJson = JSON.stringify(pricing && typeof pricing === "object" ? pricing : {});
-    const documentsJson = JSON.stringify(normalizedDocuments);
-    const workingHoursJson = JSON.stringify(working_hours || {});
-    const serviceCostsJson = JSON.stringify(normalizedServiceCosts || {});
-    const paymentDetailsJson = JSON.stringify(payment_details || {});
-    const appReadinessJson = JSON.stringify(app_readiness || {});
-    const vehicleTypesJson = JSON.stringify(normalizedVehicleTypes || {});
 
     const pool = await db.getPool();
 
@@ -1102,76 +1202,7 @@ router.post("/register", async (req, res) => {
 
     registrationConnection = await pool.getConnection();
     await registrationConnection.beginTransaction();
-    const result = await registrationConnection.execute(
-      `INSERT INTO technicians (
-        name, email, phone, upi_id, upi_name,
-        proprietor_name, alternate_phone, whatsapp_number,
-        service_type, location, status, is_active, is_available, password_hash,
-        address, region, district, state, locality, google_maps_link,
-        aadhaar_number, pan_number, business_type, gst_number, trade_license_number,
-        service_area_range, experience,
-        specialties, pricing, working_hours, service_costs, payment_details, app_readiness, vehicle_types,
-        resume_url, documents, latitude, longitude
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        trimmedName,
-        storageEmail,
-        (phone || "").trim(),
-        upiId || null,
-        upiName || null,
-        (proprietor_name || "").trim(),
-        (alternate_phone || "").trim(),
-        (whatsapp_number || "").trim(),
-        service_type,
-        location,
-        "pending",
-        false,
-        false,
-        password_hash,
-        (address || "").trim(),
-        (region || "").trim(),
-        (district || "").trim(),
-        (state || "").trim(),
-        (locality || "").trim(),
-        (google_maps_link || "").trim(),
-        (aadhaar_number || "").trim(),
-        (pan_number || "").trim(),
-        (business_type || "").trim(),
-        (gst_number || "").trim(),
-        (trade_license_number || "").trim(),
-        Number(serviceAreaRange) || 10,
-        Number(experience) || 0,
-        specialtiesJson,
-        pricingJson,
-        workingHoursJson,
-        serviceCostsJson,
-        paymentDetailsJson,
-        appReadinessJson,
-        vehicleTypesJson,
-        normalizedResumeUrl,
-        documentsJson,
-        req.body.latitude || null,
-        req.body.longitude || null
-      ]
-    );
-
-    const insertedId = result[0].insertId;
-
-    try {
-      if (req.body.pricing_config || req.body.service_costs) {
-        const payloadToSync = req.body.pricing_config || req.body.service_costs;
-        const normalizedEntries = normalizeTechnicianPricingEntries(payloadToSync);
-        await replaceTechnicianPricingRows(registrationConnection, insertedId, normalizedEntries);
-        await replaceTechnicianFleetVehicles(registrationConnection, insertedId, payloadToSync);
-      }
-    } catch (pricingError) {
-      console.error("[Register] Failed to sync technician pricing", pricingError);
-      throw pricingError;
-    }
-
-    if (req.body.dynamic_pricing_config) {
-      await technicianPricingController.replaceTechnicianServicePricing(registrationConnection, insertedId, req.body.dynamic_pricing_config);
-    }
+    const insertedId = await insertTechnicianSignup(registrationConnection, req.body, credentials);
     await registrationConnection.commit();
     registrationCommitted = true;
 
@@ -1204,7 +1235,7 @@ router.post("/register", async (req, res) => {
       });
     }
 
-    const id = result[0].insertId;
+    const id = insertedId;
     const token = signTechnicianToken(id, storageEmail);
 
     return res.status(201).json({
@@ -2162,7 +2193,8 @@ router.get("/nearby", async (req, res) => {
     console.log(`[API NEARBY] Request from ${clientIp} - lat=${userLat}, lng=${userLng}, service=${serviceType}, vehicle=${vehicle_type}`);
 
     // Fetch all approved and active technicians
-    const rows = await db.query("SELECT * FROM technicians WHERE status = 'approved' AND is_active = TRUE");
+    const rows = (await db.query("SELECT * FROM technicians WHERE status = 'approved' AND is_active = TRUE"))
+      .filter((row) => !(row.admin_hidden != null && Boolean(Number(row.admin_hidden))));
     const technicianIds = rows
       .map((row) => Number(row.id))
       .filter((id) => Number.isInteger(id) && id > 0);
@@ -2604,118 +2636,48 @@ router.get("/me/payout-transactions", verifyTechnician, async (req, res) => {
 });
 
 router.post("/create", verifyAdmin, async (req, res) => {
+  // An admin fills in the app's own sign-up form, so the record is saved exactly as an app sign-up is.
   let creationConnection;
   let creationCommitted = false;
   try {
-    const {
-      name, email, password, phone,
-      proprietor_name, alternate_phone, whatsapp_number,
-      address, region, district, state, locality, google_maps_link,
-      aadhaar_number, pan_number, business_type, gst_number, trade_license_number,
-      working_hours, service_costs, payment_details, app_readiness, vehicle_types,
-      serviceAreaRange, experience, specialties, pricing, status,
-      resume_url, documents
-    } = req.body;
-
-    const normalizedEmail = (email || "").trim().toLowerCase();
-    const trimmedName = (name || "").trim();
-
-    if (!trimmedName || !normalizedEmail) {
-      return res.status(400).json({ error: "Name and email are required." });
+    const { name, email, password, phone } = req.body;
+    const credentials = resolveTechnicianSignupCredentials({ name, phone, email, password });
+    if (credentials.error) return res.status(400).json({ error: credentials.error });
+    if (!signupAgreementsAccepted(req.body)) {
+      return res.status(400).json({ error: "Confirm both agreements before adding the technician." });
     }
-
-    if (!password || String(password).length < 8) {
-      return res.status(400).json({ error: "Password is required and must be at least 8 characters." });
-    }
-    const password_hash = await bcrypt.hash(String(password), 10);
-    const normalizedSpecialties = normalizeSpecialties(specialties);
-    const normalizedVehicleTypes = normalizeVehicleTypes(vehicle_types);
-    const normalizedServiceCosts = normalizeServiceCosts(service_costs);
-    const service_type = normalizedSpecialties[0] || "other";
-    const location = (locality || address || "").trim() || "—";
-    const normalizedDocuments = sanitizeTechnicianDocuments(documents);
-    const normalizedResumeUrl = normalizeUploadResourcePath(resume_url);
-    const upiId = String(payment_details?.upi_id || req.body?.upi_id || "").trim();
-    const upiName = String(payment_details?.upi_name || req.body?.upi_name || proprietor_name || trimmedName).trim();
-    const requestedStatus = String(status || "").toLowerCase();
-    const appStatus = requestedStatus === "approved" ? "approved" : "pending";
-
-    const specialtiesJson = JSON.stringify(normalizedSpecialties);
-    const pricingJson = JSON.stringify(pricing && typeof pricing === "object" ? pricing : {});
-    const documentsJson = JSON.stringify(normalizedDocuments);
-    const workingHoursJson = JSON.stringify(working_hours || {});
-    const serviceCostsJson = JSON.stringify(normalizedServiceCosts || {});
-    const paymentDetailsJson = JSON.stringify(payment_details || {});
-    const appReadinessJson = JSON.stringify(app_readiness || {});
-    const vehicleTypesJson = JSON.stringify(normalizedVehicleTypes || {});
-
     const pool = await db.getPool();
+    const [existing] = credentials.email ? await pool.query("SELECT id FROM technicians WHERE email = ?", [credentials.email]) : [[]];
+    if (existing.length > 0) {
+      return res.status(409).json({ error: "This email is already registered." });
+    }
+
     creationConnection = await pool.getConnection();
     await creationConnection.beginTransaction();
-    const result = await creationConnection.execute(
-      `INSERT INTO technicians(
-        name, email, phone, upi_id, upi_name,
-        proprietor_name, alternate_phone, whatsapp_number,
-        service_type, location, status, password_hash,
-        address, region, district, state, locality, google_maps_link,
-        aadhaar_number, pan_number, business_type, gst_number, trade_license_number,
-        service_area_range, experience,
-        specialties, pricing, working_hours, service_costs, payment_details, app_readiness, vehicle_types,
-        resume_url, documents
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        trimmedName,
-        normalizedEmail,
-        (phone || "").trim(),
-        upiId || null,
-        upiName || null,
-        (proprietor_name || "").trim(),
-        (alternate_phone || "").trim(),
-        (whatsapp_number || "").trim(),
-        service_type,
-        location,
-        appStatus,
-        password_hash,
-        (address || "").trim(),
-        (region || "").trim(),
-        (district || "").trim(),
-        (state || "").trim(),
-        (locality || "").trim(),
-        (google_maps_link || "").trim(),
-        (aadhaar_number || "").trim(),
-        (pan_number || "").trim(),
-        (business_type || "").trim(),
-        (gst_number || "").trim(),
-        (trade_license_number || "").trim(),
-        Number(serviceAreaRange) || 10,
-        Number(experience) || 0,
-        specialtiesJson,
-        pricingJson,
-        workingHoursJson,
-        serviceCostsJson,
-        paymentDetailsJson,
-        appReadinessJson,
-        vehicleTypesJson,
-        normalizedResumeUrl,
-        documentsJson,
-      ]
-    );
-    const id = result[0].insertId;
-    if (req.body.pricing_config || req.body.service_costs) {
-      const pricingPayload = req.body.pricing_config || req.body.service_costs;
-      await replaceTechnicianPricingRows(creationConnection, id, pricingPayload);
-      await replaceTechnicianFleetVehicles(creationConnection, id, pricingPayload);
-    }
-    if (req.body.dynamic_pricing_config) {
-      await technicianPricingController.replaceTechnicianServicePricing(creationConnection, id, req.body.dynamic_pricing_config);
-    }
+    const id = await insertTechnicianSignup(creationConnection, req.body, credentials);
     await creationConnection.commit();
     creationCommitted = true;
-    await sendEventEmail("TECHNICIAN_REGISTER", {
-      name: trimmedName,
-      email: normalizedEmail,
-    });
-    return res.status(201).json({ id: String(id), message: "Technician added successfully." });
+
+    const trimmedName = String(name || "").trim();
+    const approveNow = String(req.body.status || "").toLowerCase() === "approved";
+    if (approveNow) {
+      await approveTechnicianRecord(pool, id, {
+        reason: String(req.body.approval_reason || "").trim() || "Added and approved by admin",
+        adminEmail: req.adminEmail,
+      });
+    } else {
+      try {
+        await pool.execute(
+          "INSERT INTO notifications (type, title, message) VALUES (?, ?, ?)",
+          [ADMIN_NOTIFICATION_TYPES.NEW_TECHNICIAN_APPLICATION, "New Technician Application", `${trimmedName} was added by an admin and is waiting for review.`]
+        );
+        socketService.notifyAdmins("admin:notification", { title: "New Technician Application", message: `${trimmedName} was added by an admin.`, created_at: new Date() });
+      } catch { }
+    }
+    if (credentials.email) {
+      await sendEventEmail("TECHNICIAN_REGISTER", { name: trimmedName, email: credentials.email });
+    }
+    return res.status(201).json({ id: String(id), status: approveNow ? "approved" : "pending", message: "Technician added successfully." });
   } catch (err) {
     if (creationConnection && !creationCommitted) await creationConnection.rollback();
     if (err.code === "ER_DUP_ENTRY" || err.message?.includes("Duplicate")) {
@@ -2727,6 +2689,60 @@ router.post("/create", verifyAdmin, async (req, res) => {
   }
 });
 
+// Edit a technician with the same form: every sign-up field and the prices, saved the way sign-up saves them.
+router.put("/:id/profile", verifyAdmin, async (req, res) => {
+  let connection;
+  let committed = false;
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid technician id." });
+    const body = req.body || {};
+    const pool = await db.getPool();
+    const [rows] = await pool.query("SELECT id, email, password_hash FROM technicians WHERE id = ? LIMIT 1", [id]);
+    const current = rows?.[0];
+    if (!current) return res.status(404).json({ error: "Technician not found." });
+
+    const email = String(body.email || "").trim().toLowerCase();
+    const password = typeof body.password === "string" ? body.password : "";
+    const check = resolveTechnicianSignupCredentials({ name: body.name, phone: body.phone, email, password: password || (email && current.password_hash ? "kept-password" : "") });
+    if (check.error) return res.status(400).json({ error: check.error });
+    if (password && password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
+    if (email && email !== String(current.email || "").toLowerCase()) {
+      const [taken] = await pool.query("SELECT id FROM technicians WHERE email = ? AND id <> ?", [email, id]);
+      if (taken.length > 0) return res.status(409).json({ error: "This email is already registered." });
+    }
+    const credentials = { storageEmail: email || current.email };
+    const passwordHash = password ? await bcrypt.hash(password, 10) : null;
+    const record = technicianSignupColumns(body, credentials, passwordHash);
+    if (!passwordHash) delete record.password_hash;
+    const columns = Object.keys(record);
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    await connection.execute(
+      `UPDATE technicians SET ${columns.map((column) => `${column} = ?`).join(", ")} WHERE id = ?`,
+      [...columns.map((column) => record[column]), id]
+    );
+    await syncTechnicianSignupPricing(connection, id, body);
+    await connection.execute(
+      `INSERT INTO admin_actions_log (admin_id, action_type, target_type, target_id, metadata)
+       VALUES (?, 'updateTechnicianProfile', 'technician', ?, ?)`,
+      [req.adminEmail || "admin", String(id), JSON.stringify({ fields: columns.filter((column) => column !== "password_hash"), passwordChanged: Boolean(passwordHash) })]
+    );
+    await connection.commit();
+    committed = true;
+    socketService.notifyAdmins("admin:technician_audit_update", { technicianId: id, action: "updated", createdAt: new Date().toISOString() });
+    return res.json({ success: true, id: String(id) });
+  } catch (err) {
+    if (connection && !committed) await connection.rollback();
+    if (err.code === "ER_DUP_ENTRY" || err.message?.includes("Duplicate")) {
+      return res.status(409).json({ error: "This email is already registered." });
+    }
+    return res.status(500).json({ error: err.message || "Failed to update technician." });
+  } finally {
+    connection?.release();
+  }
+});
 router.get("/me/reviews", verifyTechnician, async (req, res) => {
   try {
     const technicianId = req.technicianId;
@@ -3069,47 +3085,10 @@ router.patch("/:id/approve", verifyAdmin, async (req, res) => {
     const id = req.params.id;
     const reason = String(req.body?.reason || "").trim();
     const pool = await db.getPool();
-    const [existing] = await pool.query("SELECT id, name, email, status FROM technicians WHERE id = ? LIMIT 1", [id]);
-    if (existing.length === 0) {
+    const outcome = await approveTechnicianRecord(pool, id, { reason, adminEmail: req.adminEmail });
+    if (outcome.notFound) {
       return res.status(404).json({ error: "Technician not found." });
     }
-    const previousStatus = String(existing[0].status || "pending");
-
-    await pool.execute(
-      "UPDATE technicians SET status = 'approved', is_active = TRUE, is_available = CASE WHEN current_job_id IS NULL THEN TRUE ELSE FALSE END WHERE id = ?",
-      [id]
-    );
-    await pool.execute(
-      `INSERT INTO technician_approval_audit
-      (technician_id, action, previous_status, new_status, reason, admin_email)
-      VALUES (?, 'approved', ?, 'approved', ?, ?)`,
-      [id, previousStatus, reason || "Approved by admin", req.adminEmail || "unknown-admin"]
-    );
-    await pool.execute(
-      `INSERT INTO notifications (type, title, message, is_read)
-       VALUES (?, ?, ?, 0)`,
-      [
-        ADMIN_NOTIFICATION_TYPES.TECHNICIAN_APPROVED,
-        "Technician Approved",
-        `${existing[0]?.name || "Technician"} has been approved.`,
-      ]
-    );
-    const techRows = await db.query("SELECT name, email FROM technicians WHERE id = ?", [id]);
-    const tech = techRows[0];
-    if (tech?.email) {
-      await sendEventEmail("TECHNICIAN_APPLICATION_APPROVED", {
-        name: tech.name || "there",
-        email: tech.email,
-        status: "approved",
-      });
-    }
-    socketService.notifyAdmins("admin:technician_audit_update", {
-      technicianId: id,
-      action: "approved",
-      adminEmail: req.adminEmail || "unknown-admin",
-      reason: reason || "Approved by admin",
-      createdAt: new Date().toISOString()
-    });
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Failed to approve." });

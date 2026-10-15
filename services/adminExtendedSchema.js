@@ -93,6 +93,16 @@ async function adminExtendedCreateTables(pool) {
     )`
   ));
 
+  await runDdlWithRetry(pool, "create table admin_customer_notes", () => pool.query(
+    `CREATE TABLE IF NOT EXISTS admin_customer_notes (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      admin_id VARCHAR(255) NOT NULL,
+      note TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`
+  ));
+
   await runDdlWithRetry(pool, "create table admin_complaint_updates", () => pool.query(
     `CREATE TABLE IF NOT EXISTS admin_complaint_updates (
       id INT AUTO_INCREMENT PRIMARY KEY,

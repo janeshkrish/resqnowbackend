@@ -9,6 +9,7 @@ import path from "path";
 import techniciansRouter from "./routes/technicians.js";
 import adminRouter from "./routes/admin.js";
 import adminMonitorRouter from "./routes/adminMonitor.js";
+import adminPortalRouter from "./routes/adminPortal.js";
 import usersRouter from "./routes/users.js";
 import authRouter from "./routes/auth.js";
 import serviceRequestsRouter from "./routes/service_requests.js";
@@ -267,6 +268,7 @@ function createApp() {
   app.use("/api/technicians", techniciansRouter);
   app.use("/api/technician", techniciansRouter);
   app.use("/api/admin/monitor", adminMonitorRouter);
+  app.use("/api/admin/portal", adminPortalRouter);
   app.use("/api/admin", adminRouter);
   app.use("/api/users", usersRouter);
   app.use("/api/auth", authRouter);
