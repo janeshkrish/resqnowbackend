@@ -62,6 +62,67 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   return r * c;
 }
 
+function firstNameOf(name) {
+  return normalizeText(name).split(/\s+/)[0] || "Your technician";
+}
+
+/** "Flat tyre" for "flat_tire", "Towing" for "Towing Service" and the like. */
+function customerServiceLabel(serviceType) {
+  const type = normalizeText(serviceType).toLowerCase();
+  if (!type) return "Your request";
+  if (type.includes("tow")) return "Towing";
+  if (type.includes("winch")) return "Winching";
+  if (/flat|tyre|tire|puncture/.test(type)) return "Flat tyre";
+  if (type.includes("ev") && type.includes("charg")) return "EV charging";
+  if (type.includes("battery") || type.includes("jump")) return "Battery";
+  if (type.includes("fuel")) return "Fuel delivery";
+  if (type.includes("lock") || type.includes("key")) return "Lockout";
+  if (/mechan|repair|engine/.test(type)) return "Mechanic";
+  const words = normalizeText(serviceType).replace(/[_-]+/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * What a customer's phone says at each step of a request, in the words of the app's
+ * tracking screen (src/lib/customerTracking.ts). Null for a step that sends no push.
+ */
+export function customerTripCopy(status, technicianName, serviceType) {
+  const first = firstNameOf(technicianName);
+  const service = customerServiceLabel(serviceType);
+  switch (normalizeText(status).toLowerCase()) {
+    case "accepted":
+      return { title: `${first} accepted your request`, body: `${service} · getting ready to leave.` };
+    case "on-the-way":
+    case "en-route":
+    case "en_route_pickup":
+      return { title: `${first} is on the way`, body: "Open the app to see the minutes and the live map." };
+    case "arrived":
+    case "arrived_pickup":
+      return { title: `${first} is here`, body: "Meet your technician at the vehicle." };
+    case "in-progress":
+    case "in_progress":
+    case "service_started":
+      return { title: "Work in progress", body: `${first} is working on your vehicle.` };
+    case "vehicle_loaded":
+      return { title: "Vehicle loaded", body: "Your vehicle is secured on the tow truck." };
+    case "enroute_drop":
+      return { title: "Towing to the drop point", body: "Open the app to follow the tow truck." };
+    case "arrived_drop":
+      return { title: "Reached the drop point", body: "Final confirmation is next." };
+    case "completed":
+    case "service_completed":
+    case "awaiting_payment":
+    case "payment_pending":
+      return { title: "Work done · payment is next", body: `Pay online, or give cash to ${first}.` };
+    case "paid":
+      return { title: "Paid · thank you", body: `How was ${first}? One tap is enough.` };
+    case "cancelled":
+      return { title: "Request cancelled", body: "You can send a new request any time." };
+    default:
+      return null;
+  }
+}
+
 function stringifyDataPayload(data) {
   const result = {};
   Object.entries(data || {}).forEach(([key, value]) => {
@@ -184,6 +245,38 @@ class NotificationService {
     return `${km.toFixed(1)} km`;
   }
 
+  /**
+   * Who is coming and for what, so a customer's push can say "Arun is here" rather than
+   * "Technician Arrived". Never holds a push back: on any failure it returns what it has.
+   */
+  async resolveCustomerTrip(requestId, data = {}, pool) {
+    const trip = {
+      technicianName: normalizeText(data?.technicianName || data?.technician_name),
+      technicianPhone: normalizeText(data?.technicianPhone || data?.technician_phone),
+      serviceType: normalizeText(data?.serviceType || data?.service_type),
+    };
+    if (!pool || !requestId || (trip.technicianName && trip.serviceType)) return trip;
+    try {
+      const [rows] = await pool.query(
+        `SELECT sr.service_type, t.name AS technician_name, t.phone AS technician_phone
+           FROM service_requests sr
+           LEFT JOIN technicians t ON t.id = sr.technician_id
+          WHERE sr.id = ?
+          LIMIT 1`,
+        [requestId]
+      );
+      const row = rows?.[0] || {};
+      return {
+        technicianName: trip.technicianName || normalizeText(row.technician_name),
+        technicianPhone: trip.technicianPhone || normalizeText(row.technician_phone),
+        serviceType: trip.serviceType || normalizeText(row.service_type),
+      };
+    } catch (error) {
+      console.warn(`[NotificationService] Trip details unavailable for request ${requestId}:`, error?.message || error);
+      return trip;
+    }
+  }
+
   async buildPayload(userId, userType, event, data = {}, pool) {
     const jobId = normalizeText(data?.jobId || data?.requestId || data?.id);
     const basePath = jobId ? `/job/${encodeURIComponent(jobId)}` : "/technician/dashboard";
@@ -217,8 +310,8 @@ class NotificationService {
       const payloadData = stringifyDataPayload({
         event,
         type: "EMERGENCY_JOB",
-        channelId: "high_priority_alarms",
-        sound: "emergency_alarm",
+        channelId: "job_offers",
+        sound: "job_ring",
         title: JOB_ALERT_TITLE,
         body,
         jobId,
@@ -425,67 +518,44 @@ class NotificationService {
       };
     }
 
-    if (userType === "user" && event === "job:status_update") {
-      const status = normalizeText(data?.status).toLowerCase();
-      let title = "";
-      let body = "";
-
-      if (status === "accepted") {
-        title = "Service Accepted";
-        body = "A technician has accepted your service request.";
-      } else if (status === "on-the-way" || status === "en-route") {
-        title = "Technician On The Way";
-        body = "Your technician is heading towards your location.";
-      } else if (status === "arrived") {
-        title = "Technician Arrived";
-        body = "Your technician is at your location.";
-      } else if (status === "in-progress") {
-        title = "Service Started";
-        body = "Your technician has started working on your request.";
-      } else if (status === "completed" || status === "awaiting_payment" || status === "payment_pending") {
-        title = "Service Completed";
-        body = "Service is complete. Please finish payment to close the request.";
-      } else if (status === "paid") {
-        title = "Payment Completed";
-        body = "Your payment has been successfully processed.";
-      } else if (status === "cancelled") {
-        title = "Request Cancelled";
-        body = "Your service request has been cancelled.";
-      }
-
-      if (!title || !body) return null;
+    if (userType === "user" && (event === "job:status_update" || event === "payment_completed")) {
+      const status = event === "payment_completed" ? "paid" : normalizeText(data?.status).toLowerCase();
       const requestId = normalizeText(data?.requestId || data?.id);
+      const trip = await this.resolveCustomerTrip(requestId, data, pool);
+      const copy = customerTripCopy(status, trip.technicianName, trip.serviceType);
+      if (!copy) return null;
       const requestPath = requestId ? `/service-tracking/${encodeURIComponent(requestId)}` : "/";
       const requestLink = frontendBaseUrl ? `${frontendBaseUrl}${requestPath}` : undefined;
 
       return {
-        notification: { title, body },
+        // Data only, so the Android app updates the request's one Live Update in place
+        // (TripUpdateNotifier) instead of stacking a new notification for every step.
+        // Older app versions show title and body from these fields as a plain notification.
         data: stringifyDataPayload({
           event,
+          type: "TRIP_UPDATE",
+          status,
           requestId,
+          title: copy.title,
+          body: copy.body,
+          technicianName: trip.technicianName,
+          technicianPhone: trip.technicianPhone,
+          serviceType: trip.serviceType,
           deepLinkPath: requestPath,
         }),
-        webpush: {
-          ...(requestLink ? { fcmOptions: { link: requestLink } } : {}),
+        android: {
+          priority: "high",
+          collapseKey: requestId ? `trip_${requestId}` : "trip_update",
+          ttl: 3600000,
         },
-      };
-    }
-
-    if (userType === "user" && event === "payment_completed") {
-      const requestId = normalizeText(data?.requestId || data?.id);
-      const requestPath = requestId ? `/service-tracking/${encodeURIComponent(requestId)}` : "/";
-      const requestLink = frontendBaseUrl ? `${frontendBaseUrl}${requestPath}` : undefined;
-      return {
-        notification: {
-          title: "Payment Completed",
-          body: "Your payment has been successfully processed.",
-        },
-        data: stringifyDataPayload({
-          event,
-          requestId,
-          deepLinkPath: requestPath,
-        }),
         webpush: {
+          notification: {
+            title: copy.title,
+            body: copy.body,
+            icon: "/icons/icon-192x192.png",
+            badge: "/icons/icon-192x192.png",
+            tag: requestId ? `trip-${requestId}` : `trip-${Date.now()}`,
+          },
           ...(requestLink ? { fcmOptions: { link: requestLink } } : {}),
         },
       };
