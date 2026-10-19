@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { calculateTechnicianServiceRowPayout, fromTechnicianPricing } from "./pricingEstimator.js";
 import { computePaymentAmounts, getPlatformPricingConfig } from "./platformPricing.js";
@@ -39,15 +40,15 @@ function pickServiceRow(rows, domain, vehicle) {
 export function computeServicePrices({ technicians, serviceRows, vehicle, pricingConfig, services = HOME_SERVICES }) {
   const rowsByTechnician = new Map();
   for (const row of serviceRows || []) {
-    const list = rowsByTechnician.get(Number(row.technician_id)) || [];
+    const list = rowsByTechnician.get(recordId(row.technician_id)) || [];
     list.push(row);
-    rowsByTechnician.set(Number(row.technician_id), list);
+    rowsByTechnician.set(recordId(row.technician_id), list);
   }
 
   return services.map((service) => {
     const prices = [];
     for (const tech of technicians || []) {
-      const row = pickServiceRow(rowsByTechnician.get(Number(tech.id)) || [], service, vehicle);
+      const row = pickServiceRow(rowsByTechnician.get(recordId(tech.id)) || [], service, vehicle);
       const price = row ? calculateTechnicianServiceRowPayout(row, vehicle) : fromTechnicianPricing(tech, service, vehicle);
       if (Number.isFinite(price) && price >= MIN_VALID_PRICE) prices.push(price);
     }

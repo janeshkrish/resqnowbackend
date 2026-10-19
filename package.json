@@ -3,6 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node scripts/test.mjs",
+    "db:migrate:uuid": "node models/migrations/uuid-cli.mjs",
+    "db:migrate:deploy": "node models/migrations/deploy-cli.mjs",
+    "db:inspect": "node scripts/inspect-database.mjs",
+    "deploy:production": "node scripts/deploy-production.mjs",
     "build": "node scripts/build-check.mjs",
     "email:test": "node scripts/email-smoke-test.mjs",
     "test:dispatch-matching": "node --test tests/dispatch_matching.test.js",

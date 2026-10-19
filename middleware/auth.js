@@ -1,4 +1,6 @@
 import jwt from "jsonwebtoken";
+import { ensureAdminIdentity } from "../models/userIdentity.js";
+import { isUuid } from "../models/identifiers.js";
 
 function getJwtSecret() {
   const secret = String(process.env.JWT_SECRET || "").trim();
@@ -20,6 +22,7 @@ export function verifyTechnician(req, res, next) {
   }
   try {
     const payload = jwt.verify(auth.slice(7), getJwtSecret());
+    if (!isUuid(payload.id || payload.technicianId)) return res.status(401).json({ error: "Please sign in again." });
     const role = resolveTokenRole(payload);
     if (role !== "technician") {
       console.log(`[Auth] Forbidden: Expected technician, got ${role || "unknown"}`);
@@ -44,6 +47,7 @@ export function verifyUser(req, res, next) {
   }
   try {
     const payload = jwt.verify(auth.slice(7), getJwtSecret());
+    if (!isUuid(payload.userId || payload.id)) return res.status(401).json({ error: "Please sign in again." });
     const role = resolveTokenRole(payload);
     if (role && role !== "user" && role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
@@ -65,6 +69,7 @@ export function verifyAdmin(req, res, next) {
   }
   try {
     const payload = jwt.verify(auth.slice(7), getJwtSecret());
+    if (!isUuid(payload.userId || payload.id)) return res.status(401).json({ error: "Please sign in again." });
     const role = resolveTokenRole(payload);
     if (role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
@@ -91,6 +96,7 @@ export function signTechnicianToken(id, email) {
   return jwt.sign({ id, email, type: "technician", role: "technician" }, getJwtSecret(), { expiresIn: "7d" });
 }
 
-export function signAdminToken(email) {
-  return jwt.sign({ email, type: "admin", role: "admin" }, getJwtSecret(), { expiresIn: "1d" });
+export async function signAdminToken(email) {
+  const id = await ensureAdminIdentity(email);
+  return jwt.sign({ id, userId: id, email, type: "admin", role: "admin" }, getJwtSecret(), { expiresIn: "1d" });
 }

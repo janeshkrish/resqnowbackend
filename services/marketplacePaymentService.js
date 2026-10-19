@@ -41,7 +41,7 @@ export async function findReusablePendingOrder(pool, { requestId, breakdown, max
        AND ABS(COALESCE(payment_fee, 0) - ?) < 0.01
        AND ABS(COALESCE(base_amount, COALESCE(technician_amount, 0)) - ?) < 0.01
        AND created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-     ORDER BY id DESC
+     ORDER BY created_at DESC, id DESC
      LIMIT 1`,
     [
       requestId,

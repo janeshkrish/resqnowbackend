@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import {
   adminExtendedEmergencyMessage,
@@ -10,8 +11,8 @@ import { ADMIN_NOTIFICATION_TYPES } from "../services/adminNotificationTypes.js"
 function normalizeTechnicianIds(value) {
   if (!Array.isArray(value)) return [];
   return value
-    .map((id) => Number(id))
-    .filter((id) => Number.isInteger(id) && id > 0);
+    .map((id) => recordId(id))
+    .filter((id) => isRecordId(id));
 }
 
 async function logAction(pool, adminId, actionType, metadata = null) {

@@ -22,7 +22,7 @@ export async function adminExtendedLogAdminAction({
   await pool.execute(
     `INSERT INTO admin_actions_log (admin_id, action_type, target_type, target_id, metadata)
      VALUES (?, ?, ?, ?, ?)`,
-    [String(adminId || "admin"), String(actionType || "unknown"), String(targetType || "unknown"), String(targetId || "unknown"), adminExtendedToJson(metadata)]
+    [adminId || null, String(actionType || "unknown"), String(targetType || "unknown"), String(targetId || "unknown"), adminExtendedToJson(metadata)]
   );
 }
 

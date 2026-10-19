@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "./serviceNormalization.js";
 import { coercePricingTimestamp } from "./pricingTimestamp.js";
@@ -261,8 +262,8 @@ export function fleetPricingFor(technicianPricing, towTruckType) {
 }
 
 async function resolveTechnicianPricing({ technicianId, serviceType, vehicleType, pricingConfig, rules, towTruckType = null }) {
-  const technicianIdNumber = Number(technicianId);
-  if (Number.isInteger(technicianIdNumber) && technicianIdNumber > 0) {
+  const technicianIdNumber = recordId(technicianId);
+  if (isRecordId(technicianIdNumber)) {
     try {
       const definition = await fetchTechnicianPricingDefinition({
         technicianId: technicianIdNumber,

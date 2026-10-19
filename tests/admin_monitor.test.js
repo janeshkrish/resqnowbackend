@@ -292,7 +292,7 @@ function call(router, { method = 'GET', url, body = {} }) {
 test('notes need text, are written as admin notes and reject bad ids', async () => {
   const recorded = [];
   const router = createAdminMonitorRouter({
-    guard: (req, _res, next) => { req.adminEmail = 'ops@resqnow.org'; next(); },
+    guard: (req, _res, next) => { req.adminEmail = 'ops@resqnow.org'; req.admin = { id: '93c30839-f239-4018-99a8-2b81fe54792f' }; next(); },
     getPool: async () => ({}),
     record: async (event) => { recorded.push(event); return { ...event, at: 'now' }; },
   });
@@ -300,5 +300,5 @@ test('notes need text, are written as admin notes and reject bad ids', async () 
   assert.equal((await call(router, { method: 'POST', url: '/requests/abc/notes', body: { note: 'x' } })).status, 400);
   const ok = await call(router, { method: 'POST', url: '/requests/5502/notes', body: { note: 'Called Arun, stuck at a level crossing' } });
   assert.equal(ok.status, 201);
-  assert.deepEqual(recorded[0], { requestId: 5502, eventType: 'admin_note', actorType: 'admin', actorId: 'ops@resqnow.org', description: 'Called Arun, stuck at a level crossing' });
+  assert.deepEqual(recorded[0], { requestId: 5502, eventType: 'admin_note', actorType: 'admin', actorId: '93c30839-f239-4018-99a8-2b81fe54792f', description: 'Called Arun, stuck at a level crossing' });
 });

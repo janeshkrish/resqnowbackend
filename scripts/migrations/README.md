@@ -1,0 +1,1 @@
+Database definitions and migration tooling now live under [models](../../models/README.md). Previous integer-ID SQL migrations are archived under `models/migrations/legacy/` and must not be applied to a UUID schema.

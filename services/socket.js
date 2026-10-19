@@ -88,6 +88,7 @@ export class SocketService {
     trackingIngestion = null,
     socketAdapter = null,
     onTrackingAccepted = null,
+    isReady = () => true,
   } = {}) {
     this.accessControl = accessControl;
     this.trackingIngestion = trackingIngestion;
@@ -108,6 +109,7 @@ export class SocketService {
     if (socketAdapter) this.io.adapter(socketAdapter);
 
     this.io.use((socket, next) => {
+      if (!isReady()) return next(new Error('Database initialization is in progress. Retry shortly.'));
       try {
         socket.data.identity = authenticateSocketToken(resolveSocketToken(socket.handshake));
         next();

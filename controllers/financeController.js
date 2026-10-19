@@ -1,3 +1,5 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { buildPagination, likeFilter, toNumber, toPositiveInt } from "./utils.js";
 import {
@@ -358,13 +360,13 @@ export async function exportFinanceCsv(req, res) {
 
 export async function markTechnicianPaymentCompleted(req, res) {
   try {
-    const transactionId = Number.parseInt(String(req.params?.transactionId || req.params?.id || ""), 10);
-    if (!Number.isInteger(transactionId) || transactionId <= 0) {
+    const transactionId = recordId(String(req.params?.transactionId || req.params?.id || ""));
+    if (!isRecordId(transactionId)) {
       return res.status(400).json({ error: "Invalid transaction id." });
     }
     const result = await settlePaymentToTechnician({
       paymentId: transactionId,
-      adminId: String(req.adminEmail || req.admin?.email || "admin"),
+      adminId: adminActorId(req),
       payoutMethod: String(req.body?.payoutMethod || "").trim() || undefined,
       notes: String(req.body?.notes || "").trim(),
       externalReference: String(req.body?.externalReference || "").trim(),
@@ -445,14 +447,14 @@ export async function getWithdrawalRequests(req, res) {
 
 export async function startWithdrawalProcessing(req, res) {
   try {
-    const withdrawalRequestId = Number.parseInt(String(req.params?.withdrawalRequestId || req.params?.id || ""), 10);
-    if (!Number.isInteger(withdrawalRequestId) || withdrawalRequestId <= 0) {
+    const withdrawalRequestId = recordId(String(req.params?.withdrawalRequestId || req.params?.id || ""));
+    if (!isRecordId(withdrawalRequestId)) {
       return res.status(400).json({ error: "Invalid withdrawal request id." });
     }
 
     const result = await startWithdrawalRequestProcessing({
       withdrawalRequestId,
-      adminId: String(req.adminEmail || req.admin?.email || "admin"),
+      adminId: adminActorId(req),
       payoutMethod: String(req.body?.payoutMethod || "").trim() || undefined,
       notes: String(req.body?.notes || "").trim(),
     });
@@ -480,14 +482,14 @@ export async function startWithdrawalProcessing(req, res) {
 
 export async function rejectWithdrawal(req, res) {
   try {
-    const withdrawalRequestId = Number.parseInt(String(req.params?.withdrawalRequestId || req.params?.id || ""), 10);
-    if (!Number.isInteger(withdrawalRequestId) || withdrawalRequestId <= 0) {
+    const withdrawalRequestId = recordId(String(req.params?.withdrawalRequestId || req.params?.id || ""));
+    if (!isRecordId(withdrawalRequestId)) {
       return res.status(400).json({ error: "Invalid withdrawal request id." });
     }
 
     const result = await rejectWithdrawalRequest({
       withdrawalRequestId,
-      adminId: String(req.adminEmail || req.admin?.email || "admin"),
+      adminId: adminActorId(req),
       reason: String(req.body?.reason || "").trim(),
       notes: String(req.body?.notes || "").trim(),
     });
@@ -519,14 +521,14 @@ export async function rejectWithdrawal(req, res) {
 
 export async function markWithdrawalPaid(req, res) {
   try {
-    const withdrawalRequestId = Number.parseInt(String(req.params?.withdrawalRequestId || req.params?.id || ""), 10);
-    if (!Number.isInteger(withdrawalRequestId) || withdrawalRequestId <= 0) {
+    const withdrawalRequestId = recordId(String(req.params?.withdrawalRequestId || req.params?.id || ""));
+    if (!isRecordId(withdrawalRequestId)) {
       return res.status(400).json({ error: "Invalid withdrawal request id." });
     }
 
     const result = await markWithdrawalRequestPaid({
       withdrawalRequestId,
-      adminId: String(req.adminEmail || req.admin?.email || "admin"),
+      adminId: adminActorId(req),
       payoutMethod: String(req.body?.payoutMethod || "").trim() || undefined,
       externalReference: String(req.body?.externalReference || "").trim(),
       notes: String(req.body?.notes || "").trim(),
@@ -567,8 +569,8 @@ export async function markWithdrawalPaid(req, res) {
 
 export async function triggerWalletPayout(req, res) {
   try {
-    const technicianId = Number.parseInt(String(req.body?.technicianId || ""), 10);
-    if (!Number.isInteger(technicianId) || technicianId <= 0) {
+    const technicianId = recordId(String(req.body?.technicianId || ""));
+    if (!isRecordId(technicianId)) {
       return res.status(400).json({ error: "Invalid technician id." });
     }
 
@@ -583,7 +585,7 @@ export async function triggerWalletPayout(req, res) {
     const result = await createTechnicianWalletPayout({
       technicianId,
       amount,
-      adminId: String(req.adminEmail || req.admin?.email || "admin"),
+      adminId: adminActorId(req),
       payoutMethod: String(req.body?.payoutMethod || "").trim() || undefined,
       notes: String(req.body?.notes || "").trim(),
       externalReference: String(req.body?.externalReference || "").trim(),
@@ -658,8 +660,8 @@ export async function getPayoutHistory(req, res) {
 
 export async function refundTransaction(req, res) {
   try {
-    const transactionId = Number.parseInt(String(req.params?.transactionId || req.params?.id || ""), 10);
-    if (!Number.isInteger(transactionId) || transactionId <= 0) {
+    const transactionId = recordId(String(req.params?.transactionId || req.params?.id || ""));
+    if (!isRecordId(transactionId)) {
       return res.status(400).json({ error: "Invalid transaction id." });
     }
 
@@ -676,7 +678,7 @@ export async function refundTransaction(req, res) {
       refundAmount,
       reason: String(req.body?.reason || "").trim(),
       externalReference: String(req.body?.externalReference || "").trim(),
-      adminId: String(req.adminEmail || req.admin?.email || "admin"),
+      adminId: adminActorId(req),
       idempotencyKey: String(req.body?.idempotencyKey || req.headers["x-idempotency-key"] || "").trim(),
       useGateway: parseBoolean(req.body?.useGateway, true),
       gatewayRefundId: String(req.body?.gatewayRefundId || "").trim(),
@@ -713,8 +715,8 @@ export async function refundTransaction(req, res) {
 
 export async function getRefundHistory(req, res) {
   try {
-    const transactionId = Number.parseInt(String(req.params?.transactionId || req.params?.id || ""), 10);
-    if (!Number.isInteger(transactionId) || transactionId <= 0) {
+    const transactionId = recordId(String(req.params?.transactionId || req.params?.id || ""));
+    if (!isRecordId(transactionId)) {
       return res.status(400).json({ error: "Invalid transaction id." });
     }
 
@@ -776,13 +778,13 @@ export async function getRefundHistory(req, res) {
       paymentMethod: paymentRow.payment_method || null,
       paymentToTechnicianStatus: paymentRow.payment_to_technician_status || null,
       refunds: (refundRows || []).map((row) => ({
-        id: Number(row.id),
+        id: recordId(row.id),
         refundReference: row.refund_reference,
         idempotencyKey: row.idempotency_key || null,
-        paymentId: Number(row.payment_id),
-        serviceRequestId: Number(row.service_request_id),
-        technicianId: row.technician_id != null ? Number(row.technician_id) : null,
-        walletTransactionId: row.wallet_transaction_id != null ? Number(row.wallet_transaction_id) : null,
+        paymentId: recordId(row.payment_id),
+        serviceRequestId: recordId(row.service_request_id),
+        technicianId: row.technician_id != null ? recordId(row.technician_id) : null,
+        walletTransactionId: row.wallet_transaction_id != null ? recordId(row.wallet_transaction_id) : null,
         amount: roundMoney(row.amount || 0),
         technicianAdjustmentAmount: roundMoney(row.technician_adjustment_amount || 0),
         status: row.status || "processed",

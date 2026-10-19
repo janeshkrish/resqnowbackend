@@ -1,3 +1,4 @@
+import { adminActorId } from "../models/userIdentity.js";
 import { verifyAdmin } from "./auth.js";
 
 function adminExtendedParseAllowedEmails() {
@@ -12,8 +13,7 @@ function adminExtendedResolveAdminEmail(req) {
 }
 
 function adminExtendedResolveAdminId(req) {
-  const email = adminExtendedResolveAdminEmail(req);
-  return String(req.admin?.id || email || "admin");
+  return adminActorId(req);
 }
 
 export function requireAdminExtendedAccess(req, res, next) {

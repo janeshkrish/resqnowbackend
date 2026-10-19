@@ -1,5 +1,7 @@
+import { adminActorId } from "../models/userIdentity.js";
 import { getPool } from "../db.js";
 import { ensureAdminExtendedSchema } from "../services/adminExtendedSchema.js";
+import { recordHttpAudit } from "../models/audit.js";
 
 const adminExtendedRedactedKeys = new Set([
   "password",
@@ -52,7 +54,7 @@ function adminExtendedResolveAuditTargetId(req) {
 }
 
 function adminExtendedResolveAdminId(req) {
-  return String(req.adminExtended?.adminId || req.admin?.id || req.adminEmail || req.admin?.email || "admin");
+  return adminActorId(req);
 }
 
 export function adminExtendedAuditLogger(req, res, next) {
@@ -79,17 +81,8 @@ export function adminExtendedAuditLogger(req, res, next) {
           params: adminExtendedSanitizeValue(req.params),
         };
 
-        await pool.execute(
-          `INSERT INTO admin_audit_logs (adminId, actionType, targetId, timestamp, metadata)
-           VALUES (?, ?, ?, ?, ?)`,
-          [
-            adminExtendedResolveAdminId(req),
-            actionType,
-            targetId ? String(targetId) : null,
-            new Date(),
-            JSON.stringify(metadata),
-          ]
-        );
+        await recordHttpAudit(pool, { adminId: adminExtendedResolveAdminId(req), actionType,
+          targetId: targetId ? String(targetId) : null, metadata });
       } catch (error) {
         console.error("[adminExtendedAuditLogger] Failed to write audit log:", error?.message || error);
       }

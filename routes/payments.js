@@ -1,3 +1,5 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
+import { compactPaymentReceipt } from "../utils/paymentReference.js";
 
 import express from "express";
 import Razorpay from "razorpay";
@@ -214,7 +216,7 @@ async function evaluateWelcomeCouponForRequest({
         Boolean(configuredCode) &&
         couponDiscountPercent > 0 &&
         maxUsesPerUser > 0;
-    const requestId = Number(requestRow?.id);
+    const requestId = recordId(requestRow?.id);
 
     const [completedRows] = await pool.query(
         `SELECT COUNT(*) AS count
@@ -296,7 +298,7 @@ async function buildServiceRequestPaymentQuote({
     preserveExistingApplied = false,
     paymentMode = "cash",
 }) {
-    const userId = Number(requestRow?.user_id);
+    const userId = recordId(requestRow?.user_id);
     const baseAmount = await resolveRequestBaseAmount(requestRow, pricingConfig);
     const coupon = await evaluateWelcomeCouponForRequest({
         pool,
@@ -347,7 +349,7 @@ async function upsertPendingRazorpayPayment({
         `SELECT id
          FROM payments
          WHERE service_request_id = ? AND razorpay_order_id = ?
-         ORDER BY id DESC
+         ORDER BY created_at DESC, id DESC
          LIMIT 1`,
         [requestId, orderId]
     );
@@ -427,7 +429,7 @@ async function markClientSideVerification({
         `SELECT *
          FROM payments
          WHERE service_request_id = ? AND razorpay_order_id = ?
-         ORDER BY id DESC
+         ORDER BY created_at DESC, id DESC
          LIMIT 1`,
         [requestId, orderId]
     );
@@ -544,7 +546,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
             `SELECT *
              FROM payments
              WHERE razorpay_order_id = ?
-             ORDER BY id DESC
+             ORDER BY created_at DESC, id DESC
              LIMIT 1
              FOR UPDATE`,
             [orderId]
@@ -561,8 +563,8 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
         }
 
         const paymentRow = paymentRows[0];
-        const requestId = Number(paymentRow.service_request_id);
-        if (!Number.isFinite(requestId) || requestId <= 0) {
+        const requestId = recordId(paymentRow.service_request_id);
+        if (!isRecordId(requestId)) {
             await conn.rollback();
             return {
                 ...result,
@@ -662,7 +664,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
             `SELECT id, status
              FROM invoices
              WHERE order_id = ? OR razorpay_payment_id = ?
-             ORDER BY id DESC
+             ORDER BY created_at DESC, id DESC
              LIMIT 1
              FOR UPDATE`,
             [orderId, paymentId]
@@ -938,7 +940,7 @@ router.post("/create-registration-order", verifyTechnician, async (req, res) => 
         const options = {
             amount: amount,
             currency: pricingConfig.currency || "INR",
-            receipt: `reg_receipt_${technicianId}_${Date.now()}`,
+            receipt: compactPaymentReceipt(`reg_receipt_${technicianId}_${Date.now()}`),
         };
 
         const order = await razorpay.orders.create(options);
@@ -1093,7 +1095,7 @@ router.post('/quote', verifyUser, async (req, res) => {
 
         res.json({
             success: true,
-            request_id: Number(requestId),
+            request_id: recordId(requestId),
             breakdown: {
                 currency: breakdown.currency,
                 payment_mode: breakdown.paymentMode,
@@ -1231,7 +1233,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
                 id: reusablePayment.razorpay_order_id,
                 amount: Math.round(breakdown.totalAmount * 100),
                 currency: breakdown.currency,
-                receipt: `receipt_${requestId}_reused`,
+                receipt: compactPaymentReceipt(`receipt_${requestId}_reused`),
                 status: String(reusablePayment.status || "pending").toLowerCase(),
                 base_amount: breakdown.baseAmount,
                 payment_mode: breakdown.paymentMode,
@@ -1262,7 +1264,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
         const options = {
             amount: Math.round(breakdown.totalAmount * 100),
             currency: breakdown.currency,
-            receipt: `receipt_${requestId}_${Date.now()}`,
+            receipt: compactPaymentReceipt(`receipt_${requestId}_${Date.now()}`),
             payment_capture: 1,
             notes: {
                 requestId: String(requestId),
@@ -1900,7 +1902,7 @@ router.post("/create-subscription-order", verifyUser, async (req, res) => {
         const options = {
             amount,
             currency: pricingConfig.currency || "INR",
-            receipt: `sub_${planId}_${userId}_${Date.now()}`,
+            receipt: compactPaymentReceipt(`sub_${planId}_${userId}_${Date.now()}`),
             notes: {
                 userId,
                 planId,

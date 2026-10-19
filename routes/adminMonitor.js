@@ -1,3 +1,5 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId } from "../models/identifiers.js";
 import { Router } from "express";
 import * as db from "../db.js";
 import { verifyAdmin } from "../middleware/auth.js";
@@ -16,8 +18,8 @@ import {
 // database, the live-tracking store and the shared ETA cache.
 
 const positiveInt = (value) => {
-  const n = Number.parseInt(String(value ?? ""), 10);
-  return Number.isInteger(n) && n > 0 ? n : null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 };
 
 function runtimeOrNull() {
@@ -47,7 +49,7 @@ export function createAdminMonitorRouter({ getPool = db.getPool, getRuntime = ru
   }));
 
   router.get("/requests/:id", handle(async (req, res) => {
-    const requestId = positiveInt(req.params.id);
+    const requestId = recordId(req.params.id);
     if (!requestId) return res.status(400).json({ error: "Invalid request id." });
     const pool = await getPool();
     const data = await getRequestMonitor({ pool, requestId, runtime: getRuntime() });
@@ -56,7 +58,7 @@ export function createAdminMonitorRouter({ getPool = db.getPool, getRuntime = ru
   }));
 
   router.get("/requests/:id/replay", handle(async (req, res) => {
-    const requestId = positiveInt(req.params.id);
+    const requestId = recordId(req.params.id);
     if (!requestId) return res.status(400).json({ error: "Invalid request id." });
     const pool = await getPool();
     const data = await getRequestReplay({ pool, requestId });
@@ -65,13 +67,13 @@ export function createAdminMonitorRouter({ getPool = db.getPool, getRuntime = ru
   }));
 
   router.post("/requests/:id/notes", handle(async (req, res) => {
-    const requestId = positiveInt(req.params.id);
+    const requestId = recordId(req.params.id);
     const note = String(req.body?.note || "").trim();
     if (!requestId) return res.status(400).json({ error: "Invalid request id." });
     if (!note) return res.status(400).json({ error: "Write the note first." });
     if (note.length > 1000) return res.status(400).json({ error: "Keep the note under 1000 letters." });
     const row = await record(
-      { requestId, eventType: "admin_note", actorType: "admin", actorId: req.adminEmail || req.admin?.email || "admin", description: note },
+      { requestId, eventType: "admin_note", actorType: "admin", actorId: adminActorId(req), description: note },
       { getPool }
     );
     if (!row) return res.status(500).json({ error: "The note could not be saved." });
@@ -79,7 +81,7 @@ export function createAdminMonitorRouter({ getPool = db.getPool, getRuntime = ru
   }));
 
   router.get("/technicians/:id/record", handle(async (req, res) => {
-    const technicianId = positiveInt(req.params.id);
+    const technicianId = recordId(req.params.id);
     if (!technicianId) return res.status(400).json({ error: "Invalid technician id." });
     const pool = await getPool();
     const data = await getTechnicianRecord({ pool, technicianId });
@@ -88,7 +90,7 @@ export function createAdminMonitorRouter({ getPool = db.getPool, getRuntime = ru
   }));
 
   router.get("/technicians/:id/jobs", handle(async (req, res) => {
-    const technicianId = positiveInt(req.params.id);
+    const technicianId = recordId(req.params.id);
     if (!technicianId) return res.status(400).json({ error: "Invalid technician id." });
     const pool = await getPool();
     const days = positiveInt(req.query.days);
@@ -99,7 +101,7 @@ export function createAdminMonitorRouter({ getPool = db.getPool, getRuntime = ru
   }));
 
   router.get("/technicians/:id/reviews", handle(async (req, res) => {
-    const technicianId = positiveInt(req.params.id);
+    const technicianId = recordId(req.params.id);
     if (!technicianId) return res.status(400).json({ error: "Invalid technician id." });
     const pool = await getPool();
     return res.json(await getTechnicianReviews({ pool, technicianId, page: positiveInt(req.query.page) || 1, limit: Math.min(50, positiveInt(req.query.limit) || 20) }));

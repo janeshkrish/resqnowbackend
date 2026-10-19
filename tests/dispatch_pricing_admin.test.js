@@ -7,6 +7,7 @@ import { socketService } from "../services/socket.js";
 
 // All database and socket calls stop at this in-memory boundary.
 process.env.DB_HOST = "simulated.invalid";
+process.env.DB_MIGRATION_MODE = "off";
 process.env.DB_USER = "simulated";
 process.env.DB_PASSWORD = "simulated";
 process.env.DB_NAME = "simulated";

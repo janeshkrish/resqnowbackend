@@ -49,7 +49,10 @@ import {
 } from "./services/liveTrackingRuntime.js";
 import { createLiveTrackingPublisher } from "./services/liveTrackingPublisher.js";
 import { verifyMailerConnection } from "./services/mailer.js";
-import { closePool } from "./db.js";
+import { closePool, getPool } from "./db.js";
+import { assertUuidSchema } from "./models/persistence.js";
+import { ensureModelRelationships } from "./models/constraints.js";
+import { databaseReadiness } from "./middleware/databaseReadiness.js";
 import { reconcileTechnicianAvailability } from "./services/technicianStateService.js";
 import {
   startOperationsCommandCenterMonitor,
@@ -81,11 +84,11 @@ const dbState = {
 };
 
 async function bootstrapDatabase() {
+  await assertUuidSchema(await getPool());
   const {
     ensureTechniciansTable,
     ensureUsersTable,
     ensureOtpRequestsTable,
-    ensureOtpRateLimitsTable,
     ensureServiceRequestsTable,
     ensureRequestTimelineTable,
     ensureRequestAttachmentsTable,
@@ -132,7 +135,6 @@ async function bootstrapDatabase() {
     ensureTechniciansTable,
     ensureUsersTable,
     ensureOtpRequestsTable,
-    ensureOtpRateLimitsTable,
     ensureServiceRequestsTable,
     ensureRequestTimelineTable,
     ensureRequestAttachmentsTable,
@@ -187,9 +189,11 @@ async function bootstrapDatabase() {
 
   await seedInitialServiceConfig();
 
-  const { getPool } = await import("./db.js");
   const { backfillMarketplaceWalletCredits } = await import("./services/marketplaceWalletService.js");
   const pool = await getPool();
+  const { ensureAdminExtendedSchema } = await import("./models/adminSchema.js");
+  await ensureAdminExtendedSchema();
+  await ensureModelRelationships(pool);
   await backfillMarketplaceWalletCredits(pool);
   await reconcileTechnicianAvailability(pool);
 }
@@ -201,6 +205,9 @@ function createApp() {
   const corsOptions = buildCorsOptions();
   app.use(cors(corsOptions));
   app.options("*", cors(corsOptions));
+
+  // No route (including webhooks and uploads) may run against a partial transfer.
+  app.use(databaseReadiness(dbState));
 
   // Razorpay webhook must receive the untouched raw body for signature verification.
   app.post("/api/payments/razorpay/webhook", express.raw({ type: "application/json" }), razorpayWebhookHandler);
@@ -335,6 +342,7 @@ const liveTrackingPublisher = createLiveTrackingPublisher({
 });
 enableRequestEvents();
 socketService.init(httpServer, {
+  isReady: () => dbState.ready,
   trackingIngestion: liveTrackingRuntime.ingestion,
   socketAdapter: liveTrackingRuntime.socketAdapter,
   onTrackingAccepted: (result) => liveTrackingPublisher.publishAccepted(result),
@@ -401,7 +409,6 @@ async function startServer() {
 
     try {
       await bootstrapDatabase();
-      dbState.ready = true;
       dbState.lastError = null;
       dbState.lastCheckedAt = new Date().toISOString();
 
@@ -418,6 +425,7 @@ async function startServer() {
       startOperationsCommandCenterMonitor();
       startTechnicianActivityMonitor();
       startFuelPriceSync();
+      dbState.ready = true;
     } catch (error) {
       dbState.ready = false;
       dbState.lastCheckedAt = new Date().toISOString();

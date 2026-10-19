@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { istDayStart } from "./istTime.js";
 import { normalizeRequestStatus } from "./requestStatusWorkflow.js";
 import { titleForEvent } from "./requestEvents.js";
@@ -133,8 +134,8 @@ async function livePositions(pool, rows, runtime) {
     const [hist] = await pool.query(
       `SELECT h.service_request_id, h.latitude, h.longitude, h.recorded_at, h.speed_mps, h.heading_degrees
        FROM technician_location_history h
-       JOIN (SELECT service_request_id, MAX(id) AS id FROM technician_location_history
-             WHERE service_request_id IN (${placeholders(missing)}) GROUP BY service_request_id) last ON last.id = h.id`,
+       JOIN (SELECT service_request_id, id FROM (SELECT service_request_id, id, ROW_NUMBER() OVER (PARTITION BY service_request_id ORDER BY captured_at DESC, id DESC) AS uuid_rank FROM technician_location_history
+             WHERE service_request_id IN (${placeholders(missing)})) ranked_locations WHERE uuid_rank = 1) last ON last.id = h.id`,
       missing
     );
     for (const h of hist) {
@@ -200,7 +201,7 @@ function summarise(row, extras, now) {
     : null;
   const promisedAt = acceptedMeta.promisedAt || toIso(row.sla_deadline);
   return {
-    id: Number(row.id),
+    id: recordId(row.id),
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
     status: row.status,
@@ -209,9 +210,9 @@ function summarise(row, extras, now) {
     serviceType: row.service_type,
     vehicleType: row.vehicle_type || null,
     vehicleModel: [row.vehicle_brand, row.vehicle_model].filter(Boolean).join(" ") || null,
-    customer: { id: row.user_id == null ? null : Number(row.user_id), name: row.contact_name || row.user_name || "Customer", phoneMasked: maskPhone(row.contact_phone || row.user_phone) },
+    customer: { id: row.user_id == null ? null : recordId(row.user_id), name: row.contact_name || row.user_name || "Customer", phoneMasked: maskPhone(row.contact_phone || row.user_phone) },
     technician: row.technician_id
-      ? { id: Number(row.technician_id), name: row.technician_name || `Technician #${row.technician_id}`, rating: toNumber(row.technician_rating), serviceType: row.technician_service_type || null }
+      ? { id: recordId(row.technician_id), name: row.technician_name || `Technician #${row.technician_id}`, rating: toNumber(row.technician_rating), serviceType: row.technician_service_type || null }
       : null,
     address: row.address || null,
     location: { lat: toNumber(row.location_lat), lng: toNumber(row.location_lng) },
@@ -370,7 +371,7 @@ export function buildTimeline({ request, timeline = [], offers = [], alerts = []
     if (at && !seen.has(kind)) items.push({ at: toIso(at), kind, title, description: kind === "cancelled" ? request.cancellation_reason || null : null, actorType: null, actorId: null, meta: {}, source: "stored" });
   }
   for (const o of offers) {
-    items.push({ at: toIso(o.sent_at), kind: "offer", title: `Offered to ${o.technician_name || `technician #${o.technician_id}`}`, description: null, actorType: "system", actorId: null, meta: { technicianId: Number(o.technician_id), result: o.status }, source: "offers" });
+    items.push({ at: toIso(o.sent_at), kind: "offer", title: `Offered to ${o.technician_name || `technician #${o.technician_id}`}`, description: null, actorType: "system", actorId: null, meta: { technicianId: recordId(o.technician_id), result: o.status }, source: "offers" });
   }
   for (const a of alerts) {
     items.push({ at: toIso(a.first_detected_at), kind: "alert", title: a.reason_text || a.reason_code, description: a.resolved_at ? `Cleared ${toIso(a.resolved_at)}` : null, actorType: "system", actorId: null, meta: { code: a.reason_code, level: a.risk_level, active: Boolean(a.is_active) }, source: "alerts" });
@@ -411,9 +412,9 @@ export async function getRequestMonitor({ pool, requestId, runtime = null, now =
     pool.query(`SELECT event_type, status, title, description, actor_type, actor_id, metadata, created_at FROM request_timeline WHERE request_id = ? ORDER BY created_at DESC, id DESC LIMIT 200`, [requestId]),
     pool.query(`SELECT o.technician_id, o.status, o.sent_at, o.expires_at, t.name AS technician_name FROM dispatch_offers o LEFT JOIN technicians t ON t.id = o.technician_id WHERE o.service_request_id = ? ORDER BY o.sent_at ASC, o.id ASC LIMIT 50`, [requestId]),
     pool.query(`SELECT reason_code, reason_text, risk_level, is_active, first_detected_at, resolved_at FROM job_monitoring_alerts WHERE service_request_id = ? ORDER BY first_detected_at DESC LIMIT 50`, [requestId]),
-    pool.query(`SELECT admin_id, action_type, metadata, created_at FROM admin_actions_log WHERE target_id = ? ORDER BY created_at DESC LIMIT 50`, [String(requestId)]).catch(() => [[]]),
+    pool.query(`SELECT admin_id, action_type, metadata, created_at FROM admin_actions_log WHERE source = 'action' AND target_type IN ('service_request', 'request') AND target_id = ? ORDER BY created_at DESC LIMIT 50`, [String(requestId)]).catch(() => [[]]),
     pool.query(`SELECT latitude, longitude, recorded_at FROM technician_location_history WHERE service_request_id = ? ORDER BY recorded_at DESC, id DESC LIMIT 300`, [requestId]),
-    row.user_id == null ? Promise.resolve([[{ n: 0 }]]) : pool.query(`SELECT COUNT(*) AS n FROM service_requests WHERE user_id = ? AND id <= ?`, [row.user_id, requestId]),
+    row.user_id == null ? Promise.resolve([[{ n: 0 }]]) : pool.query(`SELECT COUNT(*) AS n FROM service_requests WHERE user_id = ? AND (created_at < ? OR (created_at = ? AND id <= ?))`, [row.user_id, row.created_at, row.created_at, requestId]),
   ]);
   return {
     ...summary,
@@ -424,7 +425,7 @@ export async function getRequestMonitor({ pool, requestId, runtime = null, now =
     bill: billFrom(row),
     cancellationReason: row.cancellation_reason || null,
     timeline: buildTimeline({ request: row, timeline, offers, alerts, actions }),
-    offers: offers.map((o) => ({ technicianId: Number(o.technician_id), name: o.technician_name || `Technician #${o.technician_id}`, result: o.status, sentAt: toIso(o.sent_at) })),
+    offers: offers.map((o) => ({ technicianId: recordId(o.technician_id), name: o.technician_name || `Technician #${o.technician_id}`, result: o.status, sentAt: toIso(o.sent_at) })),
     trail: trail.slice().reverse().map((p) => ({ lat: Number(p.latitude), lng: Number(p.longitude), at: toIso(p.recorded_at) })),
   };
 }
@@ -483,7 +484,7 @@ async function arrivalRows(pool, technicianId, sinceDate) {
     const promisedAt = meta.promisedAt || toIso(r.sla_deadline);
     const late = promisedAt ? minutesBetween(promisedAt, r.arrived_at) : null;
     return {
-      requestId: Number(r.request_id),
+      requestId: recordId(r.request_id),
       serviceType: r.service_type,
       acceptedAt: toIso(r.accepted_at) || toIso(r.accepted_time),
       arrivedAt: toIso(r.arrived_at),
@@ -522,7 +523,7 @@ export async function getTechnicianRecord({ pool, technicianId, now = Date.now()
   const monthStart = new Date(now);
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
-  const id = Number(technicianId);
+  const id = recordId(technicianId);
 
   const [
     [[jobs]], [weeks], [offerRows], [[current]], [reviewStats], [dist], [lowReviews], [[earnings]], [[dues]], [alertRows], [assignedEvents], [cancelEvents], [expiredDays],
@@ -561,7 +562,7 @@ export async function getTechnicianRecord({ pool, technicianId, now = Date.now()
 
   const removed = assignedEvents.filter((e) => {
     const meta = parseJson(e.metadata, {}) || {};
-    return Number(meta.previousTechnicianId) === id && Number(meta.technicianId) !== id;
+    return recordId(meta.previousTechnicianId) === id && recordId(meta.technicianId) !== id;
   });
 
   const weekly = [];
@@ -606,7 +607,7 @@ export async function getTechnicianRecord({ pool, technicianId, now = Date.now()
       status: tech.status || null,
       onDuty: Boolean(Number(tech.is_logged_in)),
       available: Boolean(Number(tech.is_available)),
-      currentRequestId: current?.id ? Number(current.id) : null,
+      currentRequestId: current?.id ? recordId(current.id) : null,
       place: tech.locality || tech.district || null,
       joinedAt: toIso(tech.created_at),
       lastSeenAt: toIso(tech.last_seen_at),
@@ -634,8 +635,8 @@ export async function getTechnicianRecord({ pool, technicianId, now = Date.now()
     flags,
     reliability: {
       offers,
-      removedByAdmin: removed.map((e) => ({ requestId: Number(e.request_id), at: toIso(e.created_at) })),
-      customerCancelled: cancelEvents.slice(0, 10).map((e) => ({ requestId: Number(e.request_id), at: toIso(e.created_at), reason: e.description || null, serviceType: e.service_type || null })),
+      removedByAdmin: removed.map((e) => ({ requestId: recordId(e.request_id), at: toIso(e.created_at) })),
+      customerCancelled: cancelEvents.slice(0, 10).map((e) => ({ requestId: recordId(e.request_id), at: toIso(e.created_at), reason: e.description || null, serviceType: e.service_type || null })),
       arrivals: buckets,
       arrivalsJudged: judged.length,
       late: judged.filter((a) => a.lateMinutes > 0).slice(0, 10),
@@ -649,7 +650,7 @@ export async function getTechnicianRecord({ pool, technicianId, now = Date.now()
 /** GET /api/admin/monitor/technicians/:id/jobs — the job history, newest first. */
 export async function getTechnicianJobs({ pool, technicianId, page = 1, limit = 20, days = null, status = "all", search = "" }) {
   const where = ["sr.technician_id = ?"];
-  const values = [Number(technicianId)];
+  const values = [recordId(technicianId)];
   if (days) {
     where.push("sr.created_at >= ?");
     values.push(new Date(Date.now() - Number(days) * 86_400_000));
@@ -688,7 +689,7 @@ export async function getTechnicianJobs({ pool, technicianId, page = 1, limit = 
       const promisedAt = meta.promisedAt || toIso(r.sla_deadline);
       const late = promisedAt && r.arrived_at ? minutesBetween(promisedAt, r.arrived_at) : null;
       return {
-        id: Number(r.id),
+        id: recordId(r.id),
         createdAt: toIso(r.created_at),
         status: r.status,
         phase: phaseOf(r.status),
@@ -716,11 +717,11 @@ export async function getTechnicianReviews({ pool, technicianId, page = 1, limit
     `SELECT r.id, r.service_request_id, r.rating, r.comment, r.created_at, u.full_name, sr.service_type
      FROM reviews r LEFT JOIN users u ON u.id = r.user_id LEFT JOIN service_requests sr ON sr.id = r.service_request_id
      WHERE r.technician_id = ? ORDER BY r.created_at DESC LIMIT ? OFFSET ?`,
-    [Number(technicianId), Number(limit), offset]
+    [recordId(technicianId), Number(limit), offset]
   );
-  const [[count]] = await pool.query(`SELECT COUNT(*) AS n FROM reviews WHERE technician_id = ?`, [Number(technicianId)]);
+  const [[count]] = await pool.query(`SELECT COUNT(*) AS n FROM reviews WHERE technician_id = ?`, [recordId(technicianId)]);
   return {
-    data: rows.map((r) => ({ id: Number(r.id), requestId: r.service_request_id == null ? null : Number(r.service_request_id), rating: toNumber(r.rating), comment: r.comment || null, createdAt: toIso(r.created_at), customer: r.full_name || "Customer", serviceType: r.service_type || null })),
+    data: rows.map((r) => ({ id: recordId(r.id), requestId: r.service_request_id == null ? null : recordId(r.service_request_id), rating: toNumber(r.rating), comment: r.comment || null, createdAt: toIso(r.created_at), customer: r.full_name || "Customer", serviceType: r.service_type || null })),
     pagination: { page: Number(page), limit: Number(limit), total: Number(count?.n || 0), totalPages: Math.max(1, Math.ceil(Number(count?.n || 0) / Number(limit))) },
   };
 }

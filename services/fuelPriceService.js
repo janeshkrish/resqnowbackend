@@ -1,3 +1,4 @@
+import { TABLES } from "../models/schema/index.js";
 import { getPool } from "../db.js";
 import { reverseGeocode } from "./locationProviderService.js";
 import { PROVIDER_FUELS, fetchLiveCityPrices, getProviderConfig } from "./fuelPriceProvider.js";
@@ -140,23 +141,7 @@ export function normalizeManualPrices(input = {}) {
   return prices;
 }
 
-const FUEL_PRICES_TABLE_SQL = `CREATE TABLE IF NOT EXISTS fuel_prices (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  state_key VARCHAR(80) NOT NULL DEFAULT '',
-  state_name VARCHAR(120) NOT NULL DEFAULT '',
-  area_key VARCHAR(80) NOT NULL DEFAULT '',
-  area_name VARCHAR(120) NOT NULL DEFAULT '',
-  fuel_type VARCHAR(16) NOT NULL,
-  price DECIMAL(10,2) NOT NULL,
-  change_amount DECIMAL(10,2) NULL,
-  unit VARCHAR(8) NOT NULL,
-  effective_date DATE NOT NULL,
-  source VARCHAR(64) NOT NULL DEFAULT 'manual',
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uniq_fuel_price_day (state_key, area_key, fuel_type, effective_date),
-  KEY idx_fuel_price_area (area_key, effective_date)
-)`;
+
 
 const UPSERT_CHUNK = 200;
 
@@ -165,7 +150,7 @@ export function createFuelPriceStore(getPoolFn = getPool) {
   let ready = null;
   const pool = async () => {
     const p = await getPoolFn();
-    if (!ready) ready = p.query(FUEL_PRICES_TABLE_SQL).catch((error) => { ready = null; throw error; });
+    if (!ready) ready = p.query(TABLES.fuel_prices).catch((error) => { ready = null; throw error; });
     await ready;
     return p;
   };

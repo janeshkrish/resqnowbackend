@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { ensureAdminExtendedSchema } from "../services/adminExtendedSchema.js";
 import { buildPagination, parseJson, resolveAdminId, toPositiveInt } from "./utils.js";
@@ -133,7 +134,7 @@ export async function assignComplaint(req, res) {
   try {
     await ensureAdminExtendedSchema();
 
-    const complaintId = toPositiveInt(req.body?.complaintId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const complaintId = recordId(req.body?.complaintId);
     const assignedAdminId = String(req.body?.assignedAdminId || "").trim();
     const note = String(req.body?.note || "").trim();
 
@@ -173,7 +174,7 @@ export async function resolveComplaint(req, res) {
   try {
     await ensureAdminExtendedSchema();
 
-    const complaintId = toPositiveInt(req.body?.complaintId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const complaintId = recordId(req.body?.complaintId);
     const resolutionNote = String(req.body?.resolutionNote || req.body?.note || "").trim();
 
     if (!complaintId) {
@@ -218,7 +219,7 @@ export async function addComplaintInternalNote(req, res) {
   try {
     await ensureAdminExtendedSchema();
 
-    const complaintId = toPositiveInt(req.body?.complaintId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const complaintId = recordId(req.body?.complaintId);
     const note = String(req.body?.note || "").trim();
     const metadata = req.body?.metadata || null;
 

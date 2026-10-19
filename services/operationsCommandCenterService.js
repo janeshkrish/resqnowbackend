@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { socketService } from "./socket.js";
 import { jobDispatchService } from "./jobDispatchService.js";
@@ -316,7 +317,7 @@ async function fetchExistingAlerts(pool, requestIds) {
 
   const map = new Map();
   (rows || []).forEach((row) => {
-    const requestId = Number(row.service_request_id);
+    const requestId = recordId(row.service_request_id);
     if (!map.has(requestId)) {
       map.set(requestId, []);
     }
@@ -344,7 +345,7 @@ async function fetchRecentLocationHistory(pool, requestIds) {
 
   const map = new Map();
   (rows || []).forEach((row) => {
-    const requestId = Number(row.service_request_id);
+    const requestId = recordId(row.service_request_id);
     if (!map.has(requestId)) {
       map.set(requestId, []);
     }
@@ -593,8 +594,8 @@ async function evaluateJobExceptions(job, historyRows, context) {
 
   return alerts.map((alert) => ({
     ...alert,
-    requestId: Number(job.request_id),
-    technicianId: Number(job.technician_id),
+    requestId: recordId(job.request_id),
+    technicianId: recordId(job.technician_id),
     customerLat: customer?.lat ?? null,
     customerLng: customer?.lng ?? null,
     technicianLat: technician?.lat ?? null,
@@ -663,8 +664,8 @@ async function persistAlertsForJob(pool, job, alerts, existingAlerts, resolveQue
          last_detected_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())`,
       [
-        Number(job.request_id),
-        Number(job.technician_id),
+        recordId(job.request_id),
+        recordId(job.technician_id),
         alert.reasonCode,
         alert.reasonText,
         alert.riskLevel,
@@ -679,25 +680,25 @@ async function persistAlertsForJob(pool, job, alerts, existingAlerts, resolveQue
       ]
     );
 
-    const alertId = Number(insertResult?.insertId || 0);
+    const alertId = recordId(insertResult?.insertId || 0);
     socketService.notifyAdmins("admin:command_center_alert", {
       id: alertId || undefined,
-      requestId: Number(job.request_id),
-      technicianId: Number(job.technician_id),
+      requestId: recordId(job.request_id),
+      technicianId: recordId(job.technician_id),
       reasonCode: alert.reasonCode,
       reason: alert.reasonText,
       riskLevel: alert.riskLevel,
       etaMinutes: alert.etaMinutes != null ? round(alert.etaMinutes, 2) : null,
       at: new Date().toISOString(),
-      message: `Potential Delay Detected - Job #${Number(job.request_id)}`,
+      message: `Potential Delay Detected - Job #${recordId(job.request_id)}`,
     });
   }
 
   (existingAlerts || []).forEach((item) => {
     if (!reasonSet.has(String(item.reason_code))) {
       resolveQueue.push({
-        id: Number(item.id),
-        requestId: Number(job.request_id),
+        id: recordId(item.id),
+        requestId: recordId(job.request_id),
         reasonCode: String(item.reason_code),
       });
     }
@@ -706,7 +707,7 @@ async function persistAlertsForJob(pool, job, alerts, existingAlerts, resolveQue
 
 async function resolveAlertsById(pool, resolveQueue) {
   if (!Array.isArray(resolveQueue) || resolveQueue.length === 0) return 0;
-  const ids = Array.from(new Set(resolveQueue.map((entry) => Number(entry.id)).filter((id) => id > 0)));
+  const ids = Array.from(new Set(resolveQueue.map((entry) => recordId(entry.id)).filter(isRecordId)));
   if (ids.length === 0) return 0;
 
   const placeholders = ids.map(() => "?").join(", ");
@@ -749,7 +750,7 @@ async function executeOperationsCommandCenterCycle({ trigger = "scheduler" } = {
     };
   }
 
-  const requestIds = jobs.map((job) => Number(job.request_id)).filter((id) => Number.isInteger(id) && id > 0);
+  const requestIds = jobs.map((job) => recordId(job.request_id)).filter((id) => isRecordId(id));
   const [historyByRequest, existingAlertsByRequest] = await Promise.all([
     fetchRecentLocationHistory(pool, requestIds),
     fetchExistingAlerts(pool, requestIds),
@@ -759,7 +760,7 @@ async function executeOperationsCommandCenterCycle({ trigger = "scheduler" } = {
   let alertsDetected = 0;
   const queue = new MonitoringWorkerQueue({ concurrency: getMonitorConcurrency() });
   const processingResult = await queue.process(jobs, async (job) => {
-    const requestId = Number(job.request_id);
+    const requestId = recordId(job.request_id);
     const historyRows = historyByRequest.get(requestId) || [];
     const alerts = await evaluateJobExceptions(job, historyRows, context);
     const existingAlerts = existingAlertsByRequest.get(requestId) || [];
@@ -885,7 +886,7 @@ export async function getActiveMonitoringAlerts() {
 
   const byRequest = new Map();
   (rows || []).forEach((row) => {
-    const requestId = Number(row.service_request_id);
+    const requestId = recordId(row.service_request_id);
     if (!byRequest.has(requestId)) {
       byRequest.set(requestId, {
         requestId,
@@ -898,7 +899,7 @@ export async function getActiveMonitoringAlerts() {
           lng: toNumber(row.customer_lng),
         },
         technician: {
-          id: Number(row.technician_id),
+          id: recordId(row.technician_id),
           name: row.technician_name || `Technician #${row.technician_id}`,
           phone: row.technician_phone || "",
           rating: toNumber(row.technician_rating),
@@ -919,7 +920,7 @@ export async function getActiveMonitoringAlerts() {
 
     const item = byRequest.get(requestId);
     item.reasons.push({
-      id: Number(row.id),
+      id: recordId(row.id),
       code: row.reason_code,
       text: row.reason_text,
       riskLevel: row.risk_level,
@@ -941,8 +942,8 @@ export async function getActiveMonitoringAlerts() {
 }
 
 export async function getTechnicianTrackForRequest(requestId, limit = 80) {
-  const parsedId = Number(requestId);
-  if (!Number.isInteger(parsedId) || parsedId <= 0) {
+  const parsedId = recordId(requestId);
+  if (!isRecordId(parsedId)) {
     const error = new Error("requestId must be a positive integer.");
     error.statusCode = 400;
     throw error;
@@ -970,9 +971,9 @@ export async function getTechnicianTrackForRequest(requestId, limit = 80) {
     .slice()
     .reverse()
     .map((row) => ({
-      id: Number(row.id),
-      technicianId: Number(row.technician_id),
-      requestId: Number(row.service_request_id),
+      id: recordId(row.id),
+      technicianId: recordId(row.technician_id),
+      requestId: recordId(row.service_request_id),
       lat: toNumber(row.latitude),
       lng: toNumber(row.longitude),
       capturedAt: row.captured_at,
@@ -985,8 +986,8 @@ export async function getTechnicianTrackForRequest(requestId, limit = 80) {
 }
 
 async function fetchRequestWithTechnician(requestId) {
-  const parsedId = Number(requestId);
-  if (!Number.isInteger(parsedId) || parsedId <= 0) {
+  const parsedId = recordId(requestId);
+  if (!isRecordId(parsedId)) {
     const error = new Error("requestId must be a positive integer.");
     error.statusCode = 400;
     throw error;
@@ -1022,8 +1023,8 @@ export async function triggerTechnicianReminder({ requestId, adminId }) {
   }
 
   const payload = {
-    requestId: Number(requestRow.id),
-    message: `Reminder from Operations Command Center for Job #${Number(requestRow.id)}.`,
+    requestId: recordId(requestRow.id),
+    message: `Reminder from Operations Command Center for Job #${recordId(requestRow.id)}.`,
     at: new Date().toISOString(),
   };
   socketService.notifyTechnician(requestRow.technician_id, "command_center:reminder", payload);
@@ -1035,14 +1036,14 @@ export async function triggerTechnicianReminder({ requestId, adminId }) {
     [
       "command_center_reminder",
       "Ops Reminder",
-      `Admin ${String(adminId || "admin")} sent a reminder for job #${Number(requestRow.id)}.`,
+      `Admin ${String(adminId || "admin")} sent a reminder for job #${recordId(requestRow.id)}.`,
     ]
   );
 
   return {
     success: true,
-    requestId: Number(requestRow.id),
-    technicianId: Number(requestRow.technician_id),
+    requestId: recordId(requestRow.id),
+    technicianId: recordId(requestRow.technician_id),
     technicianPhone: requestRow.technician_phone || "",
   };
 }
@@ -1055,9 +1056,9 @@ export async function prepareTechnicianCall({ requestId }) {
     throw error;
   }
   return {
-    requestId: Number(requestRow.id),
-    technicianId: Number(requestRow.technician_id),
-    technicianName: requestRow.technician_name || `Technician #${Number(requestRow.technician_id)}`,
+    requestId: recordId(requestRow.id),
+    technicianId: recordId(requestRow.technician_id),
+    technicianName: requestRow.technician_name || `Technician #${recordId(requestRow.technician_id)}`,
     technicianPhone: requestRow.technician_phone || "",
   };
 }
@@ -1069,12 +1070,12 @@ export async function reassignMonitoredRequest({ requestId, radiusKm = 35, maxCa
   if (isTowingServiceType(requestRow.service_type)) technicianRows = await loadTechnicianFleetVehicles(pool, technicianRows);
   const { analysis } = jobDispatchService.analyzeTechnicians(requestRow, technicianRows, radiusKm);
 
-  const currentTechnicianId = requestRow.technician_id == null ? null : Number(requestRow.technician_id);
+  const currentTechnicianId = requestRow.technician_id == null ? null : recordId(requestRow.technician_id);
   const ranked = analysis
     .filter((row) => row.eligible)
-    .filter((row) => Number(row.technicianId) !== currentTechnicianId)
+    .filter((row) => recordId(row.technicianId) !== currentTechnicianId)
     .map((row) => {
-      const source = technicianRows.find((item) => Number(item.id) === Number(row.technicianId)) || {};
+      const source = technicianRows.find((item) => recordId(item.id) === recordId(row.technicianId)) || {};
       const acceptanceRate = Number(source.acceptance_rate ?? 0);
       const rating = Number(source.rating ?? 0);
       const distanceKm = Number(row.distanceKm ?? Number.POSITIVE_INFINITY);
@@ -1095,7 +1096,7 @@ export async function reassignMonitoredRequest({ requestId, radiusKm = 35, maxCa
   if (topCandidates.length === 0) {
     return {
       success: false,
-      requestId: Number(requestRow.id),
+      requestId: recordId(requestRow.id),
       candidatesFound: 0,
       message: "No eligible technicians found for reassignment.",
       candidates: [],
@@ -1115,7 +1116,7 @@ export async function reassignMonitoredRequest({ requestId, radiusKm = 35, maxCa
       throw error;
     }
 
-    const prevTechnicianId = lockedRows[0].technician_id ? Number(lockedRows[0].technician_id) : null;
+    const prevTechnicianId = lockedRows[0].technician_id ? recordId(lockedRows[0].technician_id) : null;
     await conn.execute(
       `UPDATE service_requests
        SET technician_id = NULL,
@@ -1148,9 +1149,9 @@ export async function reassignMonitoredRequest({ requestId, radiusKm = 35, maxCa
 
   await jobDispatchService.dispatchJob(requestRow, topCandidates);
   socketService.notifyAdmins("admin:command_center_reassign", {
-    requestId: Number(requestRow.id),
+    requestId: recordId(requestRow.id),
     candidates: topCandidates.map((candidate) => ({
-      technicianId: Number(candidate.id),
+      technicianId: recordId(candidate.id),
       distanceKm: candidate.distanceKm,
       reliabilityScore: candidate.reliabilityScore,
       rankingScore: candidate.rankingScore,
@@ -1160,11 +1161,11 @@ export async function reassignMonitoredRequest({ requestId, radiusKm = 35, maxCa
 
   return {
     success: true,
-    requestId: Number(requestRow.id),
+    requestId: recordId(requestRow.id),
     candidatesFound: topCandidates.length,
     message: "Reassignment offers sent to nearby technicians.",
     candidates: topCandidates.map((candidate) => ({
-      technicianId: Number(candidate.id),
+      technicianId: recordId(candidate.id),
       name: candidate.name,
       phone: candidate.phone || "",
       distanceKm: candidate.distanceKm,

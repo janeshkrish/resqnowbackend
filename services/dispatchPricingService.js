@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { estimateTechnicianEarningForRequest } from "./technicianEarningsService.js";
 import { computeServiceRequestPaymentAmounts, normalizeServiceRequestPaymentMode } from "./serviceRequestPaymentService.js";
 import { isTowingServiceType } from "./towingServiceType.js";
@@ -9,8 +10,7 @@ const parseObject = (value) => {
   catch { return null; }
 };
 const positiveId = (value) => {
-  const id = Number(value);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
+  return recordId(value);
 };
 const money = (value) => {
   if (value == null || typeof value === "boolean" || (typeof value === "string" && !value.trim())) return null;

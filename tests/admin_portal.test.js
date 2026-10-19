@@ -172,7 +172,7 @@ test("Technicians: right now, on-time, accepts, hours today, dues, hidden and wh
     [/FROM technician_login_sessions/, [{ technician_id: 1, login_at: today(10, 2), logout_at: null }]],
     [/FROM technician_dues/, [{ technician_id: 2, amount: 1240 }]],
     [/FROM job_monitoring_alerts/, [{ technician_id: 2, reason_code: "movement_stationary", reason_text: "Stationary" }]],
-    [/FROM technician_admin_notes/, []],
+    [/FROM account_notes/, []],
     [/FROM request_timeline/, [
       { request_id: 10, event_type: "accepted", metadata: JSON.stringify({ promisedAt: promised }) }, { request_id: 10, event_type: "arrived", created_at: today(9, 28) },
       { request_id: 11, event_type: "accepted", metadata: JSON.stringify({ promisedAt: promised }) }, { request_id: 11, event_type: "arrived", created_at: today(9, 40) },
@@ -223,7 +223,7 @@ test("Customers: plan, live request, spend and tabs; one customer's totals and h
     [/FROM service_requests sr/, [{ id: 5502, status: "on-the-way", service_type: "lockout", technician_name: "Arun" }, { id: 5318, status: "completed", fare: 450 }]],
     [/FROM payments/, [{ id: 1, service_request_id: 5318, status: "completed", amount: 450 }]],
     [/FROM user_vehicles/, []],
-    [/FROM admin_customer_notes/, [{ id: 1, admin_id: "ops@resqnow.org", note: "Prefers a call", created_at: at(NOW) }]],
+    [/FROM account_notes/, [{ id: 1, admin_id: "ops@resqnow.org", note: "Prefers a call", created_at: at(NOW) }]],
     [/FROM reviews/, [{ service_request_id: 5318, rating: 5 }]],
   ]);
   const customer = await getCustomer({ pool: one, customerId: 41 });

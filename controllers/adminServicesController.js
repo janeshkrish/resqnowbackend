@@ -4,7 +4,7 @@ import * as db from "../db.js";
 export const getServices = async (req, res) => {
     try {
         const pool = await db.getPool();
-        const [rows] = await pool.query("SELECT * FROM service_master ORDER BY id");
+        const [rows] = await pool.query("SELECT * FROM service_master ORDER BY service_name, id");
         res.json(rows);
     } catch (err) {
         console.error("[getServices]", err);
@@ -63,7 +63,7 @@ export const deleteService = async (req, res) => {
 export const getVehicleCategories = async (req, res) => {
     try {
         const pool = await db.getPool();
-        const [rows] = await pool.query("SELECT * FROM vehicle_category_master ORDER BY id");
+        const [rows] = await pool.query("SELECT * FROM vehicle_category_master ORDER BY category_name, id");
         res.json(rows);
     } catch (err) {
         console.error("[getVehicleCategories]", err);
@@ -102,7 +102,7 @@ export const deleteVehicleCategory = async (req, res) => {
 export const getVehicleSubcategories = async (req, res) => {
     try {
         const pool = await db.getPool();
-        const [rows] = await pool.query("SELECT * FROM vehicle_subcategory_master ORDER BY id");
+        const [rows] = await pool.query("SELECT * FROM vehicle_subcategory_master ORDER BY subcategory_name, id");
         res.json(rows);
     } catch (err) {
         console.error("[getVehicleSubcategories]", err);
@@ -219,7 +219,7 @@ export const deletePricingField = async (req, res) => {
 export const getFleets = async (req, res) => {
     try {
         const pool = await db.getPool();
-        const [rows] = await pool.query("SELECT * FROM towing_fleet_master ORDER BY id");
+        const [rows] = await pool.query("SELECT * FROM towing_fleet_master ORDER BY fleet_name, id");
         res.json(rows);
     } catch (err) {
         console.error("[getFleets]", err);

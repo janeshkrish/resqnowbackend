@@ -1,3 +1,5 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId } from "../models/identifiers.js";
 import { Router } from "express";
 import { getPool } from "../db.js";
 import { requireAdminExtendedAccess } from "../middleware/adminExtendedAccess.js";
@@ -13,7 +15,7 @@ import {
 const router = Router();
 
 function adminExtendedResolveAdminId(req) {
-  return String(req.adminExtended?.adminId || req.adminEmail || req.admin?.email || "admin");
+  return adminActorId(req);
 }
 
 async function adminExtendedEnsureRequestExists(requestId) {
@@ -127,7 +129,7 @@ router.post("/requests/high-priority", async (req, res) => {
 
     return res.json({
       success: true,
-      requestId: Number(requestId),
+      requestId: recordId(requestId),
       highPriority: true,
       note: note || null,
     });

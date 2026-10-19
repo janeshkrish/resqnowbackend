@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "./serviceNormalization.js";
 import { roundMoney as roundCurrencyMoney, toPaise, fromPaise } from "../utils/money.js";
@@ -345,7 +346,7 @@ function normalizeSubscriptionPlans(rawPlans) {
 function normalizeConfigRow(row) {
   const fallback = DEFAULT_PLATFORM_PRICING_CONFIG;
   return {
-    id: row?.id ? Number(row.id) : null,
+    id: row?.id ? recordId(row.id) : null,
     currency: String(row?.currency || fallback.currency).trim().toUpperCase() || fallback.currency,
     platform_fee_percent: toPercent(row?.platform_fee_percent, fallback.platform_fee_percent),
     payment_fee_percent: toPercent(row?.payment_fee_percent, fallback.payment_fee_percent),

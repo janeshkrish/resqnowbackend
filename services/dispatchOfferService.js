@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { buildDispatchPricingSnapshot, readDispatchPricingSnapshot } from './dispatchPricingService.js';
 import { getVehicleServicePolicy, evaluateVehicleServiceSupport, chargingCompatibility, loadChargingServiceProfiles } from './vehicleServiceCompatibility.js';
 
@@ -16,10 +17,10 @@ export async function createPricedDispatchOffer(pool, request, technician, optio
     if (ownsTransaction) await conn.beginTransaction();
     const [rows] = await conn.query('SELECT * FROM service_requests WHERE id = ? FOR UPDATE', [request.id]);
     const current = rows[0];
-    const technicianId = Number(technician.id ?? technician.technician_id);
+    const technicianId = recordId(technician.id ?? technician.technician_id);
     const status = String(current?.status || '').toLowerCase();
     if (!current || !['pending', 'assigned'].includes(status) ||
-        (current.technician_id != null && Number(current.technician_id) !== technicianId)) {
+        (current.technician_id != null && recordId(current.technician_id) !== technicianId)) {
       throw unavailable('This request is no longer available for this technician.');
     }
     const policy = getVehicleServicePolicy(current);
@@ -44,9 +45,9 @@ export async function createPricedDispatchOffer(pool, request, technician, optio
       "INSERT INTO dispatch_offers (service_request_id, technician_id, status, sent_at, expires_at, pricing_snapshot) VALUES (?, ?, 'pending', NOW(), ?, ?)",
       [current.id, technicianId, expiresAt, JSON.stringify(snapshot)]
     );
-    if (!Number.isSafeInteger(Number(result.insertId)) || Number(result.insertId) <= 0) throw unavailable('The priced offer could not be saved.');
+    if (!isRecordId(recordId(result.insertId))) throw unavailable('The priced offer could not be saved.');
     if (ownsTransaction) await conn.commit();
-    return { id: Number(result.insertId), technician_id: technicianId, pricing_snapshot: snapshot, expires_at: expiresAt };
+    return { id: recordId(result.insertId), technician_id: technicianId, pricing_snapshot: snapshot, expires_at: expiresAt };
   } catch (error) {
     if (ownsTransaction) await conn.rollback();
     throw error;
@@ -57,7 +58,7 @@ export async function createPricedDispatchOffer(pool, request, technician, optio
 export function dispatchOfferPricingFields(offer) {
   const snapshot = readDispatchPricingSnapshot(offer?.pricing_snapshot);
   if (!snapshot) throw unavailable('The saved offer price is invalid.', 'pricing_unavailable');
-  return { offerId: Number(offer.id), offer_id: Number(offer.id),
+  return { offerId: recordId(offer.id), offer_id: recordId(offer.id),
     amount: snapshot.technician_earning, priceAmount: snapshot.technician_earning,
     technicianEstimatedEarning: snapshot.technician_earning,
     technician_estimated_earning: snapshot.technician_earning,

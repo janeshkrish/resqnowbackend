@@ -11,6 +11,7 @@ import { readPricingMetadata } from '../services/vehicleServiceCompatibility.js'
 
 // Replace the database driver before any route opens a pool. No real DB or mail provider is used.
 process.env.DB_HOST = "simulated.invalid";
+process.env.DB_MIGRATION_MODE = "off";
 process.env.DB_USER = "simulated";
 process.env.DB_PASSWORD = "simulated";
 process.env.DB_NAME = "simulated";
@@ -35,7 +36,7 @@ async function query(sql, params = []) {
   if (/FROM service_requests/.test(sql)) return [state.request ? [clone(state.request)] : []];
   if (/FROM technicians/.test(sql)) {
     if (/WHERE email =/.test(sql)) return [state.technicians.filter(row => row.email === params[0])];
-    if (/WHERE id =/.test(sql)) return [state.technicians.filter(row => row.id === Number(params[0]))];
+    if (/WHERE id =/.test(sql)) return [state.technicians.filter(row => String(row.id) === String(params[0]))];
     return [clone(state.technicians)];
   }
   throw new Error(`Unexpected query: ${sql}`);
@@ -43,30 +44,30 @@ async function query(sql, params = []) {
 
 async function execute(sql, params = []) {
   if (/INSERT INTO technician_service_pricing\s*\(/.test(sql)) {
-    state.dynamicPricing.push(JSON.parse(params[5]));
+    state.dynamicPricing.push(JSON.parse(params[6]));
     return [{ affectedRows: 1 }];
   }
   if (/INSERT INTO technician_services\s*\(/.test(sql)) {
-    for (let index = 0; index < params.length; index += 19) state.normalizedPricing.push(JSON.parse(params[index + 18]));
+    for (let index = 0; index < params.length; index += 20) state.normalizedPricing.push(JSON.parse(params[index + 19]));
     return [{ affectedRows: 1 }];
   }
   if (/INSERT INTO technicians\s*\(/.test(sql)) {
     const columns = sql.match(/INSERT INTO technicians\s*\(([^)]*)\)/s)[1].split(",").map(column => column.trim());
     state.technicians.push({ id: 7, ...Object.fromEntries(columns.map((column, index) => [column, params[index]])) });
-    return [{ insertId: 7 }];
+    return [{ insertId: 0, affectedRows: 1 }];
   }
   if (/DELETE FROM technician_fleet_vehicles/.test(sql)) { state.fleet = []; return [{ affectedRows: 1 }]; }
   if (/INSERT INTO technician_fleet_vehicles/.test(sql)) {
     if (state.failFleetInsert) throw new Error("Simulated fleet storage failure");
-    for (let index = 0; index < params.length; index += 4) {
-      const [technician_id, vehicle_type, vehicle_number, status] = params.slice(index, index + 4);
+    for (let index = 0; index < params.length; index += 5) {
+      const [id, technician_id, vehicle_type, vehicle_number, status] = params.slice(index, index + 5);
       if (state.fleet.some(row => row.technician_id === technician_id && row.vehicle_number === vehicle_number)) throw new Error("Duplicate vehicle number");
-      state.fleet.push({ id: state.fleet.length + 1, technician_id, vehicle_type, vehicle_number, status });
+      state.fleet.push({ id, technician_id, vehicle_type, vehicle_number, status });
     }
     return [{ affectedRows: 1 }];
   }
   if (/UPDATE technicians/.test(sql)) {
-    const row = state.technicians.find(item => item.id === Number(params.at(-1)));
+    const row = state.technicians.find(item => String(item.id) === String(params.at(-1)));
     const fields = [...sql.matchAll(/([a-z_]+)\s*=\s*\?/g)].map(match => match[1]);
     fields.forEach((field, index) => { row[field] = params[index]; });
     return [{ affectedRows: 1 }];

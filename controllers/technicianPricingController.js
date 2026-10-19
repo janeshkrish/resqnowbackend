@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import * as db from "../db.js";
 import { canonicalizeServiceDomain } from '../services/serviceNormalization.js';
 
@@ -15,8 +16,8 @@ export async function replaceTechnicianServicePricing(conn, technicianId, rows) 
     if (!Array.isArray(rows)) throw new Error("Pricing must be an array.");
     await conn.execute("DELETE FROM technician_service_pricing WHERE technician_id = ?", [technicianId]);
     for (const item of rows) {
-        if (!Number.isInteger(Number(item.service_id)) || Number(item.service_id) <= 0 ||
-            !Number.isInteger(Number(item.vehicle_category_id)) || Number(item.vehicle_category_id) <= 0 ||
+        if (!isRecordId(recordId(item.service_id)) ||
+            !isRecordId(recordId(item.vehicle_category_id)) ||
             !item.pricing_json || typeof item.pricing_json !== "object" || Array.isArray(item.pricing_json)) {
             throw new Error("Invalid service pricing row.");
         }

@@ -6,6 +6,7 @@ import Redis from "ioredis";
 // Install the driver boundaries before importing routes or initializing runtime.
 // No server, real database, Redis, email provider, or payment gateway is started.
 process.env.DB_HOST = "simulated.invalid";
+process.env.DB_MIGRATION_MODE = "off";
 process.env.DB_USER = "simulated";
 process.env.DB_PASSWORD = "simulated";
 process.env.DB_NAME = "simulated";
@@ -48,7 +49,7 @@ const execute = async (sql, params = []) => {
   if (/INSERT INTO service_requests/.test(sql)) {
     const columns = sql.match(/INSERT INTO service_requests\s*\(([^)]*)\)/s)[1].split(",").map((value) => value.trim());
     state.request = { id: 101, ...Object.fromEntries(columns.map((column, index) => [column, params[index]])) };
-    return [{ insertId: 101 }];
+    return [{ insertId: 0, affectedRows: 1 }];
   }
   if (/UPDATE service_requests/.test(sql)) {
     state.request.status = params[0]; state.request.technician_id = null;
@@ -159,7 +160,8 @@ test("request creation returns no customer-specific price before a technician ac
     assert.equal(result.amount, undefined);
     assert.equal(result.technicianEstimatedEarning, undefined);
     assert.equal(result.estimatedEarnings, undefined);
-    assert.equal(state.request.id, 101);
+    assert.match(state.request.id, /^[0-9a-f-]{36}$/);
+    assert.equal(result.id, state.request.id);
   } finally { matcher.mock.restore(); process.env.REDIS_URL = previousRedisUrl; }
 });
 

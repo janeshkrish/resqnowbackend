@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { normalizeFleetTowTruckType } from "./towTruckCapability.js";
 import {
@@ -33,8 +34,7 @@ const TECHNICIAN_PRICING_COLUMNS = `
 `;
 
 const toTechnicianId = (value) => {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  return recordId(value);
 };
 
 async function queryTechnicianServiceRow(executor, technicianId, storedServiceDomain, vehicleType) {

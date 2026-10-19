@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import {
   normalizeTechnicianPricingEntries,
 } from "../models/technicianPricing.js";
@@ -43,8 +44,8 @@ const normalizeDisplayRow = (row) => {
 export function indexTechnicianPricingRows(rows) {
   const index = new Map();
   (Array.isArray(rows) ? rows : []).forEach((row) => {
-    const technicianId = Number(row?.technician_id);
-    if (!Number.isInteger(technicianId) || technicianId <= 0) return;
+    const technicianId = recordId(row?.technician_id);
+    if (!isRecordId(technicianId)) return;
     const currentRows = index.get(technicianId) || [];
     currentRows.push(row);
     index.set(technicianId, currentRows);

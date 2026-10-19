@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import crypto from "crypto";
 import Razorpay from "razorpay";
 import { getPool } from "../db.js";
@@ -57,8 +58,8 @@ function mapExistingRefundRow(row) {
   return {
     success: true,
     alreadyProcessed: true,
-    refundId: Number(row.id),
-    paymentId: Number(row.payment_id),
+    refundId: recordId(row.id),
+    paymentId: recordId(row.payment_id),
     refundedAmount: roundMoney(row.amount || 0),
     totalRefundedAmount: null,
     refundStatus: row.status || "processed",
@@ -202,7 +203,7 @@ export async function processPaymentRefund({
           balanceBefore,
           balanceAfter,
           description: `Refund reversal for payment #${paymentId}`,
-          referenceType: "refund",
+          referenceType: "payment",
           referenceId: String(paymentId),
           idempotencyKey: `refund-adjustment:${paymentId}:${alreadyRefunded + targetRefundAmount}`,
           metadata: {
@@ -295,7 +296,7 @@ export async function processPaymentRefund({
 
     return {
       success: true,
-      refundId: Number(refundResult.insertId),
+      refundId: recordId(refundResult.insertId),
       paymentId,
       refundedAmount: targetRefundAmount,
       totalRefundedAmount: nextRefundedAmount,

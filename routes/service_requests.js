@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 
 import express from "express";
 import { getPool } from "../db.js";
@@ -342,13 +343,13 @@ router.post("/", verifyUser, async (req, res) => {
         // 2. Validate selection + resolve server-side amount
         const incomingAmount = Number(req.body.amount ?? req.body.price);
         const hasDirectTechnician = technician_id !== undefined && technician_id !== null && String(technician_id).trim() !== "";
-        let directTechnicianId = hasDirectTechnician ? Number(technician_id) : null;
+        let directTechnicianId = hasDirectTechnician ? recordId(technician_id) : null;
         let selectedTechnician = null;
         let directDistanceKm = null;
         let towingQuote = null;
 
         if (hasDirectTechnician) {
-            if (!Number.isFinite(directTechnicianId)) {
+            if (!isRecordId(directTechnicianId)) {
                 return res.status(400).json({ error: "Invalid technician_id." });
             }
 
@@ -867,7 +868,7 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
             LEFT JOIN technicians t
                 ON t.id = ?
             WHERE sr.id = ?
-            ORDER BY d.id DESC
+            ORDER BY d.sent_at DESC, d.id DESC
             LIMIT 1`,
             [technicianId, technicianId, requestId]
         );
@@ -913,7 +914,7 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
         // explicitly identified priced offer, instead of accepting an unsaved amount.
         if (isAssignedToCurrentTechnician && normalizedStatus === "assigned" && (!savedPricing || !hasPendingOffer)) {
             try {
-                const refreshed = await createPricedDispatchOffer(pool, { id: Number(requestId) }, { id: Number(technicianId) }, { expiresAt: null });
+                const refreshed = await createPricedDispatchOffer(pool, { id: recordId(requestId) }, { id: recordId(technicianId) }, { expiresAt: null });
                 savedPricing = refreshed.pricing_snapshot;
                 row.offer_id = refreshed.id;
                 row.offer_status = "pending";
@@ -953,8 +954,8 @@ router.get("/:id/technician-offer", verifyTechnician, async (req, res) => {
                 address: row.address || "",
                 status: normalizedStatus,
                 offer_status: row.offer_status || null,
-                offerId: Number(row.offer_id),
-                offer_id: Number(row.offer_id),
+                offerId: recordId(row.offer_id),
+                offer_id: recordId(row.offer_id),
                 location: {
                     lat: Number.isFinite(customerLat) ? customerLat : null,
                     lng: Number.isFinite(customerLng) ? customerLng : null,
@@ -1095,7 +1096,7 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
                 await markTechnicianReserved(conn, newTechId, requestId);
                 await conn.query("UPDATE dispatch_offers SET status = 'rejected' WHERE service_request_id = ? AND technician_id = ?", [requestId, technicianId]);
                 await conn.execute("UPDATE service_requests SET technician_id = ?, status = 'assigned', pricing_snapshot = NULL, accepted_time = NULL, technician_estimated_earning = NULL WHERE id = ?", [newTechId, requestId]);
-                const replacementOffer = await createPricedDispatchOffer(conn, { id: Number(requestId) }, nextMatch,
+                const replacementOffer = await createPricedDispatchOffer(conn, { id: recordId(requestId) }, nextMatch,
                     { connection: conn, pricingSnapshot: replacementPricing, expiresAt: null });
                 afterCommit.push(() => {
                     // Notify new technician
@@ -1185,7 +1186,7 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
         );
 
         if (newTechId && isActiveJobStatus(newStatus)) {
-            await markTechnicianReserved(conn, newTechId, requestId, { alreadyOwned: Number(newTechId) === Number(technicianId) });
+            await markTechnicianReserved(conn, newTechId, requestId, { alreadyOwned: recordId(newTechId) === recordId(technicianId) });
         } else if (!isActiveJobStatus(newStatus) && isTerminalJobStatus(newStatus)) {
             await releaseTechnicianAvailability(conn, technicianId, requestId);
         }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, beforeEach, mock, test } from 'node:test';
 import mysql from 'mysql2/promise';
 process.env.DB_HOST = 'simulated.invalid';
+process.env.DB_MIGRATION_MODE = 'off';
 process.env.DB_USER = 'simulated';
 process.env.DB_PASSWORD = 'simulated';
 process.env.DB_NAME = 'simulated';

@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import IORedis from "ioredis";
 import { Queue, QueueEvents, Worker } from "bullmq";
 import { getPool } from "../db.js";
@@ -139,8 +140,7 @@ export async function hasRegisteredDispatchWorker(queueLike) {
 }
 
 function asPositiveInt(value) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  return recordId(value);
 }
 
 function normalizeStatus(value) {

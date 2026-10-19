@@ -1,3 +1,5 @@
+import { recordId } from "../models/identifiers.js";
+import { boundedIdempotencyKey } from "../utils/paymentReference.js";
 import crypto from "crypto";
 import { getPool } from "../db.js";
 import {
@@ -60,8 +62,8 @@ function mapWalletSnapshot(wallet) {
   }
 
   return {
-    walletId: Number(wallet.id || wallet.wallet_id || 0) || null,
-    technicianId: Number(wallet.technician_id || 0) || null,
+    walletId: recordId(wallet.id || wallet.wallet_id || 0) || null,
+    technicianId: recordId(wallet.technician_id || 0) || null,
     totalEarned: roundMoney(wallet.total_earned || 0),
     withdrawableBalance: roundMoney(wallet.withdrawable_balance || 0),
     totalPaidOut: roundMoney(wallet.total_paid_out || 0),
@@ -81,12 +83,12 @@ function mapWithdrawalRow(row) {
     null;
 
   return {
-    id: Number(row.id),
+    id: recordId(row.id),
     withdrawalReference: row.withdrawal_reference,
-    technicianId: Number(row.technician_id),
+    technicianId: recordId(row.technician_id),
     technicianName: row.technician_name || null,
     technicianEmail: row.technician_email || null,
-    walletId: Number(row.wallet_id || 0) || null,
+    walletId: recordId(row.wallet_id || 0) || null,
     amount,
     currency: String(row.currency || "INR").toUpperCase(),
     status: normalizeStatus(row.status),
@@ -104,7 +106,7 @@ function mapWithdrawalRow(row) {
     cancelledAt: row.cancelled_at || null,
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
-    payoutId: row.payout_id != null ? Number(row.payout_id) : null,
+    payoutId: row.payout_id != null ? recordId(row.payout_id) : null,
     payoutReference: row.payout_reference || null,
     payoutStatus: row.payout_status || null,
     payoutMethod: row.payout_method || null,
@@ -200,7 +202,7 @@ export async function createWithdrawalRequest({
   const pool = await getPool();
 
   return withTransaction(pool, async (conn) => {
-    const normalizedIdempotencyKey = String(idempotencyKey || "").trim();
+    const normalizedIdempotencyKey = boundedIdempotencyKey(idempotencyKey);
     if (normalizedIdempotencyKey) {
       const existing = await findWithdrawalRequestByIdempotencyKey(conn, normalizedIdempotencyKey);
       if (existing) {
@@ -386,7 +388,7 @@ export async function startWithdrawalRequestProcessing({
     }
 
     let payout = existingPayout;
-    let payoutId = existingPayout?.id ? Number(existingPayout.id) : null;
+    let payoutId = existingPayout?.id ? recordId(existingPayout.id) : null;
     if (!payoutId) {
       payoutId = await createProcessingPayout({
         conn,

@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { ACTIVE_STATUSES, DONE_STATUSES, maskPhone, phaseOf } from "./adminMonitorService.js";
 import { ADMIN_NOTIFICATION_TYPE_FILTER_VALUES } from "./adminNotificationTypes.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "./serviceNormalization.js";
@@ -241,8 +242,8 @@ export async function listRequests({ pool, query = {}, now = Date.now() }) {
   const where = ["sr.created_at >= ?", "sr.created_at < ?"];
   const params = [new Date(from), new Date(to)];
   if (query.service) { where.push("LOWER(COALESCE(sr.service_type, '')) LIKE ?"); params.push(`%${lower(query.service)}%`); }
-  if (query.technicianId) { where.push("sr.technician_id = ?"); params.push(Number(query.technicianId)); }
-  if (query.customerId) { where.push("sr.user_id = ?"); params.push(Number(query.customerId)); }
+  if (query.technicianId) { where.push("sr.technician_id = ?"); params.push(recordId(query.technicianId)); }
+  if (query.customerId) { where.push("sr.user_id = ?"); params.push(recordId(query.customerId)); }
   if (query.search) {
     const text = String(query.search).trim();
     const like = `%${text.toLowerCase()}%`;
@@ -259,16 +260,16 @@ export async function listRequests({ pool, query = {}, now = Date.now() }) {
        FROM service_requests sr
        LEFT JOIN users u ON u.id = sr.user_id
        LEFT JOIN technicians t ON t.id = sr.technician_id
-       LEFT JOIN (SELECT service_request_id, MAX(id) AS id FROM payments GROUP BY service_request_id) lp ON lp.service_request_id = sr.id
+       LEFT JOIN (SELECT service_request_id, id FROM (SELECT service_request_id, id, ROW_NUMBER() OVER (PARTITION BY service_request_id ORDER BY created_at DESC, id DESC) AS uuid_rank FROM payments) ranked_payments WHERE uuid_rank = 1) lp ON lp.service_request_id = sr.id
        LEFT JOIN payments p ON p.id = lp.id
        WHERE ${where.join(" AND ")}
        ORDER BY sr.created_at DESC
        LIMIT 5000`, params);
-  const priorityRows = await rows(pool, "SELECT DISTINCT CAST(target_id AS UNSIGNED) AS id FROM admin_actions_log WHERE action_type IN ('markHighPriority', 'mark_high_priority')");
-  const high = new Set(priorityRows.map((row) => Number(row.id)));
+  const priorityRows = await rows(pool, "SELECT DISTINCT target_id AS id FROM admin_actions_log WHERE source = 'action' AND target_type = 'service_request' AND action_type IN ('markHighPriority', 'mark_high_priority')");
+  const high = new Set(priorityRows.map((row) => recordId(row.id)));
   let filtered = base;
-  if (query.priority === "high") filtered = filtered.filter((row) => high.has(Number(row.id)));
-  if (query.priority === "normal") filtered = filtered.filter((row) => !high.has(Number(row.id)));
+  if (query.priority === "high") filtered = filtered.filter((row) => high.has(recordId(row.id)));
+  if (query.priority === "normal") filtered = filtered.filter((row) => !high.has(recordId(row.id)));
   if (query.payment === "cash") filtered = filtered.filter((row) => lower(row.payment_method || row.request_payment_method) === "cash");
   if (query.payment === "online") filtered = filtered.filter((row) => (row.payment_method || row.request_payment_method) && lower(row.payment_method || row.request_payment_method) !== "cash");
   if (query.payment === "unpaid") filtered = filtered.filter((row) => !PAID_PAYMENT.includes(lower(row.payment_state)));
@@ -283,7 +284,7 @@ export async function listRequests({ pool, query = {}, now = Date.now() }) {
     from: new Date(from).toISOString(), to: new Date(Math.min(to, now)).toISOString(),
     counts, total: inTab.length, page, limit, totalPages: Math.max(1, Math.ceil(inTab.length / limit)),
     rows: pageRows.map((row) => {
-      const timeline = arrivalOf(events.filter((event) => Number(event.request_id) === Number(row.id)));
+      const timeline = arrivalOf(events.filter((event) => recordId(event.request_id) === recordId(row.id)));
       const fare = numOrNull(row.fare);
       const technicianAmount = numOrNull(row.technician_amount);
       const paidAmount = numOrNull(row.paid_amount);
@@ -299,7 +300,7 @@ export async function listRequests({ pool, query = {}, now = Date.now() }) {
           method: row.payment_method || row.request_payment_method || null, state: row.payment_state || row.payment_status || null,
           paid: PAID_PAYMENT.includes(lower(row.payment_state)), refunded: numOrNull(row.refunded_amount) || 0,
         },
-        priority: high.has(Number(row.id)) ? "high" : "normal",
+        priority: high.has(recordId(row.id)) ? "high" : "normal",
       };
     }),
   };
@@ -321,7 +322,7 @@ export async function listTechnicians({ pool, query = {}, now = Date.now() }) {
     rows(pool, "SELECT technician_id, login_at, COALESCE(logout_at, last_seen_at) AS ended_at, logout_at FROM technician_login_sessions WHERE COALESCE(logout_at, last_seen_at, login_at) >= ?", [new Date(dayStart)]),
     rows(pool, "SELECT technician_id, SUM(amount) AS amount FROM technician_dues WHERE LOWER(COALESCE(status, 'pending')) = 'pending' GROUP BY technician_id"),
     rows(pool, "SELECT technician_id, reason_code, reason_text FROM job_monitoring_alerts WHERE is_active = 1"),
-    rows(pool, "SELECT technician_id, metadata FROM technician_admin_notes WHERE note_type = 'visibility' ORDER BY id ASC"),
+    rows(pool, "SELECT technician_id, metadata FROM account_notes WHERE note_type = 'visibility' ORDER BY created_at ASC, id ASC"),
   ]);
   const jobIds = jobs.map((row) => row.id);
   const events = jobIds.length
@@ -480,8 +481,8 @@ export async function getCustomer({ pool, customerId }) {
                 WHERE sr.user_id = ? ORDER BY sr.created_at DESC LIMIT 50`, [customerId]),
     rows(pool, `SELECT id, service_request_id, payment_method, status, amount, razorpay_payment_id, refunded_amount, created_at
                 FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`, [customerId]),
-    rows(pool, "SELECT id, type, make, model, license_plate, status FROM user_vehicles WHERE user_id = ? ORDER BY id ASC", [customerId]),
-    rows(pool, "SELECT id, admin_id, note, created_at FROM admin_customer_notes WHERE user_id = ? ORDER BY id DESC LIMIT 50", [customerId]),
+    rows(pool, "SELECT id, type, make, model, license_plate, status FROM user_vehicles WHERE user_id = ? ORDER BY created_at ASC, id ASC", [customerId]),
+    rows(pool, "SELECT id, admin_id, note_text AS note, created_at FROM account_notes WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 50", [customerId]),
     rows(pool, "SELECT service_request_id, rating FROM reviews WHERE user_id = ?", [customerId]),
   ]);
   const ratingMap = new Map(reviews.map((row) => [String(row.service_request_id), num(row.rating)]));
@@ -513,7 +514,7 @@ export async function addCustomerNote({ pool, customerId, note, adminId }) {
   if (!text) return { error: "Write a note first." };
   const [user] = await rows(pool, "SELECT id FROM users WHERE id = ? LIMIT 1", [customerId]);
   if (!user) return { notFound: true };
-  await pool.query("INSERT INTO admin_customer_notes (user_id, admin_id, note) VALUES (?, ?, ?)", [customerId, adminId || "admin", text]);
+  await pool.query("INSERT INTO account_notes (user_id, admin_id, note_text) VALUES (?, ?, ?)", [customerId, adminId, text]);
   return { ok: true };
 }
 
@@ -600,7 +601,7 @@ export async function getReports({ pool, days = 30, now = Date.now() }) {
 /** GET /services/stats — for each service: technicians offering it, prices on file and requests in 30 days. */
 export async function getServiceStats({ pool, now = Date.now() }) {
   const [services, techs, pricing, requests] = await Promise.all([
-    rows(pool, "SELECT id, service_name, service_slug, active FROM service_master ORDER BY id ASC"),
+    rows(pool, "SELECT id, service_name, service_slug, active FROM service_master ORDER BY service_name ASC, id ASC"),
     rows(pool, "SELECT id, specialties, service_type FROM technicians WHERE LOWER(COALESCE(status, '')) = 'approved'"),
     rows(pool, "SELECT technician_id, service_id, pricing_json FROM technician_service_pricing"),
     rows(pool, "SELECT service_type FROM service_requests WHERE created_at >= ?", [new Date(now - 30 * DAY)]),
@@ -614,7 +615,7 @@ export async function getServiceStats({ pool, now = Date.now() }) {
       return [...(Array.isArray(list) ? list : []), tech.service_type].some((value) => domainOf(value) === domain);
     }).length;
     const prices = [];
-    for (const row of pricing.filter((item) => Number(item.service_id) === Number(service.id))) {
+    for (const row of pricing.filter((item) => recordId(item.service_id) === recordId(service.id))) {
       const json = parseJson(row.pricing_json, {}) || {};
       for (const [key, value] of Object.entries(json)) {
         if (/distance|free_km|km$/i.test(key) || !Number.isFinite(Number(value)) || typeof value === "boolean") continue;
@@ -652,7 +653,7 @@ export async function getPriceMedians({ pool }) {
     const sorted = values.sort((a, b) => a - b);
     const middle = Math.floor(sorted.length / 2);
     const median = sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
-    return { serviceId: Number(serviceId), vehicleType, subtype, field, median, technicians: sorted.length };
+    return { serviceId: recordId(serviceId), vehicleType, subtype, field, median, technicians: sorted.length };
   });
 }
 
@@ -674,7 +675,7 @@ export async function getHandledAlerts({ pool, now = Date.now() }) {
   const ids = [...new Set(resolved.map((row) => String(row.service_request_id)))];
   const actions = ids.length
     ? await rows(pool, `SELECT admin_id, action_type, target_id, metadata, created_at FROM admin_actions_log
-                        WHERE target_type IN ('service_request', 'request') AND target_id IN (${placeholders(ids)}) AND created_at >= ? ORDER BY created_at ASC`, [...ids, new Date(dayStart)])
+                        WHERE source = 'action' AND target_type IN ('service_request', 'request') AND target_id IN (${placeholders(ids)}) AND created_at >= ? ORDER BY created_at ASC`, [...ids, new Date(dayStart)])
     : [];
   return resolved.map((row) => {
     const mine = actions.filter((action) => String(action.target_id) === String(row.service_request_id)
@@ -698,7 +699,7 @@ const AUDIT_GROUPS = {
 export async function listAudit({ pool, query = {}, now = Date.now() }) {
   const days = clampInt(query.days, 7, 1, 366);
   const since = istDayStart(now) - (days - 1) * DAY;
-  const list = await rows(pool, "SELECT id, admin_id, action_type, target_type, target_id, metadata, created_at FROM admin_actions_log WHERE created_at >= ? ORDER BY id DESC LIMIT 5000", [new Date(since)]);
+  const list = await rows(pool, "SELECT id, admin_id, action_type, target_type, target_id, metadata, created_at FROM admin_actions_log WHERE source = 'action' AND created_at >= ? ORDER BY created_at DESC, id DESC LIMIT 5000", [new Date(since)]);
   const groupOf = (type) => {
     const plain = String(type || "").replace(/^adminExtended\.[a-z]+\./i, "");
     return Object.entries(AUDIT_GROUPS).find(([, types]) => types.includes(plain))?.[0] || "other";

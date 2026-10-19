@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import {
   appendWalletCreditEntry,
   appendWalletDebitEntry,
@@ -31,7 +32,7 @@ export async function creditTechnicianWalletForPayment(conn, payload) {
     });
     return {
       credited: false,
-      walletTransactionId: Number(existingWalletCredit.id),
+      walletTransactionId: recordId(existingWalletCredit.id),
       duplicate: true,
       skipped: false,
     };
@@ -145,7 +146,7 @@ export async function getTechnicianWalletSummary(pool, technicianId) {
 export async function getTechnicianWalletTransactionHistory(pool, technicianId, limit = 20) {
   const rows = await listTechnicianWalletTransactions(pool, technicianId, limit);
   return rows.map((row) => ({
-    id: Number(row.id),
+    id: recordId(row.id),
     payment_id: row.payment_id || null,
     payout_id: row.payout_id || null,
     entry_type: row.entry_type,

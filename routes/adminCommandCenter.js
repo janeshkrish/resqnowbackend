@@ -1,3 +1,5 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { Router } from "express";
 import { verifyAdmin } from "../middleware/auth.js";
 import {
@@ -14,9 +16,9 @@ import { adminExtendedReRouteSearchRadius } from "../services/adminExtendedDispa
 const router = Router();
 
 function toPositiveInt(value, fieldName) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    const error = new Error(`${fieldName} must be a positive integer.`);
+  const parsed = recordId(value);
+  if (!isRecordId(parsed)) {
+    const error = new Error(`${fieldName} must be a valid UUID.`);
     error.statusCode = 400;
     throw error;
   }
@@ -41,7 +43,7 @@ router.get("/exceptions", async (_req, res) => {
 
 router.get("/tracks/:requestId", async (req, res) => {
   try {
-    const requestId = toPositiveInt(req.params.requestId, "requestId");
+    const requestId = recordId(req.params.requestId);
     const limit = req.query.limit != null ? Number(req.query.limit) : 80;
     const data = await getTechnicianTrackForRequest(requestId, limit);
     return res.json(data);
@@ -53,10 +55,10 @@ router.get("/tracks/:requestId", async (req, res) => {
 
 router.post("/actions/remind-technician", async (req, res) => {
   try {
-    const requestId = toPositiveInt(req.body?.requestId, "requestId");
+    const requestId = recordId(req.body?.requestId);
     const result = await triggerTechnicianReminder({
       requestId,
-      adminId: req.adminEmail || req.admin?.email || "admin",
+      adminId: adminActorId(req),
     });
     return res.json(result);
   } catch (error) {
@@ -67,7 +69,7 @@ router.post("/actions/remind-technician", async (req, res) => {
 
 router.post("/actions/call-technician", async (req, res) => {
   try {
-    const requestId = toPositiveInt(req.body?.requestId, "requestId");
+    const requestId = recordId(req.body?.requestId);
     const data = await prepareTechnicianCall({ requestId });
     return res.json({
       success: true,
@@ -82,7 +84,7 @@ router.post("/actions/call-technician", async (req, res) => {
 
 router.post("/actions/reassign", async (req, res) => {
   try {
-    const requestId = toPositiveInt(req.body?.requestId, "requestId");
+    const requestId = recordId(req.body?.requestId);
     const radiusKm = Number(req.body?.radiusKm || 35);
     const maxCandidates = Number(req.body?.maxCandidates || 5);
     const result = await reassignMonitoredRequest({ requestId, radiusKm, maxCandidates });
@@ -95,7 +97,7 @@ router.post("/actions/reassign", async (req, res) => {
 
 router.post("/actions/escalate", async (req, res) => {
   try {
-    const requestId = toPositiveInt(req.body?.requestId, "requestId");
+    const requestId = recordId(req.body?.requestId);
     const radiusKm = Number(req.body?.radiusKm || 35);
     const result = await adminExtendedReRouteSearchRadius({ requestId, radiusKm });
     return res.json({ success: true, ...result });

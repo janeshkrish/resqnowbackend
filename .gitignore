@@ -30,3 +30,8 @@ dist-ssr
 *.sw?
 uploads/
 server/uploads/
+
+# Private UUID migration plans, exports, checkpoints, and local validation logs.
+uuid-migration-private/
+*.checkpoint.json
+uuid-test-results.txt

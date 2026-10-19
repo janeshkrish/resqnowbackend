@@ -1,3 +1,5 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -80,7 +82,7 @@ import {
 const router = Router();
 const JWT_SECRET = String(process.env.JWT_SECRET || "").trim();
 
-router.post("/login", (req, res) => {
+router.post("/login", async (req, res, next) => {
   const { email, password } = req.body;
   const { email: adminEmail, password: adminPassword } = getAdminCredentials();
   if (!adminEmail || !adminPassword) {
@@ -89,10 +91,11 @@ router.post("/login", (req, res) => {
   if ((email || "").trim().toLowerCase() !== adminEmail.trim().toLowerCase() || password !== adminPassword) {
     return res.status(401).json({ error: "Invalid email or password." });
   }
-  const token = signAdminToken(adminEmail);
+  let token;
+  try { token = await signAdminToken(adminEmail); } catch (error) { return next(error); }
   return res.json({
     token,
-    admin: { email: adminEmail, name: "Admin", role: "admin", id: "admin" },
+    admin: { email: adminEmail, name: "Admin", role: "admin", id: jwt.decode(token).id },
   });
 });
 
@@ -181,7 +184,7 @@ const ADMIN_NOTIFICATION_TYPE_PLACEHOLDERS = ADMIN_NOTIFICATION_TYPE_FILTER_VALU
   .join(", ");
 
 function resolveAdminId(req) {
-  return String(req.adminEmail || req.admin?.email || "admin");
+  return adminActorId(req);
 }
 
 function emitAdminNotification(req, payload = {}) {
@@ -203,15 +206,14 @@ function normalizeTechnicianIds(value) {
   return Array.from(
     new Set(
       value
-        .map((id) => Number(String(id || "").replace(/#/g, "").trim()))
-      .filter((id) => Number.isInteger(id) && id > 0)
+        .map((id) => recordId(String(id || "").replace(/#/g, "").trim()))
+      .filter((id) => isRecordId(id))
     )
   );
 }
 
 function normalizePositiveInteger(value) {
-  const numericValue = Number(String(value ?? "").trim());
-  return Number.isInteger(numericValue) && numericValue > 0 ? numericValue : null;
+  return recordId(value);
 }
 
 function toPositiveIntegerList(rows, key = "id") {
@@ -219,8 +221,8 @@ function toPositiveIntegerList(rows, key = "id") {
   return Array.from(
     new Set(
       rows
-        .map((row) => Number(row?.[key]))
-        .filter((value) => Number.isInteger(value) && value > 0)
+        .map((row) => recordId(row?.[key]))
+        .filter(isRecordId)
     )
   );
 }
@@ -301,7 +303,7 @@ async function persistAdminSystemAlert(title, message) {
      VALUES (?, ?, ?, 0)`,
     [ADMIN_NOTIFICATION_TYPES.SYSTEM_ALERT, title, message]
   );
-  return Number(insertResult.insertId);
+  return recordId(insertResult.insertId);
 }
 
 async function sendAdminSystemAnnouncement(req, res) {
@@ -496,8 +498,8 @@ router.get("/notifications", async (req, res) => {
 // 4. Mark as read
 router.post("/notifications/:id/read", async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) {
+    const id = recordId(req.params.id);
+    if (!isRecordId(id)) {
       return res.status(400).json({ error: "Invalid notification id." });
     }
 
@@ -521,8 +523,8 @@ router.post("/notifications/:id/read", async (req, res) => {
 
 router.delete("/notifications/:id", async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) {
+    const id = recordId(req.params.id);
+    if (!isRecordId(id)) {
       return res.status(400).json({ error: "Invalid notification id." });
     }
 
@@ -545,8 +547,8 @@ router.delete("/notifications/:id", async (req, res) => {
 
 router.get("/dispatch-audit/:requestId", async (req, res) => {
   try {
-    const requestId = Number(req.params.requestId);
-    if (!Number.isFinite(requestId)) {
+    const requestId = recordId(req.params.requestId);
+    if (!isRecordId(requestId)) {
       return res.status(400).json({ error: "Invalid request id." });
     }
 
@@ -674,8 +676,8 @@ router.get("/dispatch-matrix-audit", async (req, res) => {
 
 router.post("/dispatch-retry/:requestId", async (req, res) => {
   try {
-    const requestId = Number(req.params.requestId);
-    if (!Number.isFinite(requestId)) {
+    const requestId = recordId(req.params.requestId);
+    if (!isRecordId(requestId)) {
       return res.status(400).json({ error: "Invalid request id." });
     }
 
@@ -697,17 +699,17 @@ router.post("/dispatch-retry/:requestId", async (req, res) => {
       "SELECT id, technician_id, status, sent_at FROM dispatch_offers WHERE service_request_id = ?",
       [requestId]
     );
-    const beforeOfferIds = new Set((beforeOffers || []).map((o) => Number(o.id)));
+    const beforeOfferIds = new Set((beforeOffers || []).map((o) => recordId(o.id)));
 
     const { jobDispatchService } = await import("../services/jobDispatchService.js");
     const candidates = await jobDispatchService.findTopTechnicians(requestRow, null);
     await jobDispatchService.dispatchJob(requestRow, candidates);
 
     const [afterOffers] = await pool.query(
-      "SELECT id, technician_id, status, sent_at FROM dispatch_offers WHERE service_request_id = ? ORDER BY id DESC",
+      "SELECT id, technician_id, status, sent_at FROM dispatch_offers WHERE service_request_id = ? ORDER BY sent_at DESC, id DESC",
       [requestId]
     );
-    const newlyCreatedOffers = (afterOffers || []).filter((o) => !beforeOfferIds.has(Number(o.id)));
+    const newlyCreatedOffers = (afterOffers || []).filter((o) => !beforeOfferIds.has(recordId(o.id)));
 
     return res.json({
       success: true,
@@ -773,8 +775,8 @@ async function replaceTechnicianServicePricingRows(conn, technicianId, entries) 
 }
 
 router.put("/technician/:id/pricing", async (req, res) => {
-  const technicianId = Number(req.params.id);
-  if (!Number.isInteger(technicianId) || technicianId <= 0) {
+  const technicianId = recordId(req.params.id);
+  if (!isRecordId(technicianId)) {
     return res.status(400).json({ error: "Invalid technician id." });
   }
 
@@ -845,8 +847,8 @@ router.put("/technician/:id/pricing", async (req, res) => {
 });
 
 router.put("/update-technician/:id", async (req, res) => {
-  const technicianId = Number(req.params.id);
-  if (!Number.isInteger(technicianId) || technicianId <= 0) {
+  const technicianId = recordId(req.params.id);
+  if (!isRecordId(technicianId)) {
     return res.status(400).json({ error: "Invalid technician id." });
   }
 
@@ -1135,15 +1137,15 @@ router.delete("/technicians/:id", async (req, res) => {
     await executeIfTableExists(
       conn,
       hasTable,
-      "technician_approval_audit",
-      "DELETE FROM technician_approval_audit WHERE technician_id = ?",
+      "admin_actions_log",
+      "DELETE FROM admin_actions_log WHERE technician_id = ?",
       [technicianId]
     );
     await executeIfTableExists(
       conn,
       hasTable,
-      "technician_admin_notes",
-      "DELETE FROM technician_admin_notes WHERE technician_id = ?",
+      "account_notes",
+      "DELETE FROM account_notes WHERE technician_id = ?",
       [technicianId]
     );
 

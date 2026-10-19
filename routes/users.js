@@ -1,3 +1,5 @@
+import { enforceOtpRateLimit } from "../models/otp.js";
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { Router } from "express";
 import * as db from "../db.js";
 import * as mail from "../services/mailer.js";
@@ -136,108 +138,9 @@ function isAdminCredentialMatch(normalizedEmail, password) {
 }
 
 const OTP_TTL_MINUTES = toPositiveInt(process.env.OTP_TTL_MINUTES, 5);
-const OTP_MAX_REQUESTS_PER_HOUR = 3;
-const OTP_COOLDOWN_SECONDS = 60;
-const OTP_HOUR_WINDOW_SECONDS = 60 * 60;
 const OTP_DEBUG_ROUTE_ENABLED = String(process.env.OTP_DEBUG_ROUTE_ENABLED || "").toLowerCase() === "true";
 const OTP_DEBUG_TOKEN = String(process.env.OTP_DEBUG_TOKEN || "").trim();
 const otpRequestMap = new Map();
-
-function toEpochMs(value) {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  const ms = date.getTime();
-  return Number.isNaN(ms) ? null : ms;
-}
-
-async function enforceOtpRateLimit(pool, normalizedEmail) {
-  const now = new Date();
-  const nowMs = now.getTime();
-  const connection = await pool.getConnection();
-
-  try {
-    await connection.beginTransaction();
-
-    // Ensure a row exists for this email before locking it.
-    await connection.execute(
-      `INSERT INTO otp_rate_limits (email, otp_request_count, otp_last_request_time, otp_window_start_time)
-       VALUES (?, 0, NULL, NULL)
-       ON DUPLICATE KEY UPDATE email = VALUES(email)`,
-      [normalizedEmail]
-    );
-
-    const [rows] = await connection.query(
-      `SELECT otp_request_count, otp_last_request_time, otp_window_start_time
-       FROM otp_rate_limits
-       WHERE email = ?
-       LIMIT 1
-       FOR UPDATE`,
-      [normalizedEmail]
-    );
-
-    const row = rows[0] || {};
-    let count = Number(row.otp_request_count || 0);
-    const lastRequestMs = toEpochMs(row.otp_last_request_time);
-    let windowStartMs = toEpochMs(row.otp_window_start_time);
-
-    if (windowStartMs == null) {
-      windowStartMs = lastRequestMs ?? nowMs;
-    }
-
-    if (lastRequestMs != null) {
-      const secondsSinceLastRequest = Math.floor((nowMs - lastRequestMs) / 1000);
-      if (secondsSinceLastRequest < OTP_COOLDOWN_SECONDS) {
-        const retryAfterSeconds = OTP_COOLDOWN_SECONDS - secondsSinceLastRequest;
-        await connection.rollback();
-        return {
-          allowed: false,
-          retryAfterSeconds,
-          error: `Please wait ${retryAfterSeconds} seconds before requesting another OTP.`,
-        };
-      }
-    }
-
-    const windowElapsedSeconds = Math.floor((nowMs - windowStartMs) / 1000);
-    if (windowElapsedSeconds >= OTP_HOUR_WINDOW_SECONDS) {
-      count = 0;
-      windowStartMs = nowMs;
-    }
-
-    if (count >= OTP_MAX_REQUESTS_PER_HOUR) {
-      const retryAfterSeconds = Math.max(1, OTP_HOUR_WINDOW_SECONDS - windowElapsedSeconds);
-      await connection.rollback();
-      return {
-        allowed: false,
-        retryAfterSeconds,
-        error: "Too many OTP requests. Please try again later.",
-      };
-    }
-
-    const nextCount = count + 1;
-    await connection.execute(
-      `UPDATE otp_rate_limits
-       SET otp_request_count = ?, otp_last_request_time = ?, otp_window_start_time = ?
-       WHERE email = ?`,
-      [nextCount, now, new Date(windowStartMs), normalizedEmail]
-    );
-
-    await connection.commit();
-    return {
-      allowed: true,
-      requestCount: nextCount,
-      lastRequestTime: now,
-    };
-  } catch (error) {
-    try {
-      await connection.rollback();
-    } catch {
-      // ignore rollback errors; original error is more important.
-    }
-    throw error;
-  } finally {
-    connection.release();
-  }
-}
 
 async function handleSendOtp(req, res, { debug = false } = {}) {
   const requestId = buildRequestId(req);
@@ -342,11 +245,11 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
     const otpHash = await bcrypt.hash(otp, 10);
     const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
 
-    const [insertResult] = await pool.execute(
-      "INSERT INTO otp_requests (email, otp_hash, expires_at) VALUES (?, ?, ?)",
-      [normalizedEmail, otpHash, expiresAt]
+    await pool.execute(
+      "UPDATE otp_requests SET otp_hash = ?, expires_at = ? WHERE email = ?",
+      [otpHash, expiresAt, normalizedEmail]
     );
-    const otpRequestId = insertResult.insertId;
+    const otpRequestId = rateLimit.otpRequestId;
 
     try {
       await mail.sendMail({
@@ -365,7 +268,7 @@ async function handleSendOtp(req, res, { debug = false } = {}) {
         emailError,
       });
       try {
-        await pool.execute("DELETE FROM otp_requests WHERE id = ? LIMIT 1", [otpRequestId]);
+        await pool.execute("UPDATE otp_requests SET otp_hash = NULL, expires_at = NULL WHERE email = ? AND otp_hash = ?", [normalizedEmail, otpHash]);
       } catch (cleanupError) {
         console.error("[OTP] Failed to cleanup OTP row after email failure", {
           requestId,
@@ -459,7 +362,7 @@ router.post("/verify-otp", async (req, res) => {
 
     // Verify OTP
     const [otps] = await pool.query(
-      "SELECT * FROM otp_requests WHERE email = ? AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
+      "SELECT id, otp_hash, expires_at FROM otp_requests WHERE email = ? AND expires_at > NOW() LIMIT 1",
       [normalizedEmail]
     );
 
@@ -492,7 +395,7 @@ router.post("/verify-otp", async (req, res) => {
     const token = signUserToken(userId, normalizedEmail);
 
     // Cleanup OTPs
-    await pool.execute("DELETE FROM otp_requests WHERE email = ?", [normalizedEmail]);
+    await pool.execute("UPDATE otp_requests SET otp_hash = NULL, expires_at = NULL WHERE email = ?", [normalizedEmail]);
 
     void sendEventEmail("USER_REGISTER", {
       name,
@@ -536,13 +439,13 @@ router.post('/login', async (req, res) => {
     }
 
     if (isAdminCredentialMatch(normalizedEmail, rawPassword)) {
-      const token = signAdminToken(normalizedEmail);
+      const token = await signAdminToken(normalizedEmail);
       console.log(`[AUTH LOGIN] Admin login success from ${clientIp} for ${normalizedEmail}`);
       return res.json({
         token,
         role: "admin",
         user: {
-          id: "admin",
+          id: jwt.decode(token).id,
           name: "Admin",
           email: normalizedEmail,
           isVerified: true,
@@ -726,23 +629,23 @@ router.post('/reviews', verifyUser, async (req, res) => {
       return res.status(401).json({ error: "Unauthorized user context." });
     }
 
-    const normalizedTechnicianId = Number(technician_id);
+    const normalizedTechnicianId = recordId(technician_id);
     const normalizedRating = Number(rating);
     const normalizedRequestId =
       request_id === null || request_id === undefined || String(request_id).trim() === ""
         ? null
-        : Number(request_id);
+        : recordId(request_id);
 
     if (!technician_id || !rating) {
       return res.status(400).json({ error: "Missing required fields for review." });
     }
-    if (!Number.isFinite(normalizedTechnicianId) || normalizedTechnicianId <= 0) {
+    if (!isRecordId(normalizedTechnicianId)) {
       return res.status(400).json({ error: "Invalid technician id." });
     }
     if (!Number.isFinite(normalizedRating) || normalizedRating < 1 || normalizedRating > 5) {
       return res.status(400).json({ error: "Rating must be between 1 and 5." });
     }
-    if (normalizedRequestId !== null && (!Number.isFinite(normalizedRequestId) || normalizedRequestId <= 0)) {
+    if (normalizedRequestId !== null && (!isRecordId(normalizedRequestId))) {
       return res.status(400).json({ error: "Invalid request id." });
     }
 

@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { roundMoney } from "../utils/money.js";
 
 const ACTIVE_WITHDRAWAL_REQUEST_STATUSES = ["pending", "processing"];
@@ -34,8 +35,8 @@ export async function getTechnicianWalletForUpdate(conn, technicianId) {
 }
 
 async function getTechnicianForUpdate(conn, technicianId) {
-  const normalizedTechnicianId = Number(technicianId);
-  if (!Number.isInteger(normalizedTechnicianId) || normalizedTechnicianId <= 0) {
+  const normalizedTechnicianId = recordId(technicianId);
+  if (!isRecordId(normalizedTechnicianId)) {
     return null;
   }
 
@@ -51,8 +52,8 @@ async function getTechnicianForUpdate(conn, technicianId) {
 }
 
 export async function ensureTechnicianWallet(conn, technicianId, currency = "INR") {
-  const normalizedTechnicianId = Number(technicianId);
-  if (!Number.isInteger(normalizedTechnicianId) || normalizedTechnicianId <= 0) {
+  const normalizedTechnicianId = recordId(technicianId);
+  if (!isRecordId(normalizedTechnicianId)) {
     return null;
   }
 
@@ -222,7 +223,7 @@ export async function createWalletTransaction(conn, payload) {
       payload.metadata ? JSON.stringify(payload.metadata) : null,
     ]
   );
-  return Number(result.insertId);
+  return recordId(result.insertId);
 }
 
 export async function getWalletCreditByPaymentIdForUpdate(conn, paymentId) {
@@ -231,7 +232,7 @@ export async function getWalletCreditByPaymentIdForUpdate(conn, paymentId) {
      FROM wallet_transactions
      WHERE payment_id = ?
        AND entry_type = 'payment_credit'
-     ORDER BY id DESC
+     ORDER BY created_at DESC, id DESC
      LIMIT 1
      FOR UPDATE`,
     [paymentId]
@@ -360,7 +361,7 @@ export async function createPayoutRecord(conn, payload) {
       payload.processedAt || null,
     ]
   );
-  return Number(result.insertId);
+  return recordId(result.insertId);
 }
 
 export async function findPayoutByIdempotencyKey(conn, idempotencyKey) {
@@ -448,7 +449,7 @@ export async function createPayoutAllocation(conn, payload) {
       roundMoney(payload.amount),
     ]
   );
-  return Number(result.insertId);
+  return recordId(result.insertId);
 }
 
 export async function getTechnicianPayoutProfileForUpdate(conn, technicianId) {
@@ -521,7 +522,7 @@ export async function createWithdrawalRequestRecord(conn, payload) {
       payload.metadata ? JSON.stringify(payload.metadata) : null,
     ]
   );
-  return Number(result.insertId);
+  return recordId(result.insertId);
 }
 
 export async function findWithdrawalRequestByIdempotencyKey(conn, idempotencyKey) {
@@ -548,7 +549,7 @@ export async function findRecentMatchingActiveWithdrawalRequest(
        AND status IN ('pending', 'processing')
        AND ABS(amount - ?) < 0.01
        AND created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-     ORDER BY id DESC
+     ORDER BY created_at DESC, id DESC
      LIMIT 1
      FOR UPDATE`,
     [technicianId, roundMoney(amount), lookbackMinutes]

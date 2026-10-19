@@ -1,0 +1,60 @@
+name: Verify, migrate TiDB, and deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push must never cancel an in-progress database transfer.
+concurrency:
+  group: resqnow-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run build
+
+  deploy:
+    needs: verify
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ${{ vars.DEPLOY_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 180
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      RENDER_SERVICE_IDS: ${{ vars.RENDER_SERVICE_IDS }}
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ vars.DB_PORT || '4000' }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_NAME: ${{ vars.DB_NAME }}
+      DB_LEGACY_NAME: ${{ vars.DB_LEGACY_NAME }}
+      DB_MIGRATION_TARGET: ${{ vars.DB_MIGRATION_TARGET }}
+      DB_MIGRATION_MODE: auto
+      DB_SSL: 'true'
+      DB_SSL_STRICT: 'true'
+      ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run deploy:production

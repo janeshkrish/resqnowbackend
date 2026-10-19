@@ -1,3 +1,5 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { Router } from "express";
 import * as db from "../db.js";
 import { verifyAdmin } from "../middleware/auth.js";
@@ -30,8 +32,8 @@ export function createAdminPortalRouter({
     }
   };
   const id = (req) => {
-    const value = Number(req.params.id);
-    return Number.isInteger(value) && value > 0 ? value : null;
+    const value = recordId(req.params.id);
+    return isRecordId(value) ? value : null;
   };
 
   router.get("/nav-counts", read("navCounts", (pool) => portal.getNavCounts({ pool })));
@@ -49,7 +51,7 @@ export function createAdminPortalRouter({
   router.post("/customers/:id/notes", read("customerNote", async (pool, req) => {
     await ensureSchema();
     if (!id(req)) return { notFound: true };
-    return portal.addCustomerNote({ pool, customerId: id(req), note: req.body?.note, adminId: req.adminEmail });
+    return portal.addCustomerNote({ pool, customerId: id(req), note: req.body?.note, adminId: adminActorId(req) });
   }));
   router.get("/reports", read("reports", (pool, req) => portal.getReports({ pool, days: req.query.days, now: now() })));
   router.get("/services/stats", read("serviceStats", (pool) => portal.getServiceStats({ pool, now: now() })));

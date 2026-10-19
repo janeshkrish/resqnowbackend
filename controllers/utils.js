@@ -1,3 +1,4 @@
+import { adminActorId } from "../models/userIdentity.js";
 export function toNumber(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -20,7 +21,7 @@ export function parseJson(value, fallback = null) {
 }
 
 export function resolveAdminId(req) {
-  return String(req.admin?.email || req.adminEmail || "admin");
+  return adminActorId(req);
 }
 
 export function buildPagination(query) {

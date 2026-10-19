@@ -1,3 +1,7 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId, isRecordId } from "../models/identifiers.js";
+import { compactPaymentReceipt } from "../utils/paymentReference.js";
+import { recordApprovalAudit, listApprovalAudit } from "../models/audit.js";
 
 import { Router } from "express";
 import { socketService } from "../services/socket.js";
@@ -546,9 +550,7 @@ function normalizeRequiredText(value, maxLength = 255) {
 }
 
 function normalizeOptionalNumericIdentifier(value) {
-  if (value == null || value === "") return null;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  return recordId(value);
 }
 
 function technicianHasTowingAccess(row) {
@@ -736,7 +738,7 @@ function resolveBroadcastTechnicianStatus(row) {
 export async function resolveTechnicianJobPricing(jobRow, { technicianId = jobRow?.technician_id, connection = null } = {}) {
   const confirmed = hasAcceptedRequestPricing(jobRow);
   const accepted = acceptedPricingSnapshot(jobRow);
-  if (accepted && Number(accepted.technician_id) === Number(technicianId)) {
+  if (accepted && recordId(accepted.technician_id) === recordId(technicianId)) {
     return { amount: accepted.technician_earning, snapshot: accepted, offerId: accepted.offer_id ?? null, confirmed };
   }
   if (confirmed) {
@@ -753,7 +755,7 @@ export async function resolveTechnicianJobPricing(jobRow, { technicianId = jobRo
     const [offers] = await executor.query(`SELECT id, status, pricing_snapshot, expires_at,
         expires_at IS NOT NULL AND expires_at <= NOW() AS expired
       FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ? AND status = 'pending'
-        AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY id DESC LIMIT 1`, [jobRow.id, technicianId]);
+        AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY sent_at DESC, id DESC LIMIT 1`, [jobRow.id, technicianId]);
     const offer = offers?.[0];
     const expiry = offer?.expires_at == null ? null : new Date(offer.expires_at).getTime();
     const expired = Number(offer?.expired) === 1 || (Number.isFinite(expiry) && expiry <= Date.now());
@@ -985,7 +987,7 @@ router.get("/", verifyAdmin, async (req, res) => {
 
     return res.json(
       filteredRows.map((row) => ({
-        id: Number(row.id),
+        id: recordId(row.id),
         name: row.name,
         category: resolveBroadcastTechnicianCategories(row)[0] || "",
         categories: resolveBroadcastTechnicianCategories(row),
@@ -1136,7 +1138,7 @@ async function insertTechnicianSignup(connection, body, credentials) {
 const signupAgreementsAccepted = (body) => !body.dynamic_pricing_config || (body.consent?.agreed === true && body.technician_agreement_accepted === true);
 
 // The approval itself: used by Applications and by an admin who adds and approves in one go.
-async function approveTechnicianRecord(pool, id, { reason, adminEmail }) {
+async function approveTechnicianRecord(pool, id, { reason, adminEmail, adminId }) {
   const [existing] = await pool.query("SELECT id, name, email, status FROM technicians WHERE id = ? LIMIT 1", [id]);
   if (existing.length === 0) return { notFound: true };
   const previousStatus = String(existing[0].status || "pending");
@@ -1144,12 +1146,8 @@ async function approveTechnicianRecord(pool, id, { reason, adminEmail }) {
     "UPDATE technicians SET status = 'approved', is_active = TRUE, is_available = CASE WHEN current_job_id IS NULL THEN TRUE ELSE FALSE END WHERE id = ?",
     [id]
   );
-  await pool.execute(
-    `INSERT INTO technician_approval_audit
-    (technician_id, action, previous_status, new_status, reason, admin_email)
-    VALUES (?, 'approved', ?, 'approved', ?, ?)`,
-    [id, previousStatus, reason || "Approved by admin", adminEmail || "unknown-admin"]
-  );
+  await recordApprovalAudit(pool, { technicianId: id, action: "approved", previousStatus,
+    reason: reason || "Approved by admin", adminId: adminId || null });
   await pool.execute(
     `INSERT INTO notifications (type, title, message, is_read)
      VALUES (?, ?, ?, 0)`,
@@ -2087,7 +2085,7 @@ router.post('/me/pay-dues/order', verifyTechnician, async (req, res) => {
     const options = {
       amount: Math.round(total * 100),
       currency: pricingConfig.currency || "INR",
-      receipt: `dues_${technicianId}_${Date.now()}`
+      receipt: compactPaymentReceipt(`dues_${technicianId}_${Date.now()}`)
     };
     const order = await razorpay.orders.create(options);
     res.json(order);
@@ -2203,8 +2201,8 @@ router.get("/nearby", async (req, res) => {
     const rows = (await db.query("SELECT * FROM technicians WHERE status = 'approved' AND is_active = TRUE"))
       .filter((row) => !(row.admin_hidden != null && Boolean(Number(row.admin_hidden))));
     const technicianIds = rows
-      .map((row) => Number(row.id))
-      .filter((id) => Number.isInteger(id) && id > 0);
+      .map((row) => recordId(row.id))
+      .filter((id) => isRecordId(id));
     const normalizedPricingRows = technicianIds.length > 0
       ? await db.query(
           `SELECT
@@ -2262,7 +2260,7 @@ router.get("/nearby", async (req, res) => {
       })
       .filter(t => t.isWithinRange)
       .map(t => {
-        const storedRows = pricingRowsByTechnician.get(Number(t.id)) || [];
+        const storedRows = pricingRowsByTechnician.get(recordId(t.id)) || [];
         const candidateRows = storedRows.length > 0
           ? storedRows
           : normalizeTechnicianPricingEntries(t.service_costs, { preserveInvalid: true });
@@ -2442,8 +2440,8 @@ router.patch("/location", verifyTechnician, async (req, res) => {
         "SELECT current_job_id FROM technicians WHERE id = ? LIMIT 1",
         [req.technicianId]
       );
-      let currentJobId = rows?.[0]?.current_job_id ? Number(rows[0].current_job_id) : null;
-      if (!Number.isInteger(currentJobId)) {
+      let currentJobId = rows?.[0]?.current_job_id ? recordId(rows[0].current_job_id) : null;
+      if (!isRecordId(currentJobId)) {
         const [activeRows] = await conn.query(
           `SELECT id
            FROM service_requests
@@ -2471,12 +2469,12 @@ router.patch("/location", verifyTechnician, async (req, res) => {
            LIMIT 1`,
           [req.technicianId]
         );
-        currentJobId = activeRows?.[0]?.id ? Number(activeRows[0].id) : null;
+        currentJobId = activeRows?.[0]?.id ? recordId(activeRows[0].id) : null;
       }
       await conn.execute(
         `INSERT INTO technician_location_history (technician_id, service_request_id, latitude, longitude)
          VALUES (?, ?, ?, ?)`,
-        [req.technicianId, Number.isInteger(currentJobId) ? currentJobId : null, parsedLat, parsedLng]
+        [req.technicianId, isRecordId(currentJobId) ? currentJobId : null, parsedLat, parsedLng]
       );
       await conn.commit();
     } catch (error) {
@@ -2676,7 +2674,7 @@ router.post("/create", verifyAdmin, async (req, res) => {
     if (approveNow) {
       await approveTechnicianRecord(pool, id, {
         reason: String(req.body.approval_reason || "").trim() || "Added and approved by admin",
-        adminEmail: req.adminEmail,
+        adminEmail: req.adminEmail, adminId: adminActorId(req),
       });
     } else {
       try {
@@ -2707,8 +2705,8 @@ router.put("/:id/profile", verifyAdmin, async (req, res) => {
   let connection;
   let committed = false;
   try {
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid technician id." });
+    const id = recordId(req.params.id);
+    if (!isRecordId(id)) return res.status(400).json({ error: "Invalid technician id." });
     const body = req.body || {};
     const pool = await db.getPool();
     const [rows] = await pool.query("SELECT id, email, password_hash FROM technicians WHERE id = ? LIMIT 1", [id]);
@@ -2740,7 +2738,7 @@ router.put("/:id/profile", verifyAdmin, async (req, res) => {
     await connection.execute(
       `INSERT INTO admin_actions_log (admin_id, action_type, target_type, target_id, metadata)
        VALUES (?, 'updateTechnicianProfile', 'technician', ?, ?)`,
-      [req.adminEmail || "admin", String(id), JSON.stringify({ fields: columns.filter((column) => column !== "password_hash"), passwordChanged: Boolean(passwordHash) })]
+      [adminActorId(req), String(id), JSON.stringify({ fields: columns.filter((column) => column !== "password_hash"), passwordChanged: Boolean(passwordHash) })]
     );
     await connection.commit();
     committed = true;
@@ -2934,7 +2932,7 @@ router.post("/me/pay-dues", verifyTechnician, async (req, res) => {
     const options = {
       amount: Math.round(amount * 100),
       currency: pricingConfig.currency || "INR",
-      receipt: `tech_dues_${technicianId}_${Date.now()}`,
+      receipt: compactPaymentReceipt(`tech_dues_${technicianId}_${Date.now()}`),
       payment_capture: 1
     };
 
@@ -3098,7 +3096,7 @@ router.patch("/:id/approve", verifyAdmin, async (req, res) => {
     const id = req.params.id;
     const reason = String(req.body?.reason || "").trim();
     const pool = await db.getPool();
-    const outcome = await approveTechnicianRecord(pool, id, { reason, adminEmail: req.adminEmail });
+    const outcome = await approveTechnicianRecord(pool, id, { reason, adminEmail: req.adminEmail, adminId: adminActorId(req) });
     if (outcome.notFound) {
       return res.status(404).json({ error: "Technician not found." });
     }
@@ -3122,16 +3120,12 @@ router.patch("/:id/reject", verifyAdmin, async (req, res) => {
       "UPDATE technicians SET status = 'rejected', is_active = FALSE, is_available = FALSE WHERE id = ?",
       [id]
     );
-    await pool.execute(
-      `INSERT INTO technician_approval_audit
-      (technician_id, action, previous_status, new_status, reason, admin_email)
-      VALUES (?, 'rejected', ?, 'rejected', ?, ?)`,
-      [id, previousStatus, reason || "Rejected by admin", req.adminEmail || "unknown-admin"]
-    );
+    await recordApprovalAudit(pool, { technicianId: id, action: "rejected", previousStatus,
+      reason: reason || "Rejected by admin", adminId: adminActorId(req) });
     socketService.notifyAdmins("admin:technician_audit_update", {
       technicianId: id,
       action: "rejected",
-      adminEmail: req.adminEmail || "unknown-admin",
+      adminEmail: req.adminEmail, adminId: adminActorId(req) || "unknown-admin",
       reason: reason || "Rejected by admin",
       createdAt: new Date().toISOString()
     });
@@ -3151,13 +3145,7 @@ router.patch("/:id/reject", verifyAdmin, async (req, res) => {
 router.get("/:id/approval-audit", verifyAdmin, async (req, res) => {
   try {
     const id = req.params.id;
-    const rows = await db.query(
-      `SELECT id, technician_id, action, previous_status, new_status, reason, admin_email, created_at
-       FROM technician_approval_audit
-       WHERE technician_id = ?
-       ORDER BY created_at DESC`,
-      [id]
-    );
+    const rows = await listApprovalAudit(await db.getPool(), id);
     return res.json(rows);
   } catch (err) {
     return res.status(500).json({ error: err.message || "Failed to fetch approval audit trail." });

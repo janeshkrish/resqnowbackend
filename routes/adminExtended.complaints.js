@@ -1,3 +1,5 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { Router } from "express";
 import { getPool } from "../db.js";
 import { requireAdminExtendedAccess } from "../middleware/adminExtendedAccess.js";
@@ -11,7 +13,7 @@ const adminExtendedAllowedSeverity = new Set(["low", "medium", "high", "critical
 const adminExtendedAllowedStatus = new Set(["open", "assigned", "resolved"]);
 
 function adminExtendedResolveAdminId(req) {
-  return String(req.adminExtended?.adminId || req.adminEmail || req.admin?.email || "admin");
+  return adminActorId(req);
 }
 
 function adminExtendedParseMetadata(value) {
@@ -124,8 +126,8 @@ router.get("/complaints", async (req, res) => {
 router.get("/complaints/:complaintId", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.complaints.detail";
   try {
-    const complaintId = Number(req.params.complaintId);
-    if (!Number.isInteger(complaintId) || complaintId <= 0) {
+    const complaintId = recordId(req.params.complaintId);
+    if (!isRecordId(complaintId)) {
       return res.status(400).json({ error: "Invalid complaintId." });
     }
 
@@ -142,7 +144,7 @@ router.get("/complaints/:complaintId", async (req, res) => {
       `SELECT id, complaint_id, update_type, note_text, metadata, created_by, created_at
        FROM admin_complaint_updates
        WHERE complaint_id = ?
-       ORDER BY id ASC`,
+       ORDER BY created_at ASC, id ASC`,
       [complaintId]
     );
 
@@ -211,12 +213,12 @@ router.post("/complaints", async (req, res) => {
 router.post("/complaints/:complaintId/assign", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.complaints.assignComplaint";
   try {
-    const complaintId = Number(req.params.complaintId);
+    const complaintId = recordId(req.params.complaintId);
     const assignedAdminId = String(req.body?.assignedAdminId || "").trim();
     const note = String(req.body?.note || "").trim();
     const adminId = adminExtendedResolveAdminId(req);
 
-    if (!Number.isInteger(complaintId) || complaintId <= 0) {
+    if (!isRecordId(complaintId)) {
       return res.status(400).json({ error: "Invalid complaintId." });
     }
     if (!assignedAdminId) {
@@ -268,11 +270,11 @@ router.post("/complaints/:complaintId/assign", async (req, res) => {
 router.post("/complaints/:complaintId/resolve", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.complaints.resolveComplaint";
   try {
-    const complaintId = Number(req.params.complaintId);
+    const complaintId = recordId(req.params.complaintId);
     const resolutionNote = String(req.body?.resolutionNote || "").trim();
     const adminId = adminExtendedResolveAdminId(req);
 
-    if (!Number.isInteger(complaintId) || complaintId <= 0) {
+    if (!isRecordId(complaintId)) {
       return res.status(400).json({ error: "Invalid complaintId." });
     }
 
@@ -319,12 +321,12 @@ router.post("/complaints/:complaintId/resolve", async (req, res) => {
 router.post("/complaints/:complaintId/internal-note", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.complaints.addInternalNote";
   try {
-    const complaintId = Number(req.params.complaintId);
+    const complaintId = recordId(req.params.complaintId);
     const note = String(req.body?.note || "").trim();
     const metadata = req.body?.metadata || null;
     const adminId = adminExtendedResolveAdminId(req);
 
-    if (!Number.isInteger(complaintId) || complaintId <= 0) {
+    if (!isRecordId(complaintId)) {
       return res.status(400).json({ error: "Invalid complaintId." });
     }
     if (!note) {

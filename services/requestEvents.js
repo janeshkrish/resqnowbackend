@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { getPool as defaultGetPool } from "../db.js";
 import { socketService } from "./socket.js";
 import { normalizeRequestStatus } from "./requestStatusWorkflow.js";
@@ -77,8 +78,8 @@ export async function recordRequestEvent(
 ) {
   if (!deps.getPool && !enabled) return null;
   const { getPool = defaultGetPool, notifyAdmins = (event, data) => socketService.notifyAdmins(event, data), now = () => new Date() } = deps;
-  const id = Number(requestId);
-  if (!Number.isInteger(id) || id <= 0 || !eventType) return null;
+  const id = recordId(requestId);
+  if (!isRecordId(id) || !eventType) return null;
   const row = {
     requestId: id,
     eventType: String(eventType),

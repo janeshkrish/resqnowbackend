@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { calculateFinalPrice } from "./pricing.service.js";
 import { getPlatformPricingConfig, getServiceMatrixAmount, normalizeTowingPricingRules } from "./platformPricing.js";
 import { calculateTechnicianServiceRowPayout, estimateTechnicianPayoutAsync } from "./pricingEstimator.js";
@@ -23,8 +24,7 @@ const toPositiveDistance = (value) => {
 };
 
 const toTechnicianId = (value) => {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  return recordId(value);
 };
 
 function toIsoTimestamp(value) {

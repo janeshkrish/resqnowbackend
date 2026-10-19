@@ -10,6 +10,7 @@ import { backfillMarketplaceWalletCredits } from "../services/marketplaceWalletS
 
 // Every DB call is intercepted; no real TiDB, gateway, mail, or wallet service is contacted.
 process.env.DB_HOST = "simulated.invalid";
+process.env.DB_MIGRATION_MODE = "off";
 process.env.DB_USER = "simulated";
 process.env.DB_PASSWORD = "simulated";
 process.env.DB_NAME = "simulated";

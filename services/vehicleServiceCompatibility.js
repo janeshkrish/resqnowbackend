@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily, normalizeText, parseVehicleTypes } from './serviceNormalization.js';
 import { normalizeVehicleSubtype, pricingSubcategoryFor } from './vehicleClasses.js';
 import { answerValue, readRequestDetails } from './requestDetails.js';
@@ -66,10 +67,10 @@ export function evaluateVehicleServiceSupport(request, technician) {
 /** One bounded read before ranking chargers prevents incompatible providers filling the shortlist. */
 export async function loadChargingServiceProfiles(executor, request, technicians) {
   if (getVehicleServicePolicy(request).service !== 'ev-charging' || !technicians.length) return technicians;
-  const ids = technicians.map(tech => Number(tech.id)).filter(id => Number.isSafeInteger(id) && id > 0);
+  const ids = technicians.map(tech => recordId(tech.id)).filter(id => isRecordId(id));
   if (!ids.length) return technicians;
   const [rows] = await executor.query(`SELECT * FROM technician_services WHERE service_domain = 'ev-charging' AND technician_id IN (${ids.map(() => '?').join(',')})`, ids);
-  return technicians.map(tech => ({ ...tech, service_pricing_rows: (rows || []).filter(row => Number(row.technician_id) === Number(tech.id)) }));
+  return technicians.map(tech => ({ ...tech, service_pricing_rows: (rows || []).filter(row => recordId(row.technician_id) === recordId(tech.id)) }));
 }
 
 export function readPricingMetadata(value) {

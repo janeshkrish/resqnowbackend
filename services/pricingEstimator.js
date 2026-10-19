@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "./serviceNormalization.js";
 import { getPlatformPricingConfig, getServiceMatrixAmount } from "./platformPricing.js";
 import * as db from "../db.js";
@@ -170,8 +171,7 @@ const normalizeVehicleHint = (value) => {
 let technicianServicesLookupEnabled = true;
 
 const toTechnicianId = (value) => {
-  const id = Number(value);
-  return Number.isInteger(id) && id > 0 ? id : null;
+  return recordId(value);
 };
 
 const toStoredVehicleKey = (value) => {

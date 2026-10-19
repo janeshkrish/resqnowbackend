@@ -2,6 +2,7 @@ import "../loadEnv.js";
 
 import { validateEnvironmentOrThrow, logEnvironmentSummary } from "../config/envValidation.js";
 import { closePool, getPool } from "../db.js";
+import { assertUuidSchema } from "../models/persistence.js";
 import {
   recoverRecentPendingDispatchJobs,
   startDispatchQueueWorker,
@@ -32,7 +33,7 @@ async function main() {
   validateEnvironmentOrThrow();
   logEnvironmentSummary();
 
-  await getPool();
+  await assertUuidSchema(await getPool());
   const started = await startDispatchQueueWorker();
   if (!started) {
     throw new Error("Dispatch queue worker failed to start.");

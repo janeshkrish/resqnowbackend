@@ -53,7 +53,7 @@ resqnowbackend/
   config/                 # Environment validation, CORS, URL, OAuth callback helpers
   controllers/            # Admin, analytics, complaints, finance, notifications, requests
   middleware/             # Auth and admin access middleware
-  models/                 # Domain constants and pricing models
+  models/                 # Canonical table schemas, relationships, UUID persistence and migrations
   public/                 # Publicly served downloads and static files
   repositories/           # Data access helpers for marketplace and finance domains
   routes/                 # Express route modules
@@ -63,10 +63,10 @@ resqnowbackend/
   uploads/                # Runtime uploads, should not contain production customer data in git
   utils/                  # Utility helpers
   workers/                # Dispatch worker process
-  db.js                   # MySQL pool, schema assurance, and schema migration helpers
+  db.js                   # MySQL pool and compatibility exports for model bootstraps
   index.js                # Express app bootstrap, middleware, routes, health checks, startup
   loadEnv.js              # Environment file loader
-  schema.sql              # Baseline schema reference
+  schema.sql              # Pointer to the canonical models/schema definitions
 ```
 
 ## Prerequisites
@@ -267,13 +267,14 @@ DISPATCH_WORKER_EMBEDDED=false
 
 ## Database Setup
 
-The backend validates database configuration at startup, opens a MySQL pool, creates/assures required tables, applies schema update helpers, and backfills selected marketplace wallet data.
+The backend groups 42 UUID-based tables under `models/schema/`. At startup it checks for a legacy schema, transfers it to a separate TiDB database during a configured maintenance window, validates the copied rows/relationships, and selects the verified database dynamically. It then assures schema additions and backfills selected marketplace wallet data. The original database is preserved. See [`models/README.md`](models/README.md) for first-deployment settings and restart behavior.
 
 Reference files:
 
-- `schema.sql` for baseline schema.
-- `db.js` for runtime table assurance and schema update helpers.
-- `scripts/migrations/` for dated SQL migrations.
+- [`TIDB_DEPLOYMENT.md`](TIDB_DEPLOYMENT.md) for step-by-step TiDB, GitHub and Render setup, deployment checks and recovery.
+- [`models/README.md`](models/README.md) for the UUID schema, table groups, migration and verification instructions.
+- `models/schema/` for all active table definitions; `models/bootstrap.js` for schema additions, indexes and seeds.
+- `models/migrations/` for automatic deployment transfer, UUID plan/export/apply tooling and archived integer-schema migrations.
 
 Use a dedicated database per environment. Do not point local development at production data.
 
@@ -299,6 +300,8 @@ docker run --env-file .env -p 5000:5000 resqnowbackend
 The Dockerfile currently exposes port `3001`, while the application defaults to `5000`; set `PORT` explicitly or align the Dockerfile before production use.
 
 ### Render-Style Deployment
+
+Push-to-main deployment with automatic TiDB migration is defined in `.github/workflows/deploy-production.yml`. Follow [the one-time GitHub/Render setup](docs/github-tidb-deployment.md) before enabling it. The workflow validates/tests the commit, replaces API/workers with maintenance processes, migrates and verifies all existing data, and releases the commit after schema initialization. Every original OTP record is retained in `otp_requests.migration_history`; the source database is preserved.
 
 Recommended web service command:
 

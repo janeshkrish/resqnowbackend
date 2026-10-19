@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { buildServiceRequestPaymentDetails } from "../services/serviceRequestPaymentService.js";
 import { parseJson, toPositiveInt } from "./utils.js";
@@ -63,7 +64,7 @@ function resolveTowingFleetTypes(serviceRows, rawServiceCosts) {
 
 function mapPricingRow(row) {
   return {
-    id: Number(row.id),
+    id: recordId(row.id),
     serviceDomain: row.service_domain || "",
     vehicleType: row.vehicle_type || "",
     visitCharge: asNumber(row.visit_charge),
@@ -87,7 +88,7 @@ function mapPricingRow(row) {
 
 function mapFleetRow(row) {
   return {
-    id: Number(row.id),
+    id: recordId(row.id),
     vehicleType: row.vehicle_type || "",
     vehicleNumber: row.vehicle_number || "",
     capacity: row.capacity || null,
@@ -100,7 +101,7 @@ function mapFleetRow(row) {
 
 function mapAttachment(row) {
   return {
-    id: Number(row.id),
+    id: recordId(row.id),
     fileName: row.file_name || null,
     url: row.file_url,
     mimeType: row.mime_type || null,
@@ -192,7 +193,7 @@ async function fetchTechnicianAggregate(pool, technicianId) {
   const reviewStats = reviewRows?.[0] || {};
 
   return {
-    technicianId: Number(row.id),
+    technicianId: recordId(row.id),
     businessInfo: {
       shopName: row.name || "",
       proprietorName: row.proprietor_name || "",
@@ -344,10 +345,7 @@ function mapAdminActionToTimeline(row) {
 
 export async function getAdminTechnicianDetails(req, res) {
   try {
-    const technicianId = toPositiveInt(req.params?.id ?? req.params?.technicianId, 0, {
-      min: 1,
-      max: Number.MAX_SAFE_INTEGER,
-    });
+    const technicianId = recordId(req.params?.id ?? req.params?.technicianId);
     if (!technicianId) return res.status(400).json({ error: "Invalid technician id." });
     const pool = await getPool();
     const profile = await fetchTechnicianAggregate(pool, technicianId);
@@ -361,7 +359,7 @@ export async function getAdminTechnicianDetails(req, res) {
 
 export async function getAdminRequestDetails(req, res) {
   try {
-    const requestId = toPositiveInt(req.params?.requestId, 0, { min: 1, max: Number.MAX_SAFE_INTEGER });
+    const requestId = recordId(req.params?.requestId);
     if (!requestId) return res.status(400).json({ error: "Invalid request id." });
     const pool = await getPool();
     const [rows] = await pool.query(
@@ -381,10 +379,10 @@ export async function getAdminRequestDetails(req, res) {
 
     const [paymentRows, invoiceRows, timelineRows, attachmentRows, actionRows] = await Promise.all([
       pool
-        .query("SELECT * FROM payments WHERE service_request_id = ? ORDER BY id DESC LIMIT 1", [requestId])
+        .query("SELECT * FROM payments WHERE service_request_id = ? ORDER BY created_at DESC, id DESC LIMIT 1", [requestId])
         .then(([result]) => result),
       pool
-        .query("SELECT * FROM invoices WHERE service_request_id = ? ORDER BY id DESC LIMIT 1", [requestId])
+        .query("SELECT * FROM invoices WHERE service_request_id = ? ORDER BY created_at DESC, id DESC LIMIT 1", [requestId])
         .then(([result]) => result),
       pool
         .query("SELECT * FROM request_timeline WHERE request_id = ? ORDER BY created_at, id", [requestId])
@@ -396,7 +394,7 @@ export async function getAdminRequestDetails(req, res) {
         .query(
           `SELECT id, admin_id, action_type, metadata, created_at
            FROM admin_actions_log
-           WHERE target_type = 'service_request' AND CAST(target_id AS UNSIGNED) = ?
+           WHERE source = 'action' AND target_type = 'service_request' AND target_id = ?
            ORDER BY created_at, id`,
           [requestId]
         )
@@ -414,11 +412,11 @@ export async function getAdminRequestDetails(req, res) {
     const tax = asNumber(pricingBreakdown.tax ?? pricingBreakdown.gst ?? invoice?.gst) ?? 0;
     const platformMargin =
       asNumber(payment?.platform_fee) ?? Math.max(0, Number((customerFare - technicianEarnings - tax).toFixed(2)));
-    const technician = row.technician_id ? await fetchTechnicianAggregate(pool, Number(row.technician_id)) : null;
+    const technician = row.technician_id ? await fetchTechnicianAggregate(pool, recordId(row.technician_id)) : null;
     const timeline = [
       ...buildDerivedTimeline(row),
       ...(timelineRows || []).map((entry) => ({
-        id: Number(entry.id),
+        id: recordId(entry.id),
         eventType: entry.event_type,
         title: entry.title,
         status: entry.status || null,
@@ -436,7 +434,7 @@ export async function getAdminRequestDetails(req, res) {
 
     return res.json({
       request: {
-        id: Number(row.id),
+        id: recordId(row.id),
         createdTime: row.created_at,
         updatedTime: row.updated_at,
         status: row.status || "pending",
@@ -447,7 +445,7 @@ export async function getAdminRequestDetails(req, res) {
         cancellationReason: row.cancellation_reason || row.closing_reason || null,
       },
       customer: {
-        id: Number(row.user_id),
+        id: recordId(row.user_id),
         name: row.contact_name || row.user_full_name || "",
         phone: row.contact_phone || row.user_phone || "",
         email: row.contact_email || row.user_email || "",
@@ -492,7 +490,7 @@ export async function getAdminRequestDetails(req, res) {
 
 export async function getAdminRequestAssignmentCandidates(req, res) {
   try {
-    const requestId = toPositiveInt(req.params?.requestId, 0, { min: 1, max: Number.MAX_SAFE_INTEGER });
+    const requestId = recordId(req.params?.requestId);
     if (!requestId) return res.status(400).json({ error: "Invalid request id." });
     const search = String(req.query?.search || "").trim().toLowerCase();
     const limit = toPositiveInt(req.query?.limit, 50, { min: 1, max: 100 });
@@ -513,7 +511,7 @@ export async function getAdminRequestAssignmentCandidates(req, res) {
     );
     if (!technicians.length) return res.json({ requestId, data: [] });
 
-    const ids = technicians.map((row) => Number(row.id));
+    const ids = technicians.map((row) => recordId(row.id));
     const placeholders = ids.map(() => "?").join(", ");
     const [serviceRows, fleetRows] = await Promise.all([
       pool
@@ -537,13 +535,13 @@ export async function getAdminRequestAssignmentCandidates(req, res) {
     const servicesByTechnician = new Map();
     const fleetByTechnician = new Map();
     for (const service of serviceRows) {
-      const key = Number(service.technician_id);
+      const key = recordId(service.technician_id);
       const current = servicesByTechnician.get(key) || [];
       current.push(service.service_domain);
       servicesByTechnician.set(key, uniqueStrings(current));
     }
     for (const fleet of fleetRows) {
-      const key = Number(fleet.technician_id);
+      const key = recordId(fleet.technician_id);
       const current = fleetByTechnician.get(key) || [];
       current.push({
         vehicleType: fleet.vehicle_type || "",
@@ -561,9 +559,9 @@ export async function getAdminRequestAssignmentCandidates(req, res) {
         const services = uniqueStrings([
           row.service_type,
           ...(Array.isArray(specialties) ? specialties : []),
-          ...(servicesByTechnician.get(Number(row.id)) || []),
+          ...(servicesByTechnician.get(recordId(row.id)) || []),
         ]);
-        const fleet = fleetByTechnician.get(Number(row.id)) || [];
+        const fleet = fleetByTechnician.get(recordId(row.id)) || [];
         const searchable = [
           row.name,
           row.phone,
@@ -577,7 +575,7 @@ export async function getAdminRequestAssignmentCandidates(req, res) {
         const technicianLat = row.current_lat ?? row.latitude;
         const technicianLng = row.current_lng ?? row.longitude;
         return {
-          technicianId: Number(row.id),
+          technicianId: recordId(row.id),
           name: row.name || "",
           phone: row.phone || "",
           profileImage: parseJson(row.documents, {})?.profile_photo || "",

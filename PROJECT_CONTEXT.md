@@ -1,6 +1,6 @@
 # ResQNow Project Context
 
-Canonical architecture context for developers and AI assistants. Repository evidence was reviewed on 2026-09-30 at commit `c241cf5` on branch `suthan`. This file records the system as found; it does not describe unimplemented changes.
+Canonical architecture context for developers and AI assistants. The historical review below was recorded on 2026-09-30 at commit `c241cf5` on branch `suthan`. Database update, 2026-10-15: all 42 active table definitions/bootstrap code live under `models/`, IDs and account references use UUIDs, notes/admin audit histories are consolidated, and OTP state plus every original historical OTP record share `otp_requests`. Startup supports a verified maintenance transfer to a separate TiDB database. A push-to-main GitHub workflow automates maintenance, transfer and Render release after one-time configuration; see [deployment setup](docs/github-tidb-deployment.md) and [models/README.md](models/README.md). Historical database descriptions below are superseded. No hosted migration or GitHub/Render deployment has been performed; configured TiDB access was denied.
 
 Evidence labels used below:
 

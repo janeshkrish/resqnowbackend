@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import * as mail from "./mailer.js";
 import { socketService } from "./socket.js";
@@ -103,8 +104,8 @@ function isMonitorEnabled() {
 }
 
 async function fetchTechnicianActivitySnapshot(pool, technicianId) {
-  const parsedTechnicianId = Number(technicianId);
-  if (!Number.isInteger(parsedTechnicianId) || parsedTechnicianId <= 0) return null;
+  const parsedTechnicianId = recordId(technicianId);
+  if (!isRecordId(parsedTechnicianId)) return null;
 
   const [rows] = await pool.query(
     `SELECT
@@ -121,10 +122,8 @@ async function fetchTechnicianActivitySnapshot(pool, technicianId) {
      LEFT JOIN (
        SELECT open_ref.technician_id, s.login_at
        FROM (
-         SELECT technician_id, MAX(id) AS session_id
-         FROM technician_login_sessions
-         WHERE logout_at IS NULL
-         GROUP BY technician_id
+         SELECT technician_id, id AS session_id FROM (SELECT technician_id, id, ROW_NUMBER() OVER (PARTITION BY technician_id ORDER BY login_at DESC, id DESC) AS uuid_rank FROM technician_login_sessions WHERE logout_at IS NULL
+         ) latest WHERE uuid_rank = 1
        ) open_ref
        JOIN technician_login_sessions s ON s.id = open_ref.session_id
      ) open_session ON open_session.technician_id = t.id
@@ -173,7 +172,7 @@ async function fetchTechnicianActivitySnapshot(pool, technicianId) {
       : null;
 
   return {
-    technicianId: Number(row.technician_id),
+    technicianId: recordId(row.technician_id),
     isLoggedIn: Boolean(row.is_logged_in),
     lastLoginAt: toIsoOrNull(row.last_login_at),
     lastLogoutAt: toIsoOrNull(row.last_logout_at),
@@ -188,8 +187,8 @@ async function fetchTechnicianActivitySnapshot(pool, technicianId) {
 }
 
 async function broadcastActivityEvent({ eventType, technicianId, reason = null, source = null, includeSnapshot = false }) {
-  const parsedTechnicianId = Number(technicianId);
-  if (!Number.isInteger(parsedTechnicianId) || parsedTechnicianId <= 0) return null;
+  const parsedTechnicianId = recordId(technicianId);
+  if (!isRecordId(parsedTechnicianId)) return null;
 
   let snapshot = null;
   if (includeSnapshot) {
@@ -219,8 +218,8 @@ export async function getTechnicianActivitySnapshot(technicianId) {
 }
 
 export async function markTechnicianLogin({ technicianId, source = "unknown", metadata = null }) {
-  const parsedTechnicianId = Number(technicianId);
-  if (!Number.isInteger(parsedTechnicianId) || parsedTechnicianId <= 0) return null;
+  const parsedTechnicianId = recordId(technicianId);
+  if (!isRecordId(parsedTechnicianId)) return null;
 
   const pool = await getPool();
   const conn = await pool.getConnection();
@@ -281,8 +280,8 @@ export async function markTechnicianHeartbeat({
   metadata = null,
   createSessionIfMissing = true,
 }) {
-  const parsedTechnicianId = Number(technicianId);
-  if (!Number.isInteger(parsedTechnicianId) || parsedTechnicianId <= 0) return null;
+  const parsedTechnicianId = recordId(technicianId);
+  if (!isRecordId(parsedTechnicianId)) return null;
 
   const normalizedSource = normalizeSource(source);
   const pool = await getPool();
@@ -379,8 +378,8 @@ export async function markTechnicianHeartbeat({
 }
 
 export async function markTechnicianLogout({ technicianId, reason = "logout", source = "unknown" }) {
-  const parsedTechnicianId = Number(technicianId);
-  if (!Number.isInteger(parsedTechnicianId) || parsedTechnicianId <= 0) return null;
+  const parsedTechnicianId = recordId(technicianId);
+  if (!isRecordId(parsedTechnicianId)) return null;
 
   const normalizedReason = String(reason || "logout").trim().slice(0, 64) || "logout";
   const normalizedSource = normalizeSource(source);
@@ -451,13 +450,13 @@ async function expireIdleSessions(pool) {
   }
 
   const sessionIds = rows
-    .map((row) => Number(row.id))
-    .filter((id) => Number.isInteger(id) && id > 0);
+    .map((row) => recordId(row.id))
+    .filter((id) => isRecordId(id));
   const technicianIds = Array.from(
     new Set(
       rows
-        .map((row) => Number(row.technician_id))
-        .filter((id) => Number.isInteger(id) && id > 0)
+        .map((row) => recordId(row.technician_id))
+        .filter((id) => isRecordId(id))
     )
   );
 
@@ -523,8 +522,8 @@ async function dispatchTechnicianLoginReminder(
     adminId = null,
   }
 ) {
-  const parsedTechnicianId = Number(technicianId);
-  if (!Number.isInteger(parsedTechnicianId) || parsedTechnicianId <= 0) {
+  const parsedTechnicianId = recordId(technicianId);
+  if (!isRecordId(parsedTechnicianId)) {
     throw new Error("Invalid technicianId for login reminder.");
   }
 
@@ -626,8 +625,8 @@ async function sendInactivityLoginReminders(pool) {
 
   let sentCount = 0;
   for (const row of rows) {
-    const technicianId = Number(row.id);
-    if (!Number.isInteger(technicianId) || technicianId <= 0) continue;
+    const technicianId = recordId(row.id);
+    if (!isRecordId(technicianId)) continue;
 
     const message =
       `You have been inactive for more than ${Math.round(inactivityMinutes / 60)} hours. ` +
@@ -654,8 +653,8 @@ export async function sendManualTechnicianLoginReminder({
   adminId = null,
   message = null,
 }) {
-  const parsedTechnicianId = Number(technicianId);
-  if (!Number.isInteger(parsedTechnicianId) || parsedTechnicianId <= 0) {
+  const parsedTechnicianId = recordId(technicianId);
+  if (!isRecordId(parsedTechnicianId)) {
     const error = new Error("technicianId must be a positive integer.");
     error.statusCode = 400;
     throw error;

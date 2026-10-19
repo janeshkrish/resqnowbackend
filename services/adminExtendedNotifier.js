@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { socketService } from "./socket.js";
 import { getPool } from "../db.js";
 import { notificationService } from "./notificationService.js";
@@ -7,8 +8,8 @@ function adminExtendedBuildPayload({ type, adminId, title, message, metadata = n
     ? Array.from(
       new Set(
         technicianIds
-          .map((id) => Number(id))
-          .filter((id) => Number.isInteger(id) && id > 0)
+          .map((id) => recordId(id))
+          .filter((id) => isRecordId(id))
       )
     )
     : [];
@@ -16,7 +17,7 @@ function adminExtendedBuildPayload({ type, adminId, title, message, metadata = n
   const isEmergency = type === "emergencyMessage";
   return {
     type,
-    adminId: String(adminId || "admin"),
+    adminId: adminId || null,
     title: String(title || "Admin Broadcast"),
     message: String(message || ""),
     technicianIds: resolvedTechnicianIds,
@@ -33,8 +34,8 @@ async function adminExtendedResolveTechnicianIds(technicianIds) {
     ? Array.from(
       new Set(
         technicianIds
-          .map((id) => Number(id))
-          .filter((id) => Number.isInteger(id) && id > 0)
+          .map((id) => recordId(id))
+          .filter((id) => isRecordId(id))
       )
     )
     : [];
@@ -46,8 +47,8 @@ async function adminExtendedResolveTechnicianIds(technicianIds) {
   const pool = await getPool();
   const [rows] = await pool.query("SELECT id FROM technicians");
   return rows
-    .map((row) => Number(row.id))
-    .filter((id) => Number.isInteger(id) && id > 0);
+    .map((row) => recordId(row.id))
+    .filter((id) => isRecordId(id));
 }
 
 function adminExtendedMapEventByType(type) {

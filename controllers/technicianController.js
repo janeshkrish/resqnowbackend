@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { ensureAdminExtendedSchema } from "../services/adminExtendedSchema.js";
 import { sendManualTechnicianLoginReminder } from "../services/technicianActivityService.js";
@@ -135,23 +136,19 @@ export async function getTechnicians(req, res) {
        LEFT JOIN (
          SELECT tan.technician_id,
                 JSON_EXTRACT(tan.metadata, '$.isVisible') AS is_visible
-         FROM technician_admin_notes tan
+         FROM account_notes tan
          INNER JOIN (
-           SELECT technician_id, MAX(id) AS max_id
-           FROM technician_admin_notes
-           WHERE note_type = 'visibility'
-           GROUP BY technician_id
+           SELECT technician_id, id AS max_id FROM (SELECT technician_id, id, ROW_NUMBER() OVER (PARTITION BY technician_id ORDER BY created_at DESC, id DESC) AS uuid_rank FROM account_notes WHERE note_type = 'visibility'
+           ) ranked_notes WHERE uuid_rank = 1
          ) latest ON latest.max_id = tan.id
        ) v ON v.technician_id = t.id
        LEFT JOIN (
          SELECT tan.technician_id,
                 tan.note_text
-         FROM technician_admin_notes tan
+         FROM account_notes tan
          INNER JOIN (
-           SELECT technician_id, MAX(id) AS max_id
-           FROM technician_admin_notes
-           WHERE note_type <> 'visibility'
-           GROUP BY technician_id
+           SELECT technician_id, id AS max_id FROM (SELECT technician_id, id, ROW_NUMBER() OVER (PARTITION BY technician_id ORDER BY created_at DESC, id DESC) AS uuid_rank FROM account_notes WHERE note_type <> 'visibility'
+           ) ranked_notes WHERE uuid_rank = 1
          ) latest ON latest.max_id = tan.id
        ) n ON n.technician_id = t.id
        ${whereSql}
@@ -193,12 +190,10 @@ export async function getTechnicians(req, res) {
        LEFT JOIN (
          SELECT tan.technician_id,
                 JSON_EXTRACT(tan.metadata, '$.isVisible') AS is_visible
-         FROM technician_admin_notes tan
+         FROM account_notes tan
          INNER JOIN (
-           SELECT technician_id, MAX(id) AS max_id
-           FROM technician_admin_notes
-           WHERE note_type = 'visibility'
-           GROUP BY technician_id
+           SELECT technician_id, id AS max_id FROM (SELECT technician_id, id, ROW_NUMBER() OVER (PARTITION BY technician_id ORDER BY created_at DESC, id DESC) AS uuid_rank FROM account_notes WHERE note_type = 'visibility'
+           ) ranked_notes WHERE uuid_rank = 1
          ) latest ON latest.max_id = tan.id
        ) v ON v.technician_id = t.id
        ${whereSql}`,
@@ -261,7 +256,7 @@ export async function toggleTechnicianVisibility(req, res) {
   try {
     await ensureAdminExtendedSchema();
 
-    const technicianId = toPositiveInt(req.body?.technicianId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const technicianId = recordId(req.body?.technicianId);
     const requestedVisibility = req.body?.isVisible;
     const note = String(req.body?.note || "").trim();
 
@@ -283,9 +278,9 @@ export async function toggleTechnicianVisibility(req, res) {
 
     const [visibilityRows] = await pool.query(
       `SELECT metadata
-       FROM technician_admin_notes
+       FROM account_notes
        WHERE technician_id = ? AND note_type = 'visibility'
-       ORDER BY id DESC
+       ORDER BY created_at DESC, id DESC
        LIMIT 1`,
       [technicianId]
     );
@@ -304,7 +299,7 @@ export async function toggleTechnicianVisibility(req, res) {
     };
 
     await pool.execute(
-      `INSERT INTO technician_admin_notes (technician_id, admin_id, note_type, note_text, metadata)
+      `INSERT INTO account_notes (technician_id, admin_id, note_type, note_text, metadata)
        VALUES (?, ?, 'visibility', ?, ?)`,
       [
         technicianId,
@@ -332,7 +327,7 @@ export async function addTechnicianNote(req, res) {
   try {
     await ensureAdminExtendedSchema();
 
-    const technicianId = toPositiveInt(req.body?.technicianId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const technicianId = recordId(req.body?.technicianId);
     const note = String(req.body?.note || "").trim();
 
     if (!technicianId || !note) {
@@ -352,7 +347,7 @@ export async function addTechnicianNote(req, res) {
     }
 
     const [result] = await pool.execute(
-      `INSERT INTO technician_admin_notes (technician_id, admin_id, note_type, note_text, metadata)
+      `INSERT INTO account_notes (technician_id, admin_id, note_type, note_text, metadata)
        VALUES (?, ?, 'note', ?, NULL)`,
       [technicianId, resolveAdminId(req), note]
     );
@@ -377,7 +372,7 @@ export async function sendTechnicianLoginReminder(req, res) {
   try {
     await ensureAdminExtendedSchema();
 
-    const technicianId = toPositiveInt(req.body?.technicianId, 0, { min: 1, max: Number.MAX_SAFE_INTEGER });
+    const technicianId = recordId(req.body?.technicianId);
     const message = String(req.body?.message || "").trim();
 
     if (!technicianId) {
@@ -413,7 +408,7 @@ export async function getTechnicianLoginActivity(req, res) {
     await ensureAdminExtendedSchema();
     res.set("Cache-Control", "no-store");
 
-    const technicianId = toPositiveInt(req.params?.technicianId, 0, { min: 1, max: Number.MAX_SAFE_INTEGER });
+    const technicianId = recordId(req.params?.technicianId);
     const sessionLimit = toPositiveInt(req.query?.sessionLimit, 50, { min: 1, max: 500 });
     const alertLimit = toPositiveInt(req.query?.alertLimit, 50, { min: 1, max: 500 });
 
@@ -488,12 +483,10 @@ export async function getTechnicianLoginActivity(req, res) {
        LEFT JOIN (
          SELECT tan.technician_id,
                 JSON_EXTRACT(tan.metadata, '$.isVisible') AS is_visible
-         FROM technician_admin_notes tan
+         FROM account_notes tan
          INNER JOIN (
-           SELECT technician_id, MAX(id) AS max_id
-           FROM technician_admin_notes
-           WHERE note_type = 'visibility'
-           GROUP BY technician_id
+           SELECT technician_id, id AS max_id FROM (SELECT technician_id, id, ROW_NUMBER() OVER (PARTITION BY technician_id ORDER BY created_at DESC, id DESC) AS uuid_rank FROM account_notes WHERE note_type = 'visibility'
+           ) ranked_notes WHERE uuid_rank = 1
          ) latest ON latest.max_id = tan.id
        ) v ON v.technician_id = t.id
        WHERE t.id = ?
@@ -566,7 +559,7 @@ export async function getTechnicianLoginActivity(req, res) {
     return res.json({
       generatedAt: new Date().toISOString(),
       technician: {
-        technicianId: Number(technician.technician_id),
+        technicianId: recordId(technician.technician_id),
         name: technician.name || "Technician",
         email: technician.email || "",
         approvalStatus: String(technician.approval_status || "").trim().toLowerCase() || "pending",
@@ -595,7 +588,7 @@ export async function getTechnicianLoginActivity(req, res) {
         const durationSeconds = baseDurationSeconds > 0 ? baseDurationSeconds : derivedSeconds;
 
         return {
-          sessionId: Number(row.id),
+          sessionId: recordId(row.id),
           loginAt: row.login_at || null,
           lastSeenAt: row.last_seen_at || null,
           logoutAt: row.logout_at || null,
@@ -610,7 +603,7 @@ export async function getTechnicianLoginActivity(req, res) {
         };
       }),
       alerts: (alertRows || []).map((row) => ({
-        alertId: Number(row.id),
+        alertId: recordId(row.id),
         alertType: row.alert_type || "unknown",
         status: row.status || "sent",
         message: row.message || "",

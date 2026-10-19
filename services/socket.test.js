@@ -48,6 +48,29 @@ test('rejects a missing or malformed socket token', () => {
   }
 });
 
+test('blocks socket connections during database initialization and accepts a retry after readiness', async (t) => {
+  const server = createServer();
+  const service = new SocketService();
+  let ready = false;
+  service.init(server, { isReady: () => ready });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const client = createClient(`http://127.0.0.1:${server.address().port}`, {
+    autoConnect: false, reconnection: false, transports: ['websocket'], auth: { token: token({ id: '9', role: 'user' }) },
+  });
+  t.after(async () => {
+    client.disconnect();
+    await new Promise(resolve => service.io.close(resolve));
+  });
+  const failure = waitForConnection(client);
+  client.connect();
+  await assert.rejects(failure, /Database initialization/);
+  ready = true;
+  const success = waitForConnection(client);
+  client.connect();
+  await success;
+  assert.equal(client.connected, true);
+});
+
 test('authorises request subscription only for the request owner or an admin', async () => {
   const pool = {
     async execute(_sql, [requestId, userId]) {

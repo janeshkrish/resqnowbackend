@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { buildPagination, likeFilter, resolveAdminId, toPositiveInt } from "./utils.js";
 import { socketService } from "../services/socket.js";
@@ -307,10 +308,10 @@ export async function getRequests(req, res) {
        LEFT JOIN users u ON u.id = sr.user_id
        LEFT JOIN technicians t ON t.id = sr.technician_id
        LEFT JOIN (
-         SELECT CAST(target_id AS UNSIGNED) AS request_id
+         SELECT target_id AS request_id
          FROM admin_actions_log
-         WHERE action_type IN ('markHighPriority', 'mark_high_priority')
-         GROUP BY CAST(target_id AS UNSIGNED)
+         WHERE source = 'action' AND target_type = 'service_request' AND action_type IN ('markHighPriority', 'mark_high_priority')
+         GROUP BY target_id
        ) hp ON hp.request_id = sr.id
        ${whereSql}
        ORDER BY sr.created_at DESC
@@ -324,10 +325,10 @@ export async function getRequests(req, res) {
        LEFT JOIN users u ON u.id = sr.user_id
        LEFT JOIN technicians t ON t.id = sr.technician_id
        LEFT JOIN (
-         SELECT CAST(target_id AS UNSIGNED) AS request_id
+         SELECT target_id AS request_id
          FROM admin_actions_log
-         WHERE action_type IN ('markHighPriority', 'mark_high_priority')
-         GROUP BY CAST(target_id AS UNSIGNED)
+         WHERE source = 'action' AND target_type = 'service_request' AND action_type IN ('markHighPriority', 'mark_high_priority')
+         GROUP BY target_id
        ) hp ON hp.request_id = sr.id
        ${whereSql}`,
       values
@@ -357,11 +358,8 @@ export async function getRequests(req, res) {
 
 export async function assignRequest(req, res, { getPool: resolvePool = getPool } = {}) {
   try {
-    const requestId = toPositiveInt(req.params?.requestId ?? req.body?.requestId, 0, {
-      min: 0,
-      max: Number.MAX_SAFE_INTEGER,
-    });
-    const technicianId = toPositiveInt(req.body?.technicianId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const requestId = recordId(req.params?.requestId ?? req.body?.requestId);
+    const technicianId = recordId(req.body?.technicianId);
 
     if (!requestId || !technicianId) {
       return res.status(400).json({ error: "requestId and technicianId are required." });
@@ -397,7 +395,7 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
       if (!requestRow) throw new JobOwnershipError("not_found", "Request not found.");
       if (isTerminalJobStatus(requestRow.status)) throw new JobOwnershipError("job_closed", "This request is already closed.");
       previousTechnicianId = requestRow.technician_id;
-      if (hasAcceptedRequestPricing(requestRow) && Number(previousTechnicianId) === technicianId) {
+      if (hasAcceptedRequestPricing(requestRow) && recordId(previousTechnicianId) === technicianId) {
         await conn.commit();
         return res.json({ success: true, requestId, technicianId, idempotent: true, message: "This technician already accepted the request." });
       }
@@ -405,9 +403,9 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
         throw new JobOwnershipError("job_already_accepted", "The accepted technician and agreed price cannot be replaced through assignment.");
       }
       // Lock both capacity rows in ID order when replacing an owner.
-      const technicianIds = [...new Set([technicianId, Number(requestRow.technician_id)].filter(Boolean))].sort((a, b) => a - b);
+      const technicianIds = [...new Set([technicianId, recordId(requestRow.technician_id)].filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
       await conn.query(`SELECT id FROM technicians WHERE id IN (${technicianIds.map(() => "?").join(",")}) ORDER BY id FOR UPDATE`, technicianIds);
-      await markTechnicianReserved(conn, technicianId, requestId, { alreadyOwned: Number(requestRow.technician_id) === technicianId });
+      await markTechnicianReserved(conn, technicianId, requestId, { alreadyOwned: recordId(requestRow.technician_id) === technicianId });
       await conn.execute(
         `UPDATE service_requests
          SET technician_id = ?,
@@ -421,7 +419,7 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
       );
       assignmentOffer = await createPricedDispatchOffer(conn, requestRow, { ...technicianRows[0], id: technicianId },
         { connection: conn, expiresAt: null });
-      if (requestRow.technician_id && Number(requestRow.technician_id) !== technicianId) {
+      if (requestRow.technician_id && recordId(requestRow.technician_id) !== technicianId) {
         await releaseTechnicianAvailability(conn, requestRow.technician_id, requestId);
       }
       await appendRequestTimeline({
@@ -483,7 +481,7 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
       assignedByAdmin: true,
     };
     const technicianAssignmentPayload = { ...assignmentPayload, ...dispatchOfferPricingFields(assignmentOffer) };
-    if (previousTechnicianId && Number(previousTechnicianId) !== technicianId) {
+    if (previousTechnicianId && recordId(previousTechnicianId) !== technicianId) {
       socketService.notifyTechnician(previousTechnicianId, "job:revoked", assignmentPayload);
     }
     socketService.notifyTechnician(technicianId, "job:assigned", technicianAssignmentPayload);
@@ -507,10 +505,7 @@ export async function assignRequest(req, res, { getPool: resolvePool = getPool }
 
 export async function escalateRequest(req, res) {
   try {
-    const requestId = toPositiveInt(req.params?.requestId ?? req.body?.requestId, 0, {
-      min: 0,
-      max: Number.MAX_SAFE_INTEGER,
-    });
+    const requestId = recordId(req.params?.requestId ?? req.body?.requestId);
     const reason = String(req.body?.reason || req.body?.note || "").trim();
     const radiusKm = toPositiveInt(req.body?.radiusKm, 35, { min: 5, max: 200 });
 
@@ -566,7 +561,7 @@ export async function escalateRequest(req, res) {
 
 export async function markHighPriority(req, res) {
   try {
-    const requestId = toPositiveInt(req.body?.requestId, 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+    const requestId = recordId(req.body?.requestId);
     const note = String(req.body?.note || "").trim();
 
     if (!requestId) {
@@ -611,11 +606,7 @@ export async function markHighPriority(req, res) {
 
 export async function closeRequest(req, res) {
   try {
-    const requestId = toPositiveInt(
-      req.params?.requestId ?? req.body?.requestId ?? req.body?.id ?? req.body?.request_id,
-      0,
-      { min: 0, max: Number.MAX_SAFE_INTEGER }
-    );
+    const requestId = recordId(req.params?.requestId ?? req.body?.requestId ?? req.body?.id ?? req.body?.request_id);
     const reason = String(req.body?.reason || req.body?.note || "").trim();
     const requestedStatus = String(req.body?.status || "cancelled").trim().toLowerCase();
 
@@ -715,10 +706,7 @@ export async function closeRequest(req, res) {
 
 export async function overrideRequestPricing(req, res, { getPool: resolvePool = getPool } = {}) {
   try {
-    const requestId = toPositiveInt(req.params?.requestId ?? req.body?.requestId ?? req.body?.request_id, 0, {
-      min: 1,
-      max: Number.MAX_SAFE_INTEGER,
-    });
+    const requestId = recordId(req.params?.requestId ?? req.body?.requestId ?? req.body?.request_id);
     const baseAmount = toPositiveMoney(req.body?.baseAmount ?? req.body?.amount);
     const finalPrice = toPositiveMoney(req.body?.finalPrice ?? req.body?.final_price ?? req.body?.estimatedPrice);
     const reason = String(req.body?.reason || req.body?.note || "").trim();

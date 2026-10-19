@@ -1,3 +1,5 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { Router } from "express";
 import { requireAdminExtendedAccess } from "../middleware/adminExtendedAccess.js";
 import { adminExtendedAuditLogger } from "../middleware/adminExtendedAuditLogger.js";
@@ -12,7 +14,7 @@ import {
 const router = Router();
 
 function adminExtendedResolveAdminId(req) {
-  return String(req.adminExtended?.adminId || req.adminEmail || req.admin?.email || "admin");
+  return adminActorId(req);
 }
 
 router.use(requireAdminExtendedAccess);
@@ -58,7 +60,7 @@ router.post("/notifications/technician-broadcast", async (req, res) => {
   try {
     const adminId = adminExtendedResolveAdminId(req);
     const technicianIds = Array.isArray(req.body?.technicianIds)
-      ? req.body.technicianIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+      ? req.body.technicianIds.map((id) => recordId(id)).filter((id) => isRecordId(id))
       : null;
 
     const payload = await adminExtendedTechnicianBroadcast({

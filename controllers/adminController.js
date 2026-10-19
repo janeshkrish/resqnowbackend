@@ -95,7 +95,8 @@ export async function getAdminAuditLogs(req, res) {
     const [rows] = await pool.query(
       `SELECT id, admin_id, action_type, target_type, target_id, metadata, created_at
        FROM admin_actions_log
-       ORDER BY id DESC
+       WHERE source = 'action'
+       ORDER BY created_at DESC, id DESC
        LIMIT ?`,
       [limit]
     );

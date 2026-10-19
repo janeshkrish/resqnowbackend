@@ -7,6 +7,7 @@ import EmailTemplate from "../models/EmailTemplate.js";
 
 // An admin fills in the app's own sign-up form: the technician must be saved exactly as an app sign-up is.
 process.env.DB_HOST = "simulated.invalid";
+process.env.DB_MIGRATION_MODE = "off";
 process.env.DB_USER = "simulated";
 process.env.DB_PASSWORD = "simulated";
 process.env.DB_NAME = "simulated";
@@ -21,9 +22,9 @@ async function query(sql, params = []) {
   if (/FROM email_templates/.test(sql)) return [[{ enabled: 0, is_enabled: 0 }]];
   if (/FROM technician_fleet_vehicles/.test(sql)) return [[]];
   if (/FROM technicians/.test(sql)) {
-    if (/WHERE email = \? AND id <> \?/.test(sql)) return [state.technicians.filter((row) => row.email === params[0] && row.id !== Number(params[1]))];
+    if (/WHERE email = \? AND id <> \?/.test(sql)) return [state.technicians.filter((row) => row.email === params[0] && String(row.id) !== String(params[1]))];
     if (/WHERE email =/.test(sql)) return [state.technicians.filter((row) => row.email === params[0])];
-    if (/WHERE id =/.test(sql)) return [clone(state.technicians.filter((row) => row.id === Number(params[0])))];
+    if (/WHERE id =/.test(sql)) return [clone(state.technicians.filter((row) => String(row.id) === String(params[0])))];
     return [clone(state.technicians)];
   }
   throw new Error(`Unexpected query: ${sql}`);
@@ -34,17 +35,17 @@ async function execute(sql, params = []) {
   state.executed.push(sql.replace(/\s+/g, " ").trim());
   if (/INSERT INTO technicians\s*\(/.test(sql)) {
     const columns = sql.match(/INSERT INTO technicians\s*\(([^)]*)\)/s)[1].split(",").map((column) => column.trim());
-    const id = 7 + state.technicians.length;
+    const id = params[0];
     state.technicians.push({ id, ...Object.fromEntries(columns.map((column, index) => [column, params[index]])) });
-    return [{ insertId: id }];
+    return [{ insertId: 0, affectedRows: 1 }];
   }
   if (/UPDATE technicians SET status = 'approved'/.test(sql)) {
-    const row = state.technicians.find((item) => item.id === Number(params[0]));
+    const row = state.technicians.find((item) => String(item.id) === String(params[0]));
     Object.assign(row, { status: "approved", is_active: true, is_available: true });
     return [{ affectedRows: 1 }];
   }
   if (/UPDATE technicians SET/.test(sql)) {
-    const row = state.technicians.find((item) => item.id === Number(params.at(-1)));
+    const row = state.technicians.find((item) => String(item.id) === String(params.at(-1)));
     const fields = [...sql.matchAll(/([a-z_]+)\s*=\s*\?/g)].map((match) => match[1]);
     fields.forEach((field, index) => { row[field] = params[index]; });
     state.updatedFields = fields;
@@ -132,7 +133,7 @@ test("Approve now runs the real approval: approved, on duty-ready, audited and a
   assert.equal(res.body.status, "approved");
   assert.equal(state.technicians[0].status, "approved");
   assert.equal(state.technicians[0].is_active, true);
-  assert.ok(state.executed.some((sql) => /INSERT INTO technician_approval_audit/.test(sql)));
+  assert.ok(state.executed.some((sql) => /INSERT INTO admin_actions_log/.test(sql)));
   assert.ok(!state.executed.some((sql) => /New Technician Application/.test(sql)));
 });
 

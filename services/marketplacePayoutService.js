@@ -1,3 +1,5 @@
+import { recordId } from "../models/identifiers.js";
+import { boundedIdempotencyKey } from "../utils/paymentReference.js";
 import crypto from "crypto";
 import { getPool } from "../db.js";
 import {
@@ -45,15 +47,15 @@ function buildPayoutIdempotencyKey({
   amount = null,
   externalReference = "",
 }) {
-  if (idempotencyKey) return String(idempotencyKey).trim();
+  if (idempotencyKey) return boundedIdempotencyKey(idempotencyKey);
   if (paymentId) return `payment-payout:${paymentId}`;
-  return `wallet-payout:${technicianId}:${amount == null ? "full" : roundMoney(amount)}:${String(externalReference || "").trim() || "manual"}`;
+  return boundedIdempotencyKey(`wallet-payout:${technicianId}:${amount == null ? "full" : roundMoney(amount)}:${String(externalReference || "").trim() || "manual"}`);
 }
 
 function mapWalletBalanceRow(row) {
   return {
-    walletId: Number(row.wallet_id || 0),
-    technicianId: Number(row.technician_id),
+    walletId: recordId(row.wallet_id || 0),
+    technicianId: recordId(row.technician_id),
     technicianName: row.technician_name,
     technicianEmail: row.technician_email,
     upiId: row.upi_id || null,
@@ -90,7 +92,7 @@ export async function settlePaymentToTechnician({
         success: true,
         alreadyCompleted: true,
         paymentId,
-        payoutId: Number(existingPayout.id),
+        payoutId: recordId(existingPayout.id),
         idempotencyReused: true,
       };
     }
@@ -233,12 +235,12 @@ export async function createTechnicianWalletPayout({
     if (existingPayout) {
       return {
         success: true,
-        payoutId: Number(existingPayout.id),
-        technicianId: Number(existingPayout.technician_id),
+        payoutId: recordId(existingPayout.id),
+        technicianId: recordId(existingPayout.technician_id),
         amount: roundMoney(existingPayout.amount || 0),
         alreadyProcessed: true,
         idempotencyReused: true,
-        wallet: await getTechnicianWalletSummary(conn, Number(existingPayout.technician_id)),
+        wallet: await getTechnicianWalletSummary(conn, recordId(existingPayout.technician_id)),
       };
     }
 
@@ -422,11 +424,11 @@ export async function getPayoutHistory({
 
   return {
     data: (rows || []).map((row) => ({
-      id: Number(row.id),
+      id: recordId(row.id),
       payoutReference: row.payout_reference,
       idempotencyKey: row.idempotency_key || null,
-      withdrawalRequestId: row.withdrawal_request_id != null ? Number(row.withdrawal_request_id) : null,
-      technicianId: Number(row.technician_id),
+      withdrawalRequestId: row.withdrawal_request_id != null ? recordId(row.withdrawal_request_id) : null,
+      technicianId: recordId(row.technician_id),
       technicianName: row.technician_name,
       upiId: row.upi_id || null,
       upiName: row.upi_name || row.destination_name || null,
@@ -455,8 +457,8 @@ export async function getEligiblePayoutQueue({ limit = 500 } = {}) {
   const pool = await getPool();
   const rows = await listEligibleWallets(pool, { limit });
   return rows.map((row) => ({
-    walletId: Number(row.wallet_id),
-    technicianId: Number(row.technician_id),
+    walletId: recordId(row.wallet_id),
+    technicianId: recordId(row.technician_id),
     technicianName: row.technician_name,
     technicianEmail: row.technician_email,
     upiId: row.upi_id || null,

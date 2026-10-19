@@ -1,3 +1,4 @@
+import { recordId } from "../models/identifiers.js";
 import { requiredTowTruckType, evaluateTowTruckCapability } from "./towTruckCapability.js";
 import { getVehicleServicePolicy, evaluateVehicleServiceSupport, loadChargingServiceProfiles } from './vehicleServiceCompatibility.js';
 
@@ -35,8 +36,7 @@ function normalizeStatus(status) {
 }
 
 function toPositiveInt(value) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  return recordId(value);
 }
 
 export function isActiveJobStatus(status) {
@@ -78,14 +78,14 @@ export async function createRequestWithReservation(pool, sql, values, technician
 // Call only on the connection used for the assignment transaction. The technician
 // row is the serialization point for all requests competing for this capacity.
 export async function markTechnicianReserved(connOrPool, technicianId, requestId, { alreadyOwned = false, request = null } = {}) {
-  const techId = toPositiveInt(technicianId);
-  const jobId = toPositiveInt(requestId);
+  const techId = recordId(technicianId);
+  const jobId = recordId(requestId);
   if (!techId || !jobId) return false;
 
   const [rows] = await connOrPool.query("SELECT * FROM technicians WHERE id = ? FOR UPDATE", [techId]);
   const technician = rows[0];
   if (!technician) throw new JobOwnershipError("technician_not_found", "Technician not found.");
-  const pointer = toPositiveInt(technician.current_job_id);
+  const pointer = recordId(technician.current_job_id);
   if (pointer && pointer !== jobId) {
     throw new JobOwnershipError("technician_busy", "You already have another active job.");
   }
@@ -108,7 +108,7 @@ export async function markTechnicianReserved(connOrPool, technicianId, requestId
   // Every assignment path shares this gate, including direct bookings and admin assignment.
   const job = request || (await connOrPool.query("SELECT * FROM service_requests WHERE id = ? LIMIT 1", [jobId]))[0][0];
   const requiredType = requiredTowTruckType(job);
-  const continuingOwnedJob = alreadyOwned && Number(job?.technician_id) === techId &&
+  const continuingOwnedJob = alreadyOwned && recordId(job?.technician_id) === techId &&
     isActiveJobStatus(job?.status) && normalizeStatus(job?.status) !== "assigned";
   const vehiclePolicy = getVehicleServicePolicy(job);
   if (!continuingOwnedJob && (vehiclePolicy.family === 'ev' || vehiclePolicy.invalidCode)) {
@@ -137,10 +137,10 @@ export async function markTechnicianReserved(connOrPool, technicianId, requestId
 }
 
 export async function releaseTechnicianAvailability(connOrPool, technicianId, requestId = null) {
-  const techId = toPositiveInt(technicianId);
+  const techId = recordId(technicianId);
   if (!techId) return false;
 
-  const jobId = toPositiveInt(requestId);
+  const jobId = recordId(requestId);
   if (jobId) {
     await connOrPool.query(
       "UPDATE technicians SET current_job_id = NULL WHERE id = ? AND current_job_id = ?",
@@ -170,7 +170,8 @@ export async function reconcileTechnicianAvailability(connOrPool) {
   await connOrPool.query(
     `UPDATE technicians t
      LEFT JOIN (
-       SELECT sr.technician_id, MAX(sr.id) AS active_request_id
+       SELECT technician_id, id AS active_request_id FROM (
+       SELECT sr.technician_id, sr.id, ROW_NUMBER() OVER (PARTITION BY sr.technician_id ORDER BY sr.created_at DESC, sr.id DESC) AS uuid_rank
        FROM service_requests sr
        WHERE sr.technician_id IS NOT NULL
          AND LOWER(COALESCE(sr.status, '')) IN (
@@ -192,7 +193,7 @@ export async function reconcileTechnicianAvailability(connOrPool) {
            'arrived_drop',
            'service_completed'
          )
-       GROUP BY sr.technician_id
+       ) ranked_requests WHERE uuid_rank = 1
      ) active ON active.technician_id = t.id
      SET t.current_job_id = active.active_request_id,
          t.is_available = CASE

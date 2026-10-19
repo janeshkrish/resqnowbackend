@@ -1,12 +1,13 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { jobDispatchService } from "./jobDispatchService.js";
 import { socketService } from "./socket.js";
 import { closeRequestWithFinanceSync } from "./requestClosureService.js";
 
 function adminExtendedParsePositiveInt(value, fieldName) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    const error = new Error(`${fieldName} must be a positive integer.`);
+  const parsed = recordId(value);
+  if (!isRecordId(parsed)) {
+    const error = new Error(`${fieldName} must be a valid UUID.`);
     error.statusCode = 400;
     throw error;
   }

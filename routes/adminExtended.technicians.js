@@ -1,3 +1,5 @@
+import { adminActorId } from "../models/userIdentity.js";
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { Router } from "express";
 import { getPool } from "../db.js";
 import { requireAdminExtendedAccess } from "../middleware/adminExtendedAccess.js";
@@ -8,7 +10,7 @@ import { adminExtendedLogAdminAction } from "../services/adminExtendedActionLogS
 const router = Router();
 
 function adminExtendedResolveAdminId(req) {
-  return String(req.adminExtended?.adminId || req.adminEmail || req.admin?.email || "admin");
+  return adminActorId(req);
 }
 
 function adminExtendedParseMetadata(value) {
@@ -46,8 +48,8 @@ router.use(adminExtendedAuditLogger);
 router.get("/technicians/performance-summary", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.technicians.technicianPerformanceSummary";
   try {
-    const technicianId = Number(req.query.technicianId);
-    const hasTechnicianFilter = Number.isInteger(technicianId) && technicianId > 0;
+    const technicianId = recordId(req.query.technicianId);
+    const hasTechnicianFilter = isRecordId(technicianId);
 
     const pool = await getPool();
     const [rows] = await pool.query(
@@ -77,9 +79,9 @@ router.get("/technicians/performance-summary", async (req, res) => {
 
     const [visibilityRows] = await pool.query(
       `SELECT technician_id, metadata
-       FROM technician_admin_notes
+       FROM account_notes
        WHERE note_type = 'visibility'
-       ORDER BY id DESC`
+       ORDER BY created_at DESC, id DESC`
     );
 
     const visibilityMap = new Map();
@@ -115,8 +117,8 @@ router.get("/technicians/performance-summary", async (req, res) => {
 router.post("/technicians/:technicianId/toggle-visibility", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.technicians.toggleTechnicianVisibility";
   try {
-    const technicianId = Number(req.params.technicianId);
-    if (!Number.isInteger(technicianId) || technicianId <= 0) {
+    const technicianId = recordId(req.params.technicianId);
+    if (!isRecordId(technicianId)) {
       return res.status(400).json({ error: "Invalid technicianId." });
     }
 
@@ -128,9 +130,9 @@ router.post("/technicians/:technicianId/toggle-visibility", async (req, res) => 
 
     const [latestVisibilityRows] = await pool.query(
       `SELECT metadata
-       FROM technician_admin_notes
+       FROM account_notes
        WHERE technician_id = ? AND note_type = 'visibility'
-       ORDER BY id DESC
+       ORDER BY created_at DESC, id DESC
        LIMIT 1`,
       [technicianId]
     );
@@ -149,7 +151,7 @@ router.post("/technicians/:technicianId/toggle-visibility", async (req, res) => 
     };
 
     await pool.execute(
-      `INSERT INTO technician_admin_notes (technician_id, admin_id, note_type, note_text, metadata)
+      `INSERT INTO account_notes (technician_id, admin_id, note_type, note_text, metadata)
        VALUES (?, ?, 'visibility', ?, ?)`,
       [
         technicianId,
@@ -183,11 +185,11 @@ router.post("/technicians/:technicianId/toggle-visibility", async (req, res) => 
 router.post("/technicians/:technicianId/admin-note", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.technicians.adminNoteOnTechnician";
   try {
-    const technicianId = Number(req.params.technicianId);
+    const technicianId = recordId(req.params.technicianId);
     const noteText = String(req.body?.note || "").trim();
     const noteType = String(req.body?.noteType || "note").trim().toLowerCase();
 
-    if (!Number.isInteger(technicianId) || technicianId <= 0) {
+    if (!isRecordId(technicianId)) {
       return res.status(400).json({ error: "Invalid technicianId." });
     }
     if (!noteText) {
@@ -202,7 +204,7 @@ router.post("/technicians/:technicianId/admin-note", async (req, res) => {
 
     const metadata = req.body?.metadata || null;
     const [insertResult] = await pool.execute(
-      `INSERT INTO technician_admin_notes (technician_id, admin_id, note_type, note_text, metadata)
+      `INSERT INTO account_notes (technician_id, admin_id, note_type, note_text, metadata)
        VALUES (?, ?, ?, ?, ?)`,
       [technicianId, adminExtendedResolveAdminId(req), noteType || "note", noteText, JSON.stringify(metadata)]
     );
@@ -236,8 +238,8 @@ router.post("/technicians/:technicianId/admin-note", async (req, res) => {
 router.get("/technicians/:technicianId/admin-notes", async (req, res) => {
   req.adminExtendedActionType = "adminExtended.technicians.listAdminNotes";
   try {
-    const technicianId = Number(req.params.technicianId);
-    if (!Number.isInteger(technicianId) || technicianId <= 0) {
+    const technicianId = recordId(req.params.technicianId);
+    if (!isRecordId(technicianId)) {
       return res.status(400).json({ error: "Invalid technicianId." });
     }
 
@@ -245,9 +247,9 @@ router.get("/technicians/:technicianId/admin-notes", async (req, res) => {
     const pool = await getPool();
     const [rows] = await pool.query(
       `SELECT id, technician_id, admin_id, note_type, note_text, metadata, created_at
-       FROM technician_admin_notes
+       FROM account_notes
        WHERE technician_id = ?
-       ORDER BY id DESC
+       ORDER BY created_at DESC, id DESC
        LIMIT ?`,
       [technicianId, limit]
     );

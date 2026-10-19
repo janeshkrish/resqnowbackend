@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import { getPool } from "../db.js";
 import { releaseTechnicianAvailability } from "./technicianStateService.js";
 
@@ -8,9 +9,9 @@ function createHttpError(message, statusCode) {
 }
 
 function toPositiveRequestId(value) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw createHttpError("requestId must be a positive integer.", 400);
+  const parsed = recordId(value);
+  if (!isRecordId(parsed)) {
+    throw createHttpError("requestId must be a valid UUID.", 400);
   }
   return parsed;
 }

@@ -1,3 +1,4 @@
+import { recordId, isRecordId } from "../models/identifiers.js";
 import * as db from "../db.js";
 import { socketService } from "./socket.js";
 import {
@@ -368,7 +369,7 @@ export const jobDispatchService = {
             const job = jobs[0];
             const [offers] = await conn.query(
                 `SELECT id, status, pricing_snapshot, expires_at IS NOT NULL AND expires_at <= NOW() AS expired
-                 FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ? ORDER BY id DESC LIMIT 1`,
+                 FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ? ORDER BY sent_at DESC, id DESC LIMIT 1`,
                 [requestId, technicianId]
             );
             const ownsJob = job?.technician_id != null && String(job.technician_id) === String(technicianId);
@@ -494,14 +495,14 @@ export const jobDispatchService = {
                 return { success: false, code: "job_taken", reason: "Job already accepted by another technician." };
             }
             if (requireOffer) {
-                if (offerId == null || !Number.isSafeInteger(Number(offerId)) || Number(offerId) <= 0) {
+                if (offerId == null || !isRecordId(recordId(offerId))) {
                     await conn.rollback();
                     return { success: false, code: "offer_required", reason: "Please open the latest priced offer before accepting this job." };
                 }
                 const [offers] = await conn.query(
                     `SELECT id, status, pricing_snapshot, expires_at IS NOT NULL AND expires_at <= NOW() AS expired
                      FROM dispatch_offers WHERE service_request_id = ? AND technician_id = ?
-                     ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+                     ORDER BY sent_at DESC, id DESC LIMIT 1 FOR UPDATE`,
                     [requestId, technicianId]
                 );
                 const offer = offers[0];
@@ -530,7 +531,7 @@ export const jobDispatchService = {
                 );
                 winningOffer = { id: created.insertId };
             }
-            pricingSnapshot = { ...pricingSnapshot, offer_id: Number(winningOffer.id) };
+            pricingSnapshot = { ...pricingSnapshot, offer_id: recordId(winningOffer.id) };
             assignedAmount = pricingSnapshot.technician_earning;
             const resolvedAmount = pricingSnapshot.customer_base_amount;
 
@@ -558,7 +559,7 @@ export const jobDispatchService = {
                 pricing_snapshot: pricingSnapshot,
                 pricing_breakdown_json: pricingSnapshot.pricing_breakdown,
                 accepted_time: sourceJob.accepted_time || new Date().toISOString(),
-                offerId: Number(winningOffer.id), offer_id: Number(winningOffer.id),
+                offerId: recordId(winningOffer.id), offer_id: recordId(winningOffer.id),
                 pricing_status: "confirmed", pricing_finalized: true,
                 updated_at: new Date().toISOString(),
             };
@@ -628,7 +629,7 @@ export const jobDispatchService = {
                         };
                         const jobTakenPayload = {
                             jobId: String(requestId),
-                            technicianId: Number(technicianId),
+                            technicianId: recordId(technicianId),
                         };
                         // notifyTechnician emits over socket and push, so background devices
                         // can dismiss full-screen alerts immediately.
