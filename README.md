@@ -184,6 +184,10 @@ Update `.env` with local, staging, or production values before starting the serv
 | `ANDROID_APK_PATH` / `APK_PATH` | unset | Explicit APK file path for public download endpoint. |
 | `ANDROID_APK_RELEASE_DIR` / `APK_RELEASE_DIR` | unset | Directory used to locate APK release file. |
 | `ANDROID_APK_FILE_NAME` / `APK_FILE_NAME` | `resqnow.apk` | APK file name for public download. |
+| `VOICE_THOZHAN` | `all` | ResQNow-Thozhan voice requests: `all`, `off`, or a comma-separated list of customer ids for a gradual launch. |
+| `ANTHROPIC_API_KEY` | unset | Turns on ResQNow-Thozhan's AI step for sentences the app can't read on its own. Without it, voice still works on the app's word lists. |
+| `VOICE_AI_MODEL` | `claude-haiku-5-5` | Model for the AI step. |
+| `VOICE_AI_TIMEOUT_MS` | `3500` | After this the app carries on without the AI step. |
 
 ## API Configuration
 

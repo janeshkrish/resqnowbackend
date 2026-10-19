@@ -21,7 +21,8 @@ test("a job offer push is a high-priority data message the Android alarm can bui
   assert.equal(payload.data.event, "job_offer");
   assert.equal(payload.data.requestId, "6101");
   assert.equal(payload.data.jobId, "6101");
-  assert.equal(payload.data.channelId, "high_priority_alarms");
+  assert.equal(payload.data.channelId, "job_offers");
+  assert.equal(payload.data.sound, "job_ring");
   assert.equal(payload.data.deepLinkPath, "/job/6101");
   assert.match(payload.data.body, /flat-tyre • 2\.4 km away/);
   assert.match(payload.data.body, /₹350/);
