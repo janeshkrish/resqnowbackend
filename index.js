@@ -19,6 +19,7 @@ import vehiclesRouter from "./routes/vehicles.js";
 import paymentsRouter, { razorpayWebhookHandler } from "./routes/payments.js";
 import pricingRouter from "./routes/pricing.js";
 import chatbotRouter from "./routes/chatbot.js";
+import voiceRouter from "./routes/voice.js";
 import adminExtendedDashboardRouter from "./routes/adminExtended.dashboard.js";
 import adminExtendedRequestsRouter from "./routes/adminExtended.requests.js";
 import adminExtendedTechniciansRouter from "./routes/adminExtended.technicians.js";
@@ -283,6 +284,7 @@ function createApp() {
   app.use("/api/payments", paymentsRouter);
   app.use("/api/vehicles", vehiclesRouter);
   app.use("/api/chatbot", chatbotRouter);
+  app.use("/api/voice", voiceRouter);
   app.use("/api/admin-extended", adminExtendedDashboardRouter);
   app.use("/api/admin-extended", adminExtendedRequestsRouter);
   app.use("/api/admin-extended", adminExtendedTechniciansRouter);

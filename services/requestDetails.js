@@ -58,6 +58,8 @@ export function sanitizeRequestDetails(input) {
     note: text(raw.note, MAX_LONG_TEXT),
     urgent: raw.urgent === true || answers.some((a) => (a.id === "inside" || a.id === "hurt") && a.value === "yes"),
     attachments,
+    // Requests filled in by talking to ResQNow-Thozhan, so voice and form requests can be compared.
+    ...(raw.channel === "voice" ? { channel: "voice" } : {}),
   };
   const hasContent = details.answers.length || details.landmark || details.plate || details.note || details.attachments.length || details.urgent || details.vehicle_base_subtype;
   return hasContent ? details : null;
