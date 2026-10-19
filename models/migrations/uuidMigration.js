@@ -1,6 +1,7 @@
 import { isUuid, migratedId } from "../identifiers.js";
 import { boundedIdempotencyKey } from "../../utils/paymentReference.js";
 import { COLUMN_TARGETS, EXTERNAL_IDS, JSON_ID_TARGETS, MODEL_TABLES, SOURCE_TABLES, POLYMORPHIC, referenceTarget } from "../relationships.js";
+import { LEGACY_KEYS, legacyReference, migrationRowKey } from "./preservation.js";
 
 export const UUID_TYPE = "CHAR(36) CHARACTER SET ascii COLLATE ascii_bin";
 export const quoteIdentifier = (value) => {
@@ -30,14 +31,19 @@ export function migrateJsonIds(value, resolve, path = "") {
   return Object.fromEntries(Object.entries(value).map(([name, item]) => {
     const target = JSON_ID_TARGETS[name];
     if (target && item != null && item !== "" && item !== 0) {
-      const convert = id => resolve(target, id, `${path}.${name}`);
+      // Razorpay response payloads also use payment_id/paymentId. Provider IDs
+      // must remain provider IDs; they do not reference the payments table.
+      const convert = id => target === "payments" && typeof id === "string" && /^pay_[A-Za-z0-9]+$/.test(id)
+        ? id : resolve(target, id, `${path}.${name}`);
       return [name, Array.isArray(item) ? item.map(convert) : convert(item)];
     }
     return [name, migrateJsonIds(item, resolve, `${path}.${name}`)];
   }));
 }
 
-export async function inspectDatabase(connection) {
+export async function inspectDatabase(connection, { preservedTables = [] } = {}) {
+  if (preservedTables.some(table => !Object.hasOwn(LEGACY_KEYS, table))) throw new Error("A legacy module needs an explicit preservation profile.");
+  const allowed = [...SOURCE_TABLES, ...preservedTables];
   const [columns] = await connection.query(
     `SELECT table_name AS table_name, column_name AS column_name, data_type AS data_type,
             column_type AS column_type, is_nullable AS is_nullable, column_default AS column_default,
@@ -60,13 +66,14 @@ export async function inspectDatabase(connection) {
     if (!tables.has(column.table_name)) tables.set(column.table_name, []);
     tables.get(column.table_name).push(column);
   }
-  const unknown = [...tables].filter(([name]) => !SOURCE_TABLES.includes(name));
+  const unknown = [...tables].filter(([name]) => !allowed.includes(name));
   if (unknown.length) throw new Error(`Unmodeled tables require review before conversion: ${unknown.map(([name]) => name).join(", ")}`);
   for (const fk of foreignKeys) {
-    if (!SOURCE_TABLES.includes(fk.table_name) || !SOURCE_TABLES.includes(fk.referenced_table_name) || fk.referenced_column_name !== "id") {
+    if (!allowed.includes(fk.table_name) || !allowed.includes(fk.referenced_table_name) ||
+      !(preservedTables.includes(fk.referenced_table_name) ? LEGACY_KEYS[fk.referenced_table_name].includes(fk.referenced_column_name) : fk.referenced_column_name === "id")) {
       throw new Error(`Unmodeled relationship: ${fk.table_name}.${fk.column_name} -> ${fk.referenced_table_name}.${fk.referenced_column_name}`);
     }
-    const target = referenceTarget(fk.table_name, fk.column_name);
+    const target = preservedTables.includes(fk.table_name) ? legacyReference(fk.table_name, fk.column_name, null) : referenceTarget(fk.table_name, fk.column_name);
     if (target && target !== fk.referenced_table_name) throw new Error(`Relationship disagrees with models: ${fk.table_name}.${fk.column_name}`);
   }
   return { tables, foreignKeys };
@@ -80,8 +87,8 @@ function identityColumn(column, table, foreignKeys) {
 
 // Plan contains explicit values and can be reviewed/applied without re-reading rows.
 // Treat it like a database backup: it includes existing JSON audit data and emails.
-export async function buildUuidMigrationPlan(connection, { adminEmail = "" } = {}) {
-  const metadata = await inspectDatabase(connection);
+export async function buildUuidMigrationPlan(connection, { adminEmail = "", preservedTables = [], restoreMissingPrincipals = false } = {}) {
+  const metadata = await inspectDatabase(connection, { preservedTables });
   const [[versionRow]] = await connection.query("SELECT VERSION() AS version");
   const engine = String(versionRow.version);
   const inPlaceSupported = !/tidb/i.test(engine) || ![...metadata.tables].some(([table, columns]) => MODEL_TABLES.includes(table) && columns.some(column => column.column_name === "id" && column.data_type !== "char"));
@@ -92,6 +99,11 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "" } = {
   }
   const records = new Map();
   for (const [table, columns] of metadata.tables) {
+    if (preservedTables.includes(table)) {
+      const [rows] = await connection.query(`SELECT * FROM ${quoteIdentifier(table)}`);
+      records.set(table, rows);
+      continue;
+    }
     if (!SOURCE_TABLES.includes(table)) continue;
     const selected = columns.filter(column => identityColumn(column, table, metadata.foreignKeys) || column.data_type === "json" ||
       column.column_name === "idempotency_key" ||
@@ -103,12 +115,17 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "" } = {
     records.set(table, rows);
   }
   const principals = new Map((records.get("users") || []).filter(row => row.email).map(row => [row.email.toLowerCase(), row.id]));
-  const idSets = new Map([...records].map(([table, rows]) => [table, new Set(rows.flatMap(row => [key(row.id), migratedId(table, row.id)]))]));
+  const idSets = new Map([...records].map(([table, rows]) => [table, new Set(rows.flatMap(row => {
+    const identity = migrationRowKey(table, row, preservedTables);
+    return preservedTables.includes(table) ? [identity] : [identity, migratedId(table, identity)];
+  }))]));
   const newUsers = new Map();
+  const restoredPrincipals = new Map();
   const issues = [];
   const resolve = (target, value, context) => {
     if (value == null || value === "") return null;
-    if (target === "users" && typeof value === "string" && !isUuid(value) && !/^\d+$/.test(value)) {
+    if (target === "users" && typeof value === "string" && !isUuid(value) && !/^\d+$/.test(value) &&
+      (!restoreMissingPrincipals || aliases.has(value.toLowerCase()) || value.includes("@"))) {
       const email = (aliases.has(value.toLowerCase()) ? adminEmail : value).trim().toLowerCase();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         issues.push(`${context}: unresolved admin/user identity ${value}`);
@@ -121,8 +138,21 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "" } = {
     }
     // An already-converted reference must still resolve to its intended parent.
     const found = idSets.get(target)?.has(key(value));
-    if (!found) issues.push(`${context}: orphan ${target} reference ${value}`);
-    return migratedId(target, value);
+    if (!found && restoreMissingPrincipals && ["users", "technicians"].includes(target)) {
+      const id = migratedId(target, value);
+      const identity = `${target}:${value}`;
+      const settings = { migration: { state: "unresolved_historical_identity", sourceDatabaseIdentity: String(value), originalEntity: target, references: [context] } };
+      const row = target === "users"
+        ? { id, full_name: "Historical customer (identity unavailable)", email: null, phone: null, role: "legacy_unresolved", is_verified: 0, status: "legacy_unresolved", settings }
+        : { id, name: "Historical technician (identity unavailable)", email: `unresolved-${id}@migration.invalid`, phone: null, status: "rejected", is_active: 0, active: 0,
+          is_approved: 0, is_available: 0, is_logged_in: 0, admin_hidden: 1, availability_status: "offline", settings };
+      restoredPrincipals.set(identity, { table: target, sourceId: String(value), row });
+      if (!idSets.has(target)) idSets.set(target, new Set());
+      idSets.get(target).add(key(value)); idSets.get(target).add(id);
+    } else if (!found) issues.push(`${context}: orphan ${target} reference ${value}`);
+    const restored = restoredPrincipals.get(`${target}:${value}`);
+    if (restored && !restored.row.settings.migration.references.includes(context)) restored.row.settings.migration.references.push(context);
+    return preservedTables.includes(target) ? value : migratedId(target, value);
   };
 
   const conversions = [];
@@ -130,18 +160,20 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "" } = {
     if (table === "otp_rate_limits") continue;
     const columns = metadata.tables.get(table);
     for (const row of rows) {
+      const rowKey = migrationRowKey(table, row, preservedTables);
       const changes = {};
       for (const column of columns) {
         const name = column.column_name;
-        if (name === "id" || row[name] == null) continue;
-        const context = `${table}.${name} (${row.id})`;
+        if ((!preservedTables.includes(table) && name === "id") || row[name] == null) continue;
+        const context = `${table}.${name} (${rowKey})`;
         if (name === "idempotency_key") {
           const migrated = migrateIdempotencyKey(table, row[name], resolve);
           if (migrated !== row[name]) changes[name] = migrated;
           continue;
         }
         const fk = metadata.foreignKeys.find(fk => fk.table_name === table && fk.column_name === name);
-        const target = name === "admin_email" ? "users" : fk?.referenced_table_name || referenceTarget(table, name, row);
+        const fallback = name === "admin_email" ? "users" : referenceTarget(table, name, row);
+        const target = fk?.referenced_table_name || (preservedTables.includes(table) ? legacyReference(table, name, null) : fallback);
         if (target) {
           const destination = name === "admin_email" ? "admin_id" : name;
           const resolved = resolve(target, row[name], context);
@@ -157,7 +189,10 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "" } = {
           if (typeof json === "string") {
             try { json = JSON.parse(json); } catch { issues.push(`${context}: invalid JSON`); continue; }
           }
-          const migrated = migrateJsonIds(json, resolve, context);
+          const migrated = migrateJsonIds(json, (target, id, path) => {
+            if (preservedTables.includes(table)) target = legacyReference(table, path.split(".").at(-1), target);
+            return target ? resolve(target, id, path) : id;
+          }, context);
           if (table === "admin_audit_logs" && row.targetId != null) {
             const auditTarget = referenceTarget(table, "targetId", row);
             for (const group of ["params", "body"]) {
@@ -167,32 +202,38 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "" } = {
             }
           }
           if (JSON.stringify(migrated) !== JSON.stringify(json)) changes[name] = JSON.stringify(migrated);
-        } else if (name.endsWith("_id") && !EXTERNAL_IDS.has(name) && !identityColumn(column, table, metadata.foreignKeys)) {
+        } else if (!preservedTables.includes(table) && name.endsWith("_id") && !EXTERNAL_IDS.has(name) && !identityColumn(column, table, metadata.foreignKeys)) {
           issues.push(`${context}: unmodeled ID column`);
         }
       }
       // ID goes last because MySQL evaluates UPDATE assignments left to right.
-      if (row.id !== migratedId(table, row.id)) changes.id = migratedId(table, row.id);
-      if (Object.keys(changes).length) conversions.push({ table, oldId: key(row.id), newId: migratedId(table, row.id), changes });
+      if (!preservedTables.includes(table) && row.id !== migratedId(table, row.id)) changes.id = migratedId(table, row.id);
+      if (Object.keys(changes).length) conversions.push({ table, oldId: rowKey, newId: preservedTables.includes(table) ? rowKey : migratedId(table, row.id), changes });
     }
   }
   const conversionsByRecord = new Map(conversions.map(item => [`${item.table}:${item.oldId}`, item]));
   for (const [table, rows] of records) {
     const seen = new Set();
     for (const row of rows) {
-      const converted = conversionsByRecord.get(`${table}:${key(row.id)}`);
+      const converted = conversionsByRecord.get(`${table}:${migrationRowKey(table, row, preservedTables)}`);
       const idempotency = converted?.changes.idempotency_key ?? row.idempotency_key;
       if (idempotency == null) continue;
       if (seen.has(idempotency)) issues.push(`${table}: duplicate idempotency key after UUID conversion`);
       seen.add(idempotency);
     }
   }
-  if (issues.length) throw new Error(`UUID migration preflight failed (${issues.length} issues):\n${issues.slice(0, 30).join("\n")}`);
+  if (issues.length) {
+    const error = new Error(`UUID migration preflight failed (${issues.length} issues):\n${issues.slice(0, 30).join("\n")}`);
+    // Private operator reports need every failing reference, even when the
+    // concise console diagnostic shows only the first thirty.
+    error.issues = issues;
+    throw error;
+  }
   return {
     version: 1, createdAt: new Date().toISOString(), adminEmail, engine, inPlaceSupported,
     metadata: { tables: Object.fromEntries(metadata.tables), foreignKeys: metadata.foreignKeys },
     counts: Object.fromEntries([...records].map(([table, rows]) => [table, rows.length])),
-    newUsers: [...newUsers.values()], conversions,
+    newUsers: [...newUsers.values()], restoredPrincipals: [...restoredPrincipals.values()], preservedTables, conversions,
     otp: { requests: records.get("otp_requests") || [], limits: records.get("otp_rate_limits") || [] },
   };
 }

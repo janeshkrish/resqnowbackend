@@ -16,6 +16,22 @@ const USER = "d9695b75-b6cc-432a-944e-5ca18fb26121";
 const TECH = "8773c7fa-7491-43b1-a447-ae9ba4186f74";
 const REQUEST = "429f0845-8772-4f24-8862-a94ed05f9772";
 
+test("UUID migration preserves Razorpay payment IDs inside gateway and wallet metadata", () => {
+  const calls = [];
+  const result = migrateJsonIds({
+    gateway: { payment_id: "pay_SSKo04RegJGOBs" },
+    paymentId: "pay_SSlPiepFMAvqsf",
+    internal: { payment_id: 7 },
+    paymentIds: [7],
+    user_id: 3,
+  }, (table, id) => { calls.push([table, id]); return migratedId(table, id); });
+  assert.equal(result.gateway.payment_id, "pay_SSKo04RegJGOBs");
+  assert.equal(result.paymentId, "pay_SSlPiepFMAvqsf");
+  assert.equal(result.internal.payment_id, migratedId("payments", 7));
+  assert.equal(result.user_id, migratedId("users", 3));
+  assert.deepEqual(calls, [["payments", 7], ["users", 3]]);
+});
+
 test("every active table has a UUID primary key; external provider IDs and counters retain their types", () => {
   assert.equal(Object.keys(TABLES).length, 42);
   assert.equal(TABLES.otp_rate_limits, undefined);

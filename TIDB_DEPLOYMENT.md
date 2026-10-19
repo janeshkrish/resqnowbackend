@@ -1,5 +1,7 @@
 # TiDB deployment instructions for ResQNow
 
+**Production hosting correction (2026-10-19): production runs on Railway. Follow [Railway and TiDB production deployment](docs/railway-tidb-deployment.md).** The Render instructions below describe the historical adapter and are not the procedure for the current Railway service.
+
 This guide explains how to make a push to GitHub automatically migrate the existing TiDB data and deploy the backend.
 
 **Hosting supported by the current workflow: Render.** It supports one API web service and its background workers, using Node or Docker. If the backend is hosted elsewhere, its deployment integration must be added before following this guide.

@@ -1,5 +1,7 @@
 # Push-to-deploy with full TiDB data preservation
 
+**Current production uses Railway. Follow [the Railway guide](railway-tidb-deployment.md).** This document describes the legacy Render adapter, which now runs only when repository variable `DEPLOY_PROVIDER=render` is explicitly set. Ordinary Railway releases use Railway's connected GitHub repository.
+
 For a step-by-step operator guide, start with [TIDB_DEPLOYMENT.md](../TIDB_DEPLOYMENT.md).
 
 The workflow `.github/workflows/deploy-production.yml` runs on pushes to **main** in the backend repository and on manual dispatch from main. It uses the Render deployment adapter because this repository documents Render hosting. It has not been connected to a live Render account. Other hosting providers require an adapter for their writer shutdown/deployment lifecycle.
@@ -67,6 +69,8 @@ WHERE email = 'customer@example.com';
 The source database also remains intact. Unknown source structures stop migration for a mapping update; no tool can guarantee alignment for a schema it cannot inspect. An older completed target created by the previous history-retiring implementation is deliberately not accepted as a new full-preservation migration. Do not overwrite it or recopy a stale source over new writes; reconcile it separately first.
 
 ## Failure and recovery
+
+For the startup maintenance guard, suspended Render services, or mobile SMS OTP failures, use [Production startup and mobile OTP recovery](production-login-recovery.md). Run `npm run deploy:production -- --check` for a read-only configuration and database-connectivity preflight before a deployment. GitHub runs this preflight as a named step and reports a failure reason in the run summary.
 
 - Missing settings, bad SQL credentials or conflicting service configuration fail before maintenance deployment.
 - Maintenance rollout must finish for all services before copying starts. Migration/verification failure leaves services in maintenance; old application commands are not restored automatically against a partial target.

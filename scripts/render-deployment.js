@@ -56,18 +56,16 @@ export async function probeDeploymentDatabase(env, { connect = options => mysql.
   } finally { await connection.end(); }
 }
 
-export async function deployRenderProduction(env, {
-  request, migrate = prepareDeploymentDatabase, probe = probeDeploymentDatabase,
-  fetchImpl = fetch, sleep = pause, log = console.log, pollLimit = 360,
+export async function preflightRenderProduction(env, {
+  request, probe = probeDeploymentDatabase, fetchImpl = fetch, sleep = pause,
 } = {}) {
   const settings = deploymentSettings(env);
   request ||= createRenderClient(env.RENDER_API_KEY, { fetchImpl, sleep });
-  const putVariable = (id, key, value) => request(`/services/${id}/env-vars/${key}`, { method: "PUT", body: { value: String(value) } });
   const serviceSnapshots = [];
   for (const id of settings.serviceIds) {
     const service = await request(`/services/${id}`);
     if (!["web_service", "background_worker"].includes(service.type)) throw new Error(`Unsupported writer type for ${id}; this pipeline supports Render web services and background workers only.`);
-    if (service.suspended !== "not_suspended") throw new Error(`${id} is suspended; resolve its state before deployment.`);
+    if (service.suspended !== "not_suspended") throw new Error(`${id} is suspended. Resume the API/worker in the Render dashboard before rerunning this workflow; suspended services cannot serve login requests.`);
     if (service.autoDeploy !== "no") throw new Error(`Disable Render Auto-Deploy for ${id} before using this pipeline, so it cannot race the database transfer.`);
     if (repositoryName(service.repo) !== settings.repository || service.branch !== settings.branch) throw new Error(`${id} must use this repository's main branch.`);
     const details = service.serviceDetails;
@@ -96,6 +94,18 @@ export async function deployRenderProduction(env, {
   // Check credentials BEFORE taking any service offline. The transfer itself
   // repeats all schema/data checks after writers have been drained.
   await probe(env);
+
+  return { settings, serviceSnapshots, apiService, request };
+}
+
+export async function deployRenderProduction(env, {
+  request, migrate = prepareDeploymentDatabase, probe = probeDeploymentDatabase,
+  fetchImpl = fetch, sleep = pause, log = console.log, pollLimit = 360,
+} = {}) {
+  const preflight = await preflightRenderProduction(env, { request, probe, fetchImpl, sleep });
+  const { settings, serviceSnapshots, apiService } = preflight;
+  request = preflight.request;
+  const putVariable = (id, key, value) => request(`/services/${id}/env-vars/${key}`, { method: "PUT", body: { value: String(value) } });
 
   const patchCommand = (service, command, healthPath) => request(`/services/${service.id}`, {
     method: "PATCH", body: { serviceDetails: {

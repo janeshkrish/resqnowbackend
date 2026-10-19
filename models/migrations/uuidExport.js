@@ -4,17 +4,27 @@ import { COLUMN_TARGETS, POLYMORPHIC } from "../relationships.js";
 import { migratedId } from "../identifiers.js";
 import { UUID_TYPE, quoteIdentifier } from "./uuidMigration.js";
 import { assertConsolidationColumns, consolidatedSchema, destinationTable, transformRelationalRow } from "./relationalRows.js";
+import { SOURCE_TABLES } from "../relationships.js";
+import { legacyReference } from "./preservation.js";
 
 // TiDB cannot change an integer clustered primary key into a string in place.
 // Export a converted snapshot for restoration into a separate EMPTY database.
 // This creates exactly the modeled tables; no persistent mapping/shadow tables.
-export function convertCreateTable(sql, table, columns, foreignKeys) {
+export function convertCreateTable(sql, table, columns, foreignKeys, { preserveIdentity = false } = {}) {
   if (table === "otp_requests") return TABLES.otp_requests;
   const relationships = new Set(columns.filter(column => column.column_name === "id" ||
     Object.hasOwn(COLUMN_TARGETS, column.column_name) ||
     Object.hasOwn(POLYMORPHIC[table] || {}, column.column_name) ||
     column.column_name === "admin_email" || (table === "admin_audit_logs" && column.column_name === "targetId") || foreignKeys.some(fk => fk.table_name === table && fk.column_name === column.column_name))
     .map(column => column.column_name));
+  if (preserveIdentity) {
+    relationships.clear();
+    for (const column of columns) {
+      const fk = foreignKeys.find(key => key.table_name === table && key.column_name === column.column_name);
+      const target = fk?.referenced_table_name || legacyReference(table, column.column_name, null);
+      if (target && SOURCE_TABLES.includes(target)) relationships.add(column.column_name);
+    }
+  }
   let output = sql.split(/\r?\n/).filter(line => !/^\s*CONSTRAINT\s+.*\bFOREIGN KEY\b/i.test(line)).map(line => {
     const match = line.match(/^\s*`(\w+)`\s+/);
     if (!match || !relationships.has(match[1]) || (["reference_id", "target_id"].includes(match[1]) && !foreignKeys.some(fk => fk.table_name === table && fk.column_name === match[1]))) return line;

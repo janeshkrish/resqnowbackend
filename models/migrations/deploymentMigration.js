@@ -5,6 +5,7 @@ import { MODEL_TABLES, RETIRED_TABLES } from "../relationships.js";
 import { buildUuidMigrationPlan, foreignKeySql, quoteIdentifier } from "./uuidMigration.js";
 import { consolidatedOtpRows, convertCreateTable } from "./uuidExport.js";
 import { assertConsolidationColumns, consolidatedForeignKeys, consolidatedSchema, destinationTable, stripForeignKeys, transformRelationalRow } from "./relationalRows.js";
+import { LEGACY_KEYS, migrationRowKey } from "./preservation.js";
 
 const VERSION = 2;
 const DIGEST_MODULUS = 1n << 256n;
@@ -113,13 +114,21 @@ async function insertBatch(target, table, rows, tableColumns) {
     rows.flatMap(row => names.map(name => row[name])));
 }
 
-async function* sourceRows(source, table) {
+async function* sourceRows(source, table, preservedTables = []) {
+  const keys = preservedTables.includes(table) ? LEGACY_KEYS[table] : ["id"];
+  if (keys.length !== 1) {
+    const [rows] = await source.query(`SELECT * FROM ${quoteIdentifier(table)}`);
+    if (rows.length) yield rows;
+    return;
+  }
+  const key = keys[0];
   let cursor = null;
   for (;;) {
-    const [rows] = await source.query(`SELECT * FROM ${quoteIdentifier(table)} ${cursor == null ? "" : "WHERE id > ?"} ORDER BY id LIMIT 100`, cursor == null ? [] : [cursor]);
+    const keySql = key === "id" ? "id" : quoteIdentifier(key);
+    const [rows] = await source.query(`SELECT * FROM ${quoteIdentifier(table)} ${cursor == null ? "" : `WHERE ${keySql} > ?`} ORDER BY ${keySql} LIMIT 100`, cursor == null ? [] : [cursor]);
     if (!rows.length) return;
     yield rows;
-    cursor = rows.at(-1).id;
+    cursor = rows.at(-1)[key];
   }
 }
 
@@ -127,28 +136,30 @@ function withMarker(sql, marker) {
   return sql.replace(/\s+COMMENT\s*=\s*'(?:[^'\\]|\\.|'')*'/ig, "") + ` COMMENT='${marker}:copying'`;
 }
 
-export async function transferDatabase({ source, target, control, config, env, assertLock, log = console.log }) {
+export async function transferDatabase({ source, target, control, config, env, assertLock, log = console.log, planOptions = {} }) {
   await source.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
   await source.query("START TRANSACTION WITH CONSISTENT SNAPSHOT");
   try {
-    const plan = await buildUuidMigrationPlan(source, { adminEmail: env.ADMIN_EMAIL || "" });
+    const plan = await buildUuidMigrationPlan(source, { adminEmail: env.ADMIN_EMAIL || "", ...planOptions });
+    const preservedTables = (planOptions.preservedTables || []).filter(table => plan.metadata.tables[table]);
+    const destinations = [...MODEL_TABLES, ...preservedTables];
     assertConsolidationColumns(plan);
     const sourceForeignKeys = consolidatedForeignKeys(plan.metadata.foreignKeys);
     if (Object.values(plan.metadata.tables).flat().some(column => /(?:VIRTUAL|STORED) GENERATED/i.test(column.extra || ""))) throw new Error("Generated columns need an explicit migration mapping before automatic transfer.");
     const sources = Object.keys(plan.metadata.tables);
     const definitions = new Map();
     // Preflight every schema before the first target write.
-    for (const table of MODEL_TABLES) {
+    for (const table of destinations) {
       let ddl = consolidatedSchema(table);
       if (!ddl && plan.metadata.tables[table]) {
         const [[schema]] = await source.query(`SHOW CREATE TABLE ${quoteIdentifier(table)}`);
-        ddl = convertCreateTable(schema["Create Table"], table, plan.metadata.tables[table], plan.metadata.foreignKeys);
+        ddl = convertCreateTable(schema["Create Table"], table, plan.metadata.tables[table], plan.metadata.foreignKeys, { preserveIdentity: preservedTables.includes(table) });
       }
       definitions.set(table, stripForeignKeys(ddl || TABLES[table]));
     }
     await assertLock();
     const existing = await schemaTables(control, config.target);
-    if (existing.some(table => !MODEL_TABLES.includes(table.table_name) || table.table_comment !== `${config.marker}:copying`)) {
+    if (existing.some(table => !destinations.includes(table.table_name) || table.table_comment !== `${config.marker}:copying`)) {
       throw new Error("Migration target contains unowned or active tables; it will not be overwritten.");
     }
     // Only this migration's unpublished target can be rebuilt on retry.
@@ -158,13 +169,13 @@ export async function transferDatabase({ source, target, control, config, env, a
       await assertLock();
       await target.query(`DROP TABLE ${quoteIdentifier(table.table_name)}`);
     }
-    for (const table of MODEL_TABLES) {
+    for (const table of destinations) {
       await assertLock();
       await target.query(withMarker(definitions.get(table), config.marker));
     }
     const targetColumns = await columns(control, config.target);
-    const byTable = new Map(MODEL_TABLES.map(table => [table, targetColumns.filter(column => column.table_name === table)]));
-    const expected = new Map(MODEL_TABLES.map(table => [table, digestState()]));
+    const byTable = new Map(destinations.map(table => [table, targetColumns.filter(column => column.table_name === table)]));
+    const expected = new Map(destinations.map(table => [table, digestState()]));
     const [[clock]] = await source.query("SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%d %H:%i:%s') AS timestamp");
     const timestamp = clock.timestamp;
     const changes = new Map(plan.conversions.map(row => [`${row.table}:${row.oldId}`, row.changes]));
@@ -175,7 +186,7 @@ export async function transferDatabase({ source, target, control, config, env, a
       addRowDigest(expected.get(table), row, byTable.get(table));
       return row;
     };
-    for (const table of MODEL_TABLES) {
+    for (const table of destinations) {
       const flush = async () => { if (pending.length) { await assertLock(); await insertBatch(target, table, pending, byTable.get(table)); pending = []; pendingBytes = 0; } };
       const queue = async input => {
         const row = await append(table, input);
@@ -188,21 +199,22 @@ export async function transferDatabase({ source, target, control, config, env, a
       } else {
         for (const oldTable of sources.filter(oldTable => destinationTable(oldTable) === table)) {
           let count = 0;
-          for await (const batch of sourceRows(source, oldTable)) {
-            for (const original of batch) { await queue(transformRelationalRow(plan, oldTable, original, changes.get(`${oldTable}:${original.id}`))); count++; }
+          for await (const batch of sourceRows(source, oldTable, preservedTables)) {
+            for (const original of batch) { await queue(transformRelationalRow(plan, oldTable, original, changes.get(`${oldTable}:${migrationRowKey(oldTable, original, preservedTables)}`))); count++; }
           }
           if (count !== plan.counts[oldTable]) throw new Error(`Snapshot row count mismatch for ${oldTable}`);
         }
         if (table === "users") {
           for (const principal of plan.newUsers) await queue({ id: principal.id, full_name: "Historical admin", email: principal.email, is_verified: 1, status: "approved" });
         }
+        for (const principal of plan.restoredPrincipals || []) if (principal.table === table) await queue(principal.row);
       }
       await flush();
       log(`[DB migration] ${table}: copied ${expected.get(table).count} rows`);
     }
-    for (const table of MODEL_TABLES) {
+    for (const table of destinations) {
       const actual = digestState();
-      for await (const batch of sourceRows(target, table)) for (const row of batch) addRowDigest(actual, row, byTable.get(table));
+      for await (const batch of sourceRows(target, table, preservedTables)) for (const row of batch) addRowDigest(actual, row, byTable.get(table));
       const wanted = expected.get(table);
       if (actual.count !== wanted.count || actual.sum !== wanted.sum) throw new Error(`Migration content verification failed for ${table}`);
     }
@@ -213,12 +225,13 @@ export async function transferDatabase({ source, target, control, config, env, a
       keysToRestore.get(name).push(fk);
     }
     for (const rows of keysToRestore.values()) { await assertLock(); await target.query(foreignKeySql(rows)); }
-    const verified = await buildUuidMigrationPlan(target, { adminEmail: env.ADMIN_EMAIL || "" });
+    const verified = await buildUuidMigrationPlan(target, { adminEmail: env.ADMIN_EMAIL || "", preservedTables });
     if (verified.conversions.length || verified.newUsers.length) throw new Error("Target UUID relationships or stored retry keys are incomplete.");
     await assertLock();
     await target.query(`ALTER TABLE users COMMENT='${config.marker}:ready'`);
     await source.query("ROLLBACK");
-    return { database: config.target, migrated: true, tables: MODEL_TABLES.length,
+    return { database: config.target, migrated: true, tables: destinations.length,
+      restoredPrincipals: plan.restoredPrincipals || [],
       preservedSourceRows: plan.counts,
       counts: Object.fromEntries([...expected].map(([table, state]) => [table, state.count])) };
   } catch (error) {
@@ -227,7 +240,7 @@ export async function transferDatabase({ source, target, control, config, env, a
   }
 }
 
-export async function prepareDeploymentDatabase(env = process.env, { connect = options => mysql.createConnection(options), log = console.log } = {}) {
+export async function prepareDeploymentDatabase(env = process.env, { connect = options => mysql.createConnection(options), log = console.log, planOptions = {} } = {}) {
   const config = migrationConfiguration(env);
   if (config.mode === "off") return { database: config.configured, migrated: false };
   const control = await connect(databaseConnectionOptions(env));
@@ -261,7 +274,8 @@ export async function prepareDeploymentDatabase(env = process.env, { connect = o
     if (!env.DB_LEGACY_NAME && !needsDeploymentTransfer(sourceTables, sourceColumns)) return { database: config.source, migrated: false };
     if (!config.maintenance) throw new Error("Automatic TiDB transfer is required. Stop old API/worker writers and set DB_MIGRATION_MAINTENANCE=true for the first deployment; original data will be preserved in DB_NAME/DB_LEGACY_NAME.");
     if (config.source === config.target) throw new Error("Source and target databases must differ.");
-    if (targetTables.some(table => !MODEL_TABLES.includes(table.table_name) || table.table_comment !== `${config.marker}:copying`)) throw new Error("Migration target contains unowned data; choose an empty DB_MIGRATION_TARGET.");
+    const allowedTables = [...MODEL_TABLES, ...(planOptions.preservedTables || [])];
+    if (targetTables.some(table => !allowedTables.includes(table.table_name) || table.table_comment !== `${config.marker}:copying`)) throw new Error("Migration target contains unowned data; choose an empty DB_MIGRATION_TARGET.");
     source = await connect(databaseConnectionOptions(env, config.source));
     // A new empty target database is reversible; source data is never changed.
     await assertLock();
@@ -273,7 +287,7 @@ export async function prepareDeploymentDatabase(env = process.env, { connect = o
     await source.query("SET time_zone = '+00:00'");
     await target.query("SET time_zone = '+00:00'");
     log(`[DB migration] transferring ${config.source} -> ${config.target}; API remains unready`);
-    return await transferDatabase({ source, target, control, config, env, assertLock, log });
+    return await transferDatabase({ source, target, control, config, env, assertLock, log, planOptions });
   } finally {
     if (source) await Promise.allSettled([source.end()]);
     if (locked) { try { await control.query("SELECT RELEASE_LOCK(?)", [config.lock]); } catch { /* closed connections release their lock */ } }

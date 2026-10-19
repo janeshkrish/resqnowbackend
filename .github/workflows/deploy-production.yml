@@ -1,4 +1,4 @@
-name: Verify, migrate TiDB, and deploy
+name: Verify backend
 
 on:
   push:
@@ -30,11 +30,14 @@ jobs:
 
   deploy:
     needs: verify
-    if: github.ref == 'refs/heads/main'
+    # Production runs on Railway through its GitHub integration. Keep the old
+    # Render adapter explicitly opt-in; it must not block Railway verification.
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_PROVIDER == 'render'
     environment: production
     runs-on: ${{ vars.DEPLOY_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 180
     env:
+      DEPLOY_PROVIDER: render
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
       RENDER_SERVICE_IDS: ${{ vars.RENDER_SERVICE_IDS }}
       DB_HOST: ${{ secrets.DB_HOST }}
@@ -57,4 +60,7 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm run deploy:production
+      - name: Check production settings and connectivity (read only)
+        run: npm run deploy:production -- --check
+      - name: Drain writers, migrate TiDB, and release
+        run: npm run deploy:production

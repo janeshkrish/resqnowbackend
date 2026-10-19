@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createRenderClient, deployRenderProduction, deploymentSettings, probeDeploymentDatabase, MAINTENANCE_COMMAND } from "../scripts/render-deployment.js";
+import { createRenderClient, deployRenderProduction, preflightRenderProduction, deploymentSettings, probeDeploymentDatabase, MAINTENANCE_COMMAND } from "../scripts/render-deployment.js";
 import { migrationConfiguration } from "../models/migrations/deploymentMigration.js";
 
 const SHA = "a".repeat(40);
@@ -109,6 +109,25 @@ test("bad database credentials stop before changing any running service", async 
   await assert.rejects(deployRenderProduction(env, p.options), /access denied/);
   assert.equal(p.state.migrationCalls, 0);
   assert.ok(p.events.every(event => !event.method || event.method === "GET"));
+});
+
+test("read-only preflight checks service configuration and SQL access without maintenance or migration", async () => {
+  const p = platform();
+  const result = await preflightRenderProduction(env, p.options);
+  assert.equal(result.apiService.id, "srv-api");
+  assert.equal(p.state.migrationCalls, 0);
+  assert.equal(p.deployments.size, 0);
+  assert.ok(p.events.some(event => event.probe));
+  assert.ok(p.events.every(event => event.probe || event.method === "GET"));
+});
+
+test("suspended production services fail with an actionable diagnostic before changing services", async () => {
+  const p = platform();
+  p.services.get("srv-api").suspended = "suspended";
+  await assert.rejects(preflightRenderProduction(env, p.options), /Resume the API\/worker in the Render dashboard/);
+  assert.equal(p.deployments.size, 0);
+  assert.equal(p.state.migrationCalls, 0);
+  assert.ok(p.events.every(event => event.method === "GET"));
 });
 
 test("Render native auto-deploy must be disabled before this workflow can take control", async () => {

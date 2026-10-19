@@ -8,6 +8,7 @@ import { buildUuidMigrationPlan } from "../models/migrations/uuidMigration.js";
 import { exportUuidDatabase } from "../models/migrations/uuidExport.js";
 import { assertConsolidationColumns, consolidatedForeignKeys, transformRelationalRow } from "../models/migrations/relationalRows.js";
 import { databaseReadiness } from "../middleware/databaseReadiness.js";
+import { reviewedSourceConnection } from "../models/migrations/reviewedSource.js";
 
 const env = { DB_HOST: "fixture.invalid", DB_PORT: "4000", DB_USER: "fixture", DB_NAME: "legacy", DB_MIGRATION_MAINTENANCE: "true", ADMIN_EMAIL: "ops@example.invalid" };
 const stamp = "2026-10-15 09:00:00";
@@ -96,7 +97,14 @@ function cluster() {
         const from = sql.match(/FROM `(\w+)`/);
         if (from && /^SELECT/.test(sql)) {
           let rows = current().get(from[1]).rows;
-          if (/ORDER BY id LIMIT 100/.test(sql)) rows = rows.filter(row => !params.length || row.id > params[0]).slice().sort((a, b) => a.id < b.id ? -1 : 1).slice(0, 100);
+          const pagination = sql.match(/ORDER BY `?(\w+)`? LIMIT 100/);
+          if (pagination) {
+            const key = pagination[1];
+            const hasCursor = /WHERE `?\w+`? > \?/.test(sql);
+            const exclusions = /id NOT IN/.test(sql) ? params.slice(hasCursor ? 1 : 0).map(String) : [];
+            rows = rows.filter(row => (!hasCursor || row[key] > params[0]) && !exclusions.includes(String(row.id)))
+              .slice().sort((a, b) => a[key] < b[key] ? -1 : 1).slice(0, 100);
+          }
           return [clone(rows)];
         }
         throw new Error(`Unsupported fixture query: ${sql}`);
@@ -188,6 +196,56 @@ test("successful restart reuses the migrated database without overwriting new ap
   assert.equal(result.reused, true);
   assert.equal(target.get("users").rows.length, 4);
   assert.ok(fixture.calls.slice(before).every(call => /^(SELECT|SHOW)/.test(call.sql)));
+});
+
+test("full preservation retains legacy modules and orphan history with disabled, traceable historical identities", async () => {
+  const fixture = cluster();
+  const oldUsers = clone(fixture.databases.get("legacy").get("users").rows);
+  fixture.seed("legacy", "users", ["id INT PRIMARY KEY", "full_name VARCHAR(255) NOT NULL", "email VARCHAR(255)", "is_verified BOOLEAN DEFAULT FALSE", "status VARCHAR(20)", "settings JSON", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"], oldUsers);
+  fixture.seed("legacy", "technicians", ["id INT PRIMARY KEY", "name VARCHAR(255) NOT NULL", "email VARCHAR(255) NOT NULL", "status VARCHAR(20)", "is_active BOOLEAN DEFAULT TRUE", "is_available BOOLEAN DEFAULT TRUE", "settings JSON", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"],
+    [{ id: 1, name: "Technician", email: "tech@example.invalid", status: "approved", is_active: 1, is_available: 1, settings: null, created_at: stamp }]);
+  fixture.databases.get("legacy").get("service_requests").rows.push({ id: 11, user_id: "missing-legacy-customer", technician_id: 999, pricing_snapshot: null, created_at: stamp });
+  fixture.seed("legacy", "vehicles", ["`id` INT NOT NULL PRIMARY KEY AUTO_INCREMENT", "`user_id` INT NOT NULL", "`vehicle_number` VARCHAR(64)"], [{ id: 7, user_id: 1, vehicle_number: "original plate" }]);
+  fixture.seed("legacy", "technician_availability", ["`technician_id` INT NOT NULL PRIMARY KEY", "`is_available` BOOLEAN DEFAULT FALSE"], [{ technician_id: 1, is_available: 0 }]);
+  const before = clone([...fixture.databases.get("legacy")]);
+  const result = await prepareDeploymentDatabase(env, { connect: fixture.connect, log() {},
+    planOptions: { preservedTables: ["vehicles", "technician_availability"], restoreMissingPrincipals: true } });
+  const target = fixture.databases.get(result.database);
+  assert.equal(result.tables, 44);
+  assert.equal(result.preservedSourceRows.service_requests, 2);
+  assert.equal(target.get("service_requests").rows.length, 2);
+  assert.equal(target.get("vehicles").rows[0].id, 7);
+  assert.equal(target.get("vehicles").rows[0].user_id, migratedId("users", 1));
+  assert.equal(target.get("technician_availability").rows[0].technician_id, migratedId("technicians", 1));
+  const customer = target.get("users").rows.find(row => row.id === migratedId("users", "missing-legacy-customer"));
+  assert.equal(customer.is_verified, 0);
+  assert.equal(customer.email, null);
+  assert.equal(customer.status, "legacy_unresolved");
+  assert.equal(JSON.parse(customer.settings).migration.state, "unresolved_historical_identity");
+  const technician = target.get("technicians").rows.find(row => row.id === migratedId("technicians", 999));
+  assert.equal(technician.status, "rejected");
+  assert.equal(technician.is_active, 0);
+  assert.equal(technician.is_available, 0);
+  assert.match(technician.email, /@migration\.invalid$/);
+  assert.deepEqual(clone([...fixture.databases.get("legacy")]), before);
+});
+
+test("a reviewed scope preserves excluded rows and legacy modules unchanged in the source while verifying the active target", async () => {
+  const fixture = cluster();
+  fixture.seed("legacy", "old_module", ["id INT PRIMARY KEY", "note TEXT"], [{ id: 1, note: "retained original history" }]);
+  fixture.databases.get("legacy").get("service_requests").rows.push({ id: 11, user_id: 999, technician_id: 1, pricing_snapshot: null, created_at: stamp });
+  const before = clone([...fixture.databases.get("legacy")]);
+  const review = { unmodeledTablesRetainedInSource: ["old_module"], quarantinedRowsRetainedInSource: { service_requests: ["11"] } };
+  const connect = async options => {
+    const connection = await fixture.connect(options);
+    return options.database === "legacy" ? reviewedSourceConnection(connection, review) : connection;
+  };
+  const result = await prepareDeploymentDatabase(env, { connect, log() {} });
+  assert.equal(result.preservedSourceRows.service_requests, 1);
+  assert.equal(fixture.databases.get(result.database).get("service_requests").rows.length, 1);
+  assert.equal(fixture.databases.get(result.database).has("old_module"), false);
+  assert.deepEqual(clone([...fixture.databases.get("legacy")]), before);
+  assert.match(fixture.databases.get(result.database).get("users").comment, /:ready$/);
 });
 
 test("migration requires stopped writers and refuses to overwrite an unowned destination", async () => {
