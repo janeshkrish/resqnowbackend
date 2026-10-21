@@ -101,6 +101,15 @@ function completeRow(row, tableColumns, timestamp) {
       else value = column.column_default;
     }
     if (value == null && column.is_nullable === "NO") throw new Error(`Missing required migrated value ${column.table_name}.${name}`);
+    if (value != null && column.data_type === "decimal") {
+      const scale = Number(column.column_type.match(/^decimal\(\d+,\s*(\d+)\)/i)?.[1] || 0);
+      const parts = String(value).match(/^(-?\d+)(?:\.(\d*))?$/);
+      if (!parts || (parts[2] || "").length > scale) throw new Error(`Decimal precision requires review: ${column.table_name}.${name}`);
+      // TiDB returns DECIMAL with its declared scale even when a schema default
+      // is written as 500 or 5.0. Pad exactly, without floating-point conversion
+      // or changing the persisted source/backup digest representation.
+      value = parts[1] + (scale ? `.${(parts[2] || "").padEnd(scale, "0")}` : "");
+    }
     complete[name] = column.data_type === "json" && value != null && typeof value !== "string" ? JSON.stringify(value) : value ?? null;
   }
   return complete;
@@ -247,6 +256,10 @@ export async function prepareDeploymentDatabase(env = process.env, { connect = o
   let source;
   let target;
   let locked = false;
+  let heartbeat;
+  let lockHeartbeat;
+  let sourceHeartbeat;
+  let heartbeatError;
   try {
     for (let attempt = 0; attempt < 30; attempt++) {
       const [[lock]] = await control.query("SELECT GET_LOCK(?, 10) AS acquired", [config.lock]);
@@ -256,6 +269,7 @@ export async function prepareDeploymentDatabase(env = process.env, { connect = o
     }
     if (!locked) throw new Error("Another deployment still holds the database migration lock. Retry startup after it completes.");
     const assertLock = async () => {
+      if (heartbeatError) throw heartbeatError;
       const [[owner]] = await control.query("SELECT IS_USED_LOCK(?) AS owner, CONNECTION_ID() AS connection_id", [config.lock]);
       if (String(owner.owner) !== String(owner.connection_id)) throw new Error("Lost database migration lock; target will not be activated.");
     };
@@ -286,9 +300,20 @@ export async function prepareDeploymentDatabase(env = process.env, { connect = o
     target = control;
     await source.query("SET time_zone = '+00:00'");
     await target.query("SET time_zone = '+00:00'");
+    // Large binary reads can leave the lock session idle long enough for TiDB's
+    // gateway to close it. Keep both existing sessions active without replacing
+    // either session or reacquiring a lost lock. Bound each to one queued probe.
+    const probe = task => Promise.resolve().then(task).catch(error => { heartbeatError ||= error; });
+    heartbeat = setInterval(() => {
+      lockHeartbeat ||= probe(assertLock).finally(() => { lockHeartbeat = null; });
+      sourceHeartbeat ||= probe(() => source.query("SELECT 1")).finally(() => { sourceHeartbeat = null; });
+    }, 20000);
+    heartbeat.unref();
     log(`[DB migration] transferring ${config.source} -> ${config.target}; API remains unready`);
     return await transferDatabase({ source, target, control, config, env, assertLock, log, planOptions });
   } finally {
+    clearInterval(heartbeat);
+    await Promise.allSettled([lockHeartbeat, sourceHeartbeat].filter(Boolean));
     if (source) await Promise.allSettled([source.end()]);
     if (locked) { try { await control.query("SELECT RELEASE_LOCK(?)", [config.lock]); } catch { /* closed connections release their lock */ } }
     await control.end();

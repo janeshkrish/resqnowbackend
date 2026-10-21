@@ -1,5 +1,7 @@
 # TiDB migration review, 2026-10-19
 
+**Update, 2026-10-21:** The full-preservation database migration is now complete and independently verified. Railway API release remains blocked by its platform outage. See [the completed cutover and release handoff](migration-cutover-2026-10-21.md). The status and resume instructions below describe the earlier October 19 attempt.
+
 Status: **full preservation authorized; live apply stopped during read-only source verification because external connectivity repeatedly failed**. A completed cutover must be supported by the private result file and live readiness checks. Railway remains in maintenance; the original database is unchanged.
 
 Production runs on Railway. Its `/ready` endpoint is HTTP 503 because the legacy TiDB schema requires migration. The signed-in GitHub log shows that the separate deployment job failed because it expected missing Render/SQL settings. The workflow has been corrected locally so the legacy Render job is opt-in; Railway remains the production host.

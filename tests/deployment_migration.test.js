@@ -72,6 +72,7 @@ function cluster() {
         if (/FROM information_schema.columns/.test(sql)) return [[...(databases.get(database || params[0]) || new Map()).values()].flatMap(item => clone(item.columns))];
         if (/FROM information_schema.key_column_usage/.test(sql)) return [[...current().values()].flatMap(item => clone(item.keys))];
         if (/SELECT VERSION/.test(sql)) return [[{ version: "8.0.11-TiDB-v8.5.0" }]];
+        if (sql === "SELECT 1") return [[{ 1: 1 }]];
         const use = sql.match(/^USE `(\w+)`/);
         if (use) { database = use[1]; return [{}]; }
         if (/^(SET |START TRANSACTION|ROLLBACK)/.test(sql)) return [{}];
@@ -118,6 +119,11 @@ function cluster() {
         const names = [...insert[2].matchAll(/`(\w+)`/g)].map(match => match[1]);
         for (let offset = 0; offset < params.length; offset += names.length) {
           const row = Object.fromEntries(names.map((name, index) => [name, clone(params[offset + index])]));
+          for (const column of item.columns.filter(column => column.data_type === "decimal" && row[column.column_name] != null)) {
+            const scale = Number(column.column_type.match(/,\s*(\d+)\)/)?.[1] || 0);
+            const [whole, fraction = ""] = String(row[column.column_name]).split(".");
+            row[column.column_name] = whole + (scale ? `.${fraction.padEnd(scale, "0")}` : "");
+          }
           assert.ok(!item.rows.some(existing => existing.id === row.id), "duplicate UUID");
           if (state.corruptTable === item.name) row[names.find(name => name !== "id")] = "CORRUPTED";
           item.rows.push(row);
@@ -198,6 +204,64 @@ test("successful restart reuses the migrated database without overwriting new ap
   assert.ok(fixture.calls.slice(before).every(call => /^(SELECT|SHOW)/.test(call.sql)));
 });
 
+test("a slow binary read keeps the lock session alive and stops its heartbeat after migration", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const fixture = cluster();
+  let reading = false;
+  let probed = false;
+  let closed = false;
+  const connect = async options => {
+    const connection = await fixture.connect(options);
+    const query = connection.query.bind(connection);
+    connection.query = async (sql, params) => {
+      if (!options.database && /IS_USED_LOCK/.test(sql)) {
+        if (closed) throw new Error("lock session expired during binary read");
+        if (reading) probed = true;
+      }
+      if (options.database === "legacy" && /^SELECT \* FROM `files`.*LIMIT 100/.test(sql)) {
+        reading = true;
+        probed = false;
+        t.mock.timers.tick(60000);
+        await new Promise(setImmediate);
+        closed = !probed;
+        reading = false;
+      }
+      return query(sql, params);
+    };
+    return connection;
+  };
+  const result = await prepareDeploymentDatabase(env, { connect, log() {} });
+  assert.equal(result.migrated, true);
+  assert.deepEqual(fixture.databases.get(result.database).get("files").rows[0].data, Buffer.from([0, 255, 39, 92, 10]));
+  const calls = fixture.calls.length;
+  t.mock.timers.tick(60000);
+  await new Promise(setImmediate);
+  assert.equal(fixture.calls.length, calls);
+});
+
+test("lock loss detected during a slow binary read prevents subsequent target writes and activation", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const fixture = cluster();
+  let writesAtLockLoss;
+  const connect = async options => {
+    const connection = await fixture.connect(options);
+    const query = connection.query.bind(connection);
+    connection.query = async (sql, params) => {
+      if (options.database === "legacy" && /^SELECT \* FROM `files`.*LIMIT 100/.test(sql)) {
+        fixture.state.loseLock = true;
+        writesAtLockLoss = fixture.calls.filter(call => /^(INSERT|CREATE|DROP|ALTER)/.test(call.sql)).length;
+        t.mock.timers.tick(20000);
+        await new Promise(setImmediate);
+      }
+      return query(sql, params);
+    };
+    return connection;
+  };
+  await assert.rejects(prepareDeploymentDatabase(env, { connect, log() {} }), /Lost database migration lock/);
+  assert.equal(fixture.calls.filter(call => /^(INSERT|CREATE|DROP|ALTER)/.test(call.sql)).length, writesAtLockLoss);
+  assert.match(fixture.databases.get("legacy_relational_v2").get("users").comment, /:copying$/);
+});
+
 test("full preservation retains legacy modules and orphan history with disabled, traceable historical identities", async () => {
   const fixture = cluster();
   const oldUsers = clone(fixture.databases.get("legacy").get("users").rows);
@@ -228,6 +292,20 @@ test("full preservation retains legacy modules and orphan history with disabled,
   assert.equal(technician.is_available, 0);
   assert.match(technician.email, /@migration\.invalid$/);
   assert.deepEqual(clone([...fixture.databases.get("legacy")]), before);
+});
+
+test("restored identities verify against TiDB decimal defaults without rounding money or changing source digests", async () => {
+  const fixture = cluster();
+  fixture.seed("legacy", "technicians", ["id INT PRIMARY KEY", "name VARCHAR(255) NOT NULL", "email VARCHAR(255) NOT NULL", "base_price DECIMAL(30, 2) DEFAULT 1234567890123456789012345678.9", "rating DECIMAL(3, 2) DEFAULT 5.0", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"],
+    [{ id: 1, name: "Technician", email: "technician@example.invalid", base_price: "1234567890123456789012345678.90", rating: "5.00", created_at: stamp }]);
+  fixture.databases.get("legacy").get("service_requests").rows[0].technician_id = 999;
+  const before = clone([...fixture.databases.get("legacy")]);
+  const result = await prepareDeploymentDatabase(env, { connect: fixture.connect, log() {}, planOptions: { restoreMissingPrincipals: true } });
+  const rows = fixture.databases.get(result.database).get("technicians").rows;
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every(row => row.base_price === "1234567890123456789012345678.90" && row.rating === "5.00"));
+  assert.deepEqual(clone([...fixture.databases.get("legacy")]), before);
+  assert.equal(result.migrated, true);
 });
 
 test("a reviewed scope preserves excluded rows and legacy modules unchanged in the source while verifying the active target", async () => {
