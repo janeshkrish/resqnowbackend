@@ -188,6 +188,12 @@ Update `.env` with local, staging, or production values before starting the serv
 | `ANTHROPIC_API_KEY` | unset | Turns on ResQNow-Thozhan's AI step for sentences the app can't read on its own. Without it, voice still works on the app's word lists. |
 | `VOICE_AI_MODEL` | `claude-haiku-5-5` | Model for the AI step. |
 | `VOICE_AI_TIMEOUT_MS` | `3500` | After this the app carries on without the AI step. |
+| `SARVAM_API_KEY` | unset | Gives ResQNow-Thozhan a natural, human-sounding voice from Sarvam's Bulbul (made for Indian languages). Without a voice key, the phone's own voice is used. |
+| `GOOGLE_TTS_API_KEY` | unset | The same with Google's Chirp 3 HD voices instead (Cloud Text-to-Speech API key). |
+| `VOICE_TTS_PROVIDER` | first key set | `sarvam`, `google`, or `off` for the phone's own voice. |
+| `VOICE_TTS_VOICE_TA` / `VOICE_TTS_VOICE_EN` | `rohan` (Sarvam) / `ta-IN-Chirp3-HD-Charon`, `en-IN-Chirp3-HD-Charon` (Google) | The voice for Tamil and Tanglish lines, and for English ones. |
+| `VOICE_TTS_PACE` | `1` | Speaking speed, 0.8 to 1.2. |
+| `VOICE_TTS_TIMEOUT_MS` | `6000` | After this the app uses the phone's own voice for that line. |
 
 ## API Configuration
 

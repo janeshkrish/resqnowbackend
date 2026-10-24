@@ -91,11 +91,11 @@ async function serve(options) {
 }
 
 test("GET /api/voice/status tells the app whether voice and the AI step are on", async () => {
-  const on = await serve({ config: voiceConfig({}), understanding: { enabled: true, understand: async () => ({}) } });
-  assert.deepEqual(await (await fetch(`${on.base}/status`)).json(), { enabled: true, ai: true });
+  const on = await serve({ config: voiceConfig({}), understanding: { enabled: true, understand: async () => ({}) }, speech: { enabled: true } });
+  assert.deepEqual(await (await fetch(`${on.base}/status`)).json(), { enabled: true, ai: true, voice: true });
   await on.close();
-  const off = await serve({ config: voiceConfig({ VOICE_THOZHAN: "off" }), understanding: { enabled: true, understand: async () => ({}) } });
-  assert.deepEqual(await (await fetch(`${off.base}/status`)).json(), { enabled: false, ai: false });
+  const off = await serve({ config: voiceConfig({ VOICE_THOZHAN: "off" }), understanding: { enabled: true, understand: async () => ({}) }, speech: { enabled: true } });
+  assert.deepEqual(await (await fetch(`${off.base}/status`)).json(), { enabled: false, ai: false, voice: false });
   await off.close();
 });
 
