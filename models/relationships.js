@@ -2,11 +2,13 @@ import { TABLES } from "./schema/index.js";
 
 // External provider IDs (Google/Firebase/Razorpay/UPI/OSM) are not database keys.
 export const EXTERNAL_IDS = new Set([
+  "app_id", // Android package name, not a relational UUID.
   "google_id", "firebase_uid", "upi_id", "registration_payment_id", "registration_order_id",
   "razorpay_payment_id", "razorpay_order_id", "order_id", "sequence_id",
 ]);
 
 export const COLUMN_TARGETS = Object.freeze({
+  installation_id: "android_app_installations",
   user_id: "users", customer_id: "users", technician_id: "technicians",
   service_request_id: "service_requests", request_id: "service_requests", current_job_id: "service_requests",
   assigned_vehicle_id: "technician_fleet_vehicles", assigned_employee_id: "technician_team_members",
@@ -19,6 +21,7 @@ export const COLUMN_TARGETS = Object.freeze({
 });
 
 export const POLYMORPHIC = Object.freeze({
+  android_app_installation_accounts: { account_id: "account_type" },
   device_tokens: { user_id: "user_type" },
   request_timeline: { actor_id: "actor_type" },
   request_attachments: { uploaded_by_id: "uploaded_by_type" },

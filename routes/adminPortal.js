@@ -7,6 +7,7 @@ import { ensureAdminExtendedSchema } from "../services/adminExtendedSchema.js";
 import { getMonitoringRules } from "../services/operationsCommandCenterService.js";
 import { getDispatchSettings } from "../services/dispatchQueueService.js";
 import * as portal from "../services/adminPortalService.js";
+import { createAppAnalyticsAdminRouter } from './appAnalytics.js';
 
 // Reads for the redesigned admin portal. Every action (assign, refund, approve, pay out…) keeps
 // using the existing admin endpoints; this router only adds the views those endpoints lacked.
@@ -18,6 +19,7 @@ export function createAdminPortalRouter({
 } = {}) {
   const router = Router();
   router.use(guard);
+  router.use('/app-installs', createAppAnalyticsAdminRouter({guard}));
 
   const read = (name, fn) => async (req, res) => {
     try {

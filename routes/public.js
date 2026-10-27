@@ -1,4 +1,6 @@
 import { Router } from "express";
+import {appAnalyticsService} from '../services/appAnalyticsService.js';
+import {recordAcceptedApkDownload} from '../services/appAnalyticsDownloads.js';
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -528,7 +530,7 @@ router.get("/android-app/status", async (_req, res) => {
     }
 });
 
-async function handleAndroidApkDownload(res, { headOnly = false } = {}) {
+export async function handleAndroidApkDownload(req, res, { headOnly = false, analytics = appAnalyticsService } = {}) {
     try {
         const resolution = resolveAndroidApkPath();
         const apkPath = resolution?.apkPath;
@@ -573,7 +575,7 @@ async function handleAndroidApkDownload(res, { headOnly = false } = {}) {
         });
 
         return res.download(apkPath, fileName, (error) => {
-            if (!error) return;
+            if (!error) { recordAcceptedApkDownload({req,res,releaseKey:`${fileName}:${resolution.stat.size}:${Math.round(resolution.stat.mtimeMs)}`,enqueue:analytics.enqueueDownload}); return; }
             console.error("[Android APK Download] Stream error:", error);
             if (!res.headersSent) {
                 res.status(500).json({ error: "Failed to download Android app package." });
@@ -589,16 +591,16 @@ async function handleAndroidApkDownload(res, { headOnly = false } = {}) {
  * HEAD /api/public/android-app/download
  * Check whether Android APK is available for download.
  */
-router.head("/android-app/download", async (_req, res) => {
-    return handleAndroidApkDownload(res, { headOnly: true });
+router.head("/android-app/download", async (req, res) => {
+    return handleAndroidApkDownload(req, res, { headOnly: true });
 });
 
 /**
  * GET /api/public/android-app/download
  * Download latest Android APK from release output folder.
  */
-router.get("/android-app/download", async (_req, res) => {
-    return handleAndroidApkDownload(res, { headOnly: false });
+router.get("/android-app/download", async (req, res) => {
+    return handleAndroidApkDownload(req, res, { headOnly: false });
 });
 
 export default router;

@@ -33,7 +33,7 @@ test("UUID migration preserves Razorpay payment IDs inside gateway and wallet me
 });
 
 test("every active table has a UUID primary key; external provider IDs and counters retain their types", () => {
-  assert.equal(Object.keys(TABLES).length, 42);
+  assert.equal(Object.keys(TABLES).length, 46);
   assert.equal(TABLES.otp_rate_limits, undefined);
   for (const [table, sql] of Object.entries(TABLES)) {
     assert.match(sql, /\bid CHAR\(36\) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY/, table);

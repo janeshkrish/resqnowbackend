@@ -1236,6 +1236,7 @@ router.delete("/technicians/:id", async (req, res) => {
       walletIds
     );
 
+    await (await import('../services/appAnalyticsStore.js')).deleteInstallationAccountLinks({connection:conn,kind:'technician',accountId:technicianId});
     const [result] = await conn.execute("DELETE FROM technicians WHERE id = ?", [technicianId]);
     await conn.commit();
 
@@ -1638,6 +1639,7 @@ router.delete("/users/:id", async (req, res) => {
       );
     }
 
+    await (await import('../services/appAnalyticsStore.js')).deleteInstallationAccountLinks({connection:conn,kind:'user',accountId:userId});
     const [result] = await conn.execute("DELETE FROM users WHERE id = ?", [userId]);
     await conn.commit();
 

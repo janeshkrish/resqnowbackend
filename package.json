@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node scripts/test.mjs",
+    "db:migrate:app-analytics": "node scripts/migrate-app-analytics.mjs",
     "db:migrate:uuid": "node models/migrations/uuid-cli.mjs",
     "db:migrate:deploy": "node models/migrations/deploy-cli.mjs",
     "db:migrate:reviewed": "node scripts/migrate-reviewed-deployment.mjs",

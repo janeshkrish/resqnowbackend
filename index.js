@@ -10,6 +10,8 @@ import techniciansRouter from "./routes/technicians.js";
 import adminRouter from "./routes/admin.js";
 import adminMonitorRouter from "./routes/adminMonitor.js";
 import adminPortalRouter from "./routes/adminPortal.js";
+import { createAppAnalyticsRouter } from './routes/appAnalytics.js';
+import { startAppAnalyticsMaintenance } from './services/appAnalyticsService.js';
 import usersRouter from "./routes/users.js";
 import authRouter from "./routes/auth.js";
 import serviceRequestsRouter from "./routes/service_requests.js";
@@ -213,6 +215,8 @@ function createApp() {
   // Razorpay webhook must receive the untouched raw body for signature verification.
   app.post("/api/payments/razorpay/webhook", express.raw({ type: "application/json" }), razorpayWebhookHandler);
 
+  app.use('/api/app-analytics', createAppAnalyticsRouter());
+  startAppAnalyticsMaintenance();
   app.use(express.json({ limit: "2mb" }));
   app.use(express.urlencoded({ extended: true }));
 

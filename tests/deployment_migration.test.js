@@ -154,7 +154,7 @@ test("automatic TiDB copy preserves source, relationships, merged histories, OTP
   const before = clone([...fixture.databases.get("legacy")]);
   const result = await run(fixture);
   assert.equal(result.migrated, true);
-  assert.equal(result.tables, 42);
+  assert.equal(result.tables, 46);
   const target = fixture.databases.get(result.database);
   assert.deepEqual([...target.keys()].sort(), [...MODEL_TABLES].sort());
   assert.ok(RETIRED_TABLES.every(name => !target.has(name)));
@@ -275,7 +275,7 @@ test("full preservation retains legacy modules and orphan history with disabled,
   const result = await prepareDeploymentDatabase(env, { connect: fixture.connect, log() {},
     planOptions: { preservedTables: ["vehicles", "technician_availability"], restoreMissingPrincipals: true } });
   const target = fixture.databases.get(result.database);
-  assert.equal(result.tables, 44);
+  assert.equal(result.tables, 48);
   assert.equal(result.preservedSourceRows.service_requests, 2);
   assert.equal(target.get("service_requests").rows.length, 2);
   assert.equal(target.get("vehicles").rows[0].id, 7);

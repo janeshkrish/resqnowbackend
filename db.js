@@ -4,6 +4,13 @@ import { prepareDeploymentDatabase } from "./models/migrations/deploymentMigrati
 
 let pool = null;
 let poolPromise = null;
+let resolvedDatabaseOptions = null;
+
+// Internal only: analytics reuses the resolved UUID database, never reruns cutover.
+export async function getResolvedDatabaseOptions() {
+  await getPool();
+  return { ...resolvedDatabaseOptions };
+}
 
 function isProductionLike() {
   return (
@@ -39,7 +46,7 @@ async function createPool() {
   const deployment = await prepareDeploymentDatabase(process.env);
   const port = process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 4000;
   const useSsl = process.env.DB_SSL === "true" || process.env.DB_SSL === "1";
-  const candidate = mysql.createPool({
+  const options = {
     host: process.env.DB_HOST || "localhost",
     port: Number.isNaN(port) ? 4000 : port,
     user: process.env.DB_USER || "root",
@@ -54,7 +61,8 @@ async function createPool() {
         rejectUnauthorized: process.env.DB_SSL_STRICT === 'true',
       },
     }),
-  });
+  };
+  const candidate = mysql.createPool(options);
 
   // Quick connectivity check to surface helpful error messages early
   try {
@@ -66,6 +74,7 @@ async function createPool() {
   }
 
   pool = withUuidPersistence(candidate);
+  resolvedDatabaseOptions = options;
   return pool;
 }
 

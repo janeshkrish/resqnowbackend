@@ -402,6 +402,8 @@ Current validation status from the latest local review:
 
 ## Contributing
 
+Android adoption analytics rollout, metrics, privacy, flags and disposable testing: [runbook](docs/android-app-analytics.md).
+
 This is a private proprietary project. Contributions are accepted only from authorized collaborators.
 
 1. Create a feature branch from the protected base branch.
