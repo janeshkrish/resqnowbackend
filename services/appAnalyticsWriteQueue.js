@@ -6,21 +6,22 @@ export function createAppAnalyticsWriteQueue({now=Date.now,maxPending=500,concur
   const unavailable=()=>Object.assign(new Error('App analytics temporarily unavailable'),{status:503,code:'ANALYTICS_UNAVAILABLE'});
   const health=()=>({active,pending:pending.length,dropped,timeouts,circuitOpen:now()<openUntil});
   function failed(){ if(++failures>=failureThreshold) openUntil=now()+openMs; }
+  function countFailure(job){if(!job.failureCounted){job.failureCounted=true;failed();}}
   function drain(){
     while(active<concurrency && pending.length){
       const job=pending.shift();
       if(job.expired)continue;
       if(now()<openUntil){clearTimeout(job.timer);dropped++;job.reject(unavailable());continue;}
       active++;
-      Promise.resolve().then(job.run).then(value=>{if(!job.expired){failures=0;openUntil=0;job.resolve(value);}},error=>{const clientError=error?.status>=400&&error?.status<500;if(!clientError)failed();if(!job.expired)job.reject(clientError?error:unavailable());}).finally(()=>{clearTimeout(job.timer);active--;drain();});
+      Promise.resolve().then(job.run).then(value=>{if(!job.expired){failures=0;openUntil=0;job.resolve(value);}},error=>{const clientError=error?.status>=400&&error?.status<500;if(!clientError){if(!job.expired)dropped++;countFailure(job);}if(!job.expired)job.reject(clientError?error:unavailable());}).finally(()=>{clearTimeout(job.timer);active--;drain();});
     }
   }
   function submit(run){
     if(typeof run!=='function')return Promise.reject(new TypeError('Analytics operation must be a function'));
     if(now()<openUntil || pending.length>=maxPending){dropped++;return Promise.reject(unavailable());}
     return new Promise((resolve,reject)=>{
-      const job={run,resolve,reject,expired:false};
-      job.timer=setTimeout(()=>{job.expired=true;timeouts++;dropped++;const index=pending.indexOf(job);if(index>=0)pending.splice(index,1);else failed();reject(unavailable());},timeoutMs);
+      const job={run,resolve,reject,expired:false,failureCounted:false};
+      job.timer=setTimeout(()=>{job.expired=true;timeouts++;dropped++;const index=pending.indexOf(job);if(index>=0)pending.splice(index,1);else countFailure(job);reject(unavailable());},timeoutMs);
       pending.push(job);drain();
     });
   }

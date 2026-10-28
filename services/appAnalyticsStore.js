@@ -55,6 +55,11 @@ export async function withdrawInstallation({pool,installationId,proof,consentRev
   }); } catch(e) { if(e.code==='ER_NO_SUCH_TABLE')return {noRecord:true};throw e; }
 }
 export async function deleteInstallationAccountLinks({connection,kind,accountId}){
+  if(!['user','technician'].includes(kind))throw error(400,'Invalid account kind');
+  // Share the link writer's parent lock before removing links. Range/gap locks
+  // cannot serialize this on TiDB or MySQL READ COMMITTED; the caller owns the
+  // account-deletion transaction and keeps this lock until account deletion.
+  await connection.query(`SELECT id FROM ${kind==='user'?'users':'technicians'} WHERE id=? FOR UPDATE`,[accountId]);
   try{await connection.query('DELETE FROM android_app_installation_accounts WHERE account_type=? AND account_id=?',[kind,accountId]);}catch(e){if(e.code!=='ER_NO_SUCH_TABLE')throw e;}
 }
 export async function recordDownloadSession({pool,downloadId,releaseKey,now=Date.now()}){

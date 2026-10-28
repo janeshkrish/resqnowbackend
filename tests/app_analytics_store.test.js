@@ -4,6 +4,26 @@ import {randomUUID} from 'node:crypto';
 const store=await import('../services/appAnalyticsStore.js').catch(()=>({}));
 const migration=await import('../models/migrations/appAnalyticsMigration.js').catch(()=>({}));
 const enabled=process.env.APP_ANALYTICS_TEST_DB==='1';
+
+test('real DB: account deletion locks the parent before analytics cleanup, even without gap locks',{skip:!enabled},async()=>{
+ const {createDisposableDatabase}=await import('./helpers/appAnalyticsDatabase.mjs');const db=await createDisposableDatabase();
+ try{
+  await migration.migrateAppAnalytics({pool:db.pool,mode:'apply'});
+  for(const kind of ['user','technician']){
+   const table=kind==='user'?'users':'technicians',accountId=randomUUID();await db.pool.query(`INSERT INTO ${table} VALUES (?,?)`,[accountId,'Synthetic deletion race']);
+   const report={installationId:randomUUID(),installationSecret:'a'.repeat(64),consentRevision:1,consentPolicyVersion:'2026-10-27',appId:'com.resqnow1.app',versionName:'1.3',versionCode:4};await store.registerInstallation({pool:db.pool,report});
+   const deletion=await db.pool.getConnection();let linking;
+   try{
+    await deletion.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');await deletion.beginTransaction();
+    await store.deleteInstallationAccountLinks({connection:deletion,kind,accountId});
+    let settled=false;linking=store.linkInstallationAccount({pool:db.pool,installationId:report.installationId,proof:report.installationSecret,consentRevision:1,account:{kind,id:accountId}}).then(()=>{settled=true;return null;},error=>{settled=true;return error;});
+    await new Promise(resolve=>setTimeout(resolve,100));assert.equal(settled,false,'link must wait for the deleting parent transaction');
+    await deletion.query(`DELETE FROM ${table} WHERE id=?`,[accountId]);await deletion.commit();assert.equal((await linking)?.status,403);
+    const [[row]]=await db.pool.query('SELECT COUNT(*) n FROM android_app_installation_accounts WHERE account_id=?',[accountId]);assert.equal(Number(row.n),0);
+   }finally{await deletion.rollback();deletion.release();if(linking)await linking;}
+  }
+ }finally{await db.close();}
+});
 test('real DB: schema check refuses a table missing its uniqueness guarantee',{skip:!enabled},async()=>{const {createDisposableDatabase}=await import('./helpers/appAnalyticsDatabase.mjs');const db=await createDisposableDatabase();try{await migration.migrateAppAnalytics({pool:db.pool,mode:'apply'});await db.pool.query('ALTER TABLE android_app_analytics_daily DROP INDEX uq_android_day_metric');await assert.rejects(migration.migrateAppAnalytics({pool:db.pool,mode:'check'}),/index/i);}finally{await db.close();}});
 test('real DB: the production analytics pool accepts stable native UUIDs without changing business ID generation', {skip:!enabled},async()=>{
  const {createDisposableDatabase}=await import('./helpers/appAnalyticsDatabase.mjs');const {createAnalyticsPool}=await import('../services/appAnalyticsDatabase.js');const db=await createDisposableDatabase(),analytics=createAnalyticsPool(db.config);
