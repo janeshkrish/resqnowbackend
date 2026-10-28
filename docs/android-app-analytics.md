@@ -36,3 +36,7 @@ Registration is 30/minute/IP; telemetry is 6/minute/installation; bodies are at 
 The frontend `npm run test:e2e:analytics` starts the actual feature routers/guards and APK HTTP handler against this disposable schema. Its fake APK bytes test HTTP delivery only, and its browser native bridge is a simulation, not an Android-install test. Harness-only routes and larger lifecycle-test budgets are never mounted by production index.js. Keep traces off because telemetry requests contain proofs/tokens; store only sanitized screenshots in ignored output directories.
 
 Production schema changes, merge/push, APK signing/publication and production flag changes require owner approval; none is performed by the test harness.
+
+## Local implementation verification (28 October 2026)
+
+Code `31d029e` passed all 616 backend tests with real disposable DB tests enabled, and all 241 JavaScript files passed syntax build. The independent review's storage-loss health and concurrent account-deletion findings were fixed with RED-to-GREEN tests. Link cleanup now locks the parent account within the existing deletion transaction, so it does not rely on gap locks. Per-job breaker accounting counts one timeout/rejection only once. Frontend verification/remaining Android release gates are documented in its matching acceptance report; no production rollout is implied.
