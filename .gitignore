@@ -35,3 +35,6 @@ server/uploads/
 uuid-migration-private/
 *.checkpoint.json
 uuid-test-results.txt
+
+# Generated release verification output, never source or production data.
+output/quality/

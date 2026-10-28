@@ -16,6 +16,31 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_ENV: test
+      DB_MIGRATION_MODE: 'off'
+      DB_HOST: 127.0.0.1
+      DB_PORT: '13307'
+      DB_USER: root
+      DB_PASSWORD: analytics-test-only
+      DB_NAME: resqnow_quality_unused
+      APP_ANALYTICS_TEST_DB: '1'
+      APP_ANALYTICS_TEST_PORT: '13307'
+      APP_ANALYTICS_TEST_PASSWORD: analytics-test-only
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: analytics-test-only
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 13307:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -panalytics-test-only"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -25,7 +50,13 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm test
+      - name: Verify all tests with disposable databases
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/quality
+          node scripts/test.mjs | tee output/quality/backend.tap
+          node scripts/verify-test-report.mjs output/quality/backend.tap
       - run: npm run build
 
   deploy:
