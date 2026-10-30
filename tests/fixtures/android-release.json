@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "channel": "stable",
+  "applicationId": "com.resqnow1.app",
+  "versionCode": 12,
+  "versionName": "1.4.12",
+  "minSdk": 24,
+  "targetSdk": 36,
+  "sizeBytes": 16,
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "signingCertificateSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "apkUrl": "https://github.com/janeshkrish/resqnowfrontend/releases/download/android-v12/resqnow.apk",
+  "sourceCommit": "cccccccccccccccccccccccccccccccccccccccc",
+  "publishedAt": "2026-10-30T12:00:00Z"
+}

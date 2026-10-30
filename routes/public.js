@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {appAnalyticsService} from '../services/appAnalyticsService.js';
 import {recordAcceptedApkDownload} from '../services/appAnalyticsDownloads.js';
+import {createAndroidUpdatesRouter} from './androidUpdates.js';
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -19,6 +20,7 @@ import { EvChargingError, getEvChargingService, getFuelStationService } from "..
 import { getVehiclePhotoService } from "../services/vehiclePhotoService.js";
 
 const router = Router();
+router.use(createAndroidUpdatesRouter());
 
 const ROUTES_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_ROOT = path.resolve(ROUTES_DIR, "..");
