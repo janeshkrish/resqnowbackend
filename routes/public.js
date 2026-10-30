@@ -2,6 +2,8 @@ import { Router } from "express";
 import {appAnalyticsService} from '../services/appAnalyticsService.js';
 import {recordAcceptedApkDownload} from '../services/appAnalyticsDownloads.js';
 import {createAndroidUpdatesRouter} from './androidUpdates.js';
+import {androidReleaseService} from '../services/androidReleaseService.js';
+import {streamAndroidRelease} from '../services/androidReleaseStream.js';
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -532,8 +534,19 @@ router.get("/android-app/status", async (_req, res) => {
     }
 });
 
-export async function handleAndroidApkDownload(req, res, { headOnly = false, analytics = appAnalyticsService } = {}) {
+export async function handleAndroidApkDownload(req, res, { headOnly = false, analytics = appAnalyticsService, releaseService = androidReleaseService, releaseFetch = globalThis.fetch } = {}) {
     try {
+        if (process.env.ANDROID_RELEASE_DOWNLOADS_ENABLED === 'true') {
+            const result = await releaseService.getRelease({ purpose: 'website' });
+            if (result.state !== 'ready') {
+                res.set('Cache-Control', 'no-store');
+                return headOnly ? res.status(503).end() : res.status(503).json({ error: 'Android app package temporarily unavailable' });
+            }
+            return await streamAndroidRelease(req, res, {
+                release: result.release, headOnly, fetch: releaseFetch,
+                onAccepted: () => recordAcceptedApkDownload({ req, res, releaseKey: `android-v${result.release.versionCode}:${result.release.sha256}`, enqueue: analytics.enqueueDownload }),
+            });
+        }
         const resolution = resolveAndroidApkPath();
         const apkPath = resolution?.apkPath;
         console.info("[Android APK Download] Path resolution summary.", {
