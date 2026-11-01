@@ -1,4 +1,17 @@
 import test from 'node:test';import assert from 'node:assert/strict';import proxyaddr from 'proxy-addr';
+import http from 'node:http';import vm from 'node:vm';import redirects from 'follow-redirects';
+
+test('cross-realm sensitive header lists strip custom credentials on cross-origin redirects',async()=>{
+  const target=http.createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.headers));});let destination;
+  const origin=http.createServer((_req,res)=>{res.writeHead(302,{Location:destination});res.end();});
+  const listen=server=>new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+  try{await listen(target);destination=`http://127.0.0.1:${target.address().port}/synthetic-target`;await listen(origin);
+    for(const sensitiveHeaders of [['X-API-Key'],vm.runInNewContext("['X-API-Key']")]){
+      const received=await new Promise((resolve,reject)=>{const request=redirects.http.get(`http://127.0.0.1:${origin.address().port}/`,{headers:{'X-API-Key':'synthetic-only-not-a-real-key','X-Harmless':'retained'},sensitiveHeaders},res=>{let text='';res.setEncoding('utf8');res.on('data',part=>text+=part);res.once('end',()=>{try{resolve(JSON.parse(text));}catch(error){reject(error);}});});request.setTimeout(5000,()=>request.destroy(Error('Synthetic redirect timeout')));request.once('error',reject);});
+      assert.equal(received['x-api-key'],undefined,'A custom credential must never follow a cross-origin redirect');assert.equal(received['x-harmless'],'retained');
+    }
+  }finally{for(const server of [origin,target]){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}}
+});
 
 test('short IPv6 trust subnets cannot trust arbitrary IPv4 clients or spoof forwarded identity',()=>{
   for(const subnet of ['::ffff:10.0.0.0/8','::/1']){

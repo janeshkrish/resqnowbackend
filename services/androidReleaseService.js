@@ -2,8 +2,24 @@ import {parseAndroidRelease,releaseAssetUrl,validateReleaseRepository} from './a
 import {fetchReleaseResource,readReleaseJson} from './androidReleaseHttp.js';
 
 export function createAndroidReleaseService({env=process.env,fetch:fetcher=globalThis.fetch,now=Date.now,timeoutMs=5000}={}){
- let cached=null,expires=0,pending=null;
+ let cached=null,expires=0,pending=null,accepted=null;
  const repository=env.ANDROID_RELEASES_REPOSITORY??'janeshkrish/resqnowfrontend';
+ async function newestPublished(options){
+  let highest=0;
+  for(let page=1;page<=10;page++){
+   const response=await fetchReleaseResource(`https://api.github.com/repos/${repository}/releases?per_page=100&page=${page}`,{...options,headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}});
+   const entries=await readReleaseJson(response,{limit:1024*1024,signal:options.signal});
+   if(!Array.isArray(entries)||entries.length>100)throw Error('Invalid Android release history');
+   for(const entry of entries){
+    if(typeof entry?.tag_name!=='string'||typeof entry.draft!=='boolean'||typeof entry.prerelease!=='boolean')throw Error('Invalid Android release history');
+    if(entry.draft||entry.prerelease||!entry.tag_name.startsWith('android-'))continue;
+    const match=/^android-v([1-9]\d{0,9})$/.exec(entry.tag_name),code=Number(match?.[1]);
+    if(!match||!Number.isSafeInteger(code)||code>2147483647)throw Error('Ambiguous Android release history');highest=Math.max(highest,code);
+   }
+   if(!/\brel="?next"?/i.test(response.headers.get('link')??''))return highest;
+  }
+  throw Error('Android release history exceeds the bounded verification window');
+ }
  async function load(){
   const controller=new AbortController();const timer=setTimeout(()=>controller.abort(Error('Android release deadline')),Math.min(Math.max(timeoutMs,1),5000));
   try{
@@ -17,6 +33,9 @@ export function createAndroidReleaseService({env=process.env,fetch:fetcher=globa
    const value=await readReleaseJson(await fetchReleaseResource(metadata.browser_download_url,options),{limit:16384,signal:controller.signal});
    const release=parseAndroidRelease(value,{repository,tag:info.tag_name});
    if(apk.size!==release.sizeBytes||(apk.digest!=null&&apk.digest!==`sha256:${release.sha256}`))throw Error('Android APK metadata mismatch');
+   if(await newestPublished(options)!==release.versionCode)throw Error('Latest Android release is not the newest published version');
+   if(accepted&&(release.versionCode<accepted.versionCode||release.versionCode===accepted.versionCode&&JSON.stringify(release)!==JSON.stringify(accepted)))throw Error('Android release identity regressed or changed');
+   accepted=release;
    return {state:'ready',release};
   }catch{return {state:'unavailable'};}
   finally{clearTimeout(timer);}

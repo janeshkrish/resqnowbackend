@@ -20,6 +20,8 @@ Native APK-update transfers use release assets directly and are not website down
 
 ## Verification and activation
 
+Every refresh validates the latest pointer against the highest published stable Android tag in bounded GitHub history (up to10 pages of100 releases,1MiB/page, within the existing total5s deadline). Draft/prerelease reservations do not displace the current stable release. A stale/ambiguous/truncated/unavailable history fails closed, never selects an older fallback. The service also retains its highest validated immutable release identity across positive/negative cache expiry and across website/update consumers for the process lifetime. Cold starts validate published history again; the publication pipeline forbids tag/version reuse. Do not delete published release history as a rollback mechanism. Installed apps independently refuse lower version codes.
+
 Run updater tests with node --test tests/android_release_manifest.test.js tests/android_release_service.test.js tests/android_updates_api.test.js tests/android_release_stream.test.js tests/app_analytics_download.test.js. These include real local HTTP transfers through an injected transport; no production release, APK replacement or database change is performed.
 
 Before activation require the complete backend/frontend gates, Android update/cancellation/offline/data-retention acceptance, production public-certificate/version continuity and a verified hosted signing dry-run. Existing runtime/security findings also require fresh triage. Enable public delivery and update offers separately with explicit owner approval; both can be turned off independently. Never roll back an installed APK by publishing a lower versionCode or requiring uninstall.
