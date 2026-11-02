@@ -130,6 +130,15 @@ test("active assigned dashboard carries the same offer ID and earnings as the no
   assert.equal(result.pricing_finalized, false);
 });
 
+test('active technician receives the server cash intent and unpaid state needed to acknowledge receipt', async () => {
+  const intent = { intentId: 'receipt-fixture', amountPaise: 129800, currency: 'INR', technicianId: 7 };
+  row = job({ status: 'payment_pending', payment_status: 'pending', payment_method: 'cash', cash_payment_intent: JSON.stringify(intent) });
+  const result = await routeResponse('/me/active-job');
+  assert.ok(result.cash_payment_intent,'active job must expose the cash intent before receipt confirmation');
+  assert.deepEqual(typeof result.cash_payment_intent === 'string' ? JSON.parse(result.cash_payment_intent) : result.cash_payment_intent,intent);
+  assert.equal(result.payment_status,'pending'); assert.equal(result.payment_method,'cash');
+});
+
 test("technician dashboard statistics exclude customer tax and fees from wallet earnings", async () => {
   row = job({ status: "completed", amount: 1180, final_price: 1300 });
   const result = await routeResponse("/dashboard-stats");

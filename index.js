@@ -56,6 +56,9 @@ import { closePool, getPool } from "./db.js";
 import { assertUuidSchema } from "./models/persistence.js";
 import { ensureModelRelationships } from "./models/constraints.js";
 import { databaseReadiness } from "./middleware/databaseReadiness.js";
+import { mountCredentialSessions } from './middleware/credentialSessions.js';
+import { createPasswordRecoveryRouter } from './routes/passwordRecovery.js';
+import { ensurePasswordRecoverySchema } from './models/recoverySchema.js';
 import { reconcileTechnicianAvailability } from "./services/technicianStateService.js";
 import {
   startOperationsCommandCenterMonitor,
@@ -101,6 +104,7 @@ async function bootstrapDatabase() {
     ensureFilesTable,
     ensureDeviceTokensTable,
     ensurePaymentsTable,
+    ensureAccountPaymentOrdersTable,
     ensureInvoicesTable,
     ensureTechnicianWalletsTable,
     ensureWalletTransactionsTable,
@@ -147,6 +151,7 @@ async function bootstrapDatabase() {
     ensureFilesTable,
     ensureDeviceTokensTable,
     ensurePaymentsTable,
+    ensureAccountPaymentOrdersTable,
     ensureInvoicesTable,
     ensureTechnicianWalletsTable,
     ensureWalletTransactionsTable,
@@ -190,6 +195,7 @@ async function bootstrapDatabase() {
     await updateStep();
   }
 
+  await ensurePasswordRecoverySchema(await getPool());
   await seedInitialServiceConfig();
 
   const { backfillMarketplaceWalletCredits } = await import("./services/marketplaceWalletService.js");
@@ -211,6 +217,7 @@ function createApp() {
 
   // No route (including webhooks and uploads) may run against a partial transfer.
   app.use(databaseReadiness(dbState));
+  mountCredentialSessions(app);
 
   // Razorpay webhook must receive the untouched raw body for signature verification.
   app.post("/api/payments/razorpay/webhook", express.raw({ type: "application/json" }), razorpayWebhookHandler);
@@ -283,6 +290,7 @@ function createApp() {
   app.use("/api/admin/portal", adminPortalRouter);
   app.use("/api/admin", adminRouter);
   app.use("/api/users", usersRouter);
+  app.use('/api/password-recovery', createPasswordRecoveryRouter());
   app.use("/api/auth", authRouter);
   app.use("/auth", authRouter); // Needed for Google callback URI compatibility
   app.use("/api/service-requests", serviceRequestsRouter);

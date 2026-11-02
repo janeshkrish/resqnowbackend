@@ -862,6 +862,9 @@ function buildActiveJobResponse(jobRow, pricing, paymentRow = null) {
     destinationLongitude,
     destinationAddress: routeFields.dropAddress,
     jobStatus: status,
+    cash_payment_intent: jobRow.cash_payment_intent ?? null,
+    payment_method: jobRow.payment_method ?? null,
+    payment_status: jobRow.payment_status ?? 'pending',
     ...paymentDetails,
     ...routeFields,
     ...technicianJobPricingFields(jobRow, pricing),
@@ -1313,7 +1316,7 @@ router.post("/login", async (req, res) => {
       last_seen_at: new Date(),
       login_reminder_sent_at: null,
     });
-    const token = signTechnicianToken(row.id, row.email);
+    const token = signTechnicianToken(row.id, row.email, row.auth_version || 0);
     return res.json({ token, technician });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Login failed." });
@@ -2731,7 +2734,7 @@ router.put("/:id/profile", verifyAdmin, async (req, res) => {
     connection = await pool.getConnection();
     await connection.beginTransaction();
     await connection.execute(
-      `UPDATE technicians SET ${columns.map((column) => `${column} = ?`).join(", ")} WHERE id = ?`,
+      `UPDATE technicians SET ${columns.map((column) => `${column} = ?`).join(", ")}${passwordHash ? ', auth_version = auth_version + 1' : ''} WHERE id = ?`,
       [...columns.map((column) => record[column]), id]
     );
     await syncTechnicianSignupPricing(connection, id, body);

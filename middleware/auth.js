@@ -92,8 +92,8 @@ export function getAdminCredentials() {
   };
 }
 
-export function signTechnicianToken(id, email) {
-  return jwt.sign({ id, email, type: "technician", role: "technician" }, getJwtSecret(), { expiresIn: "7d" });
+export function signTechnicianToken(id, email, authVersion = 0) {
+  return jwt.sign({ id, email, type: "technician", role: "technician", sv: Number(authVersion) }, getJwtSecret(), { expiresIn: "7d" });
 }
 
 export async function signAdminToken(email) {

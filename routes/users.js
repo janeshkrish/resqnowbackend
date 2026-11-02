@@ -16,11 +16,11 @@ const router = Router();
 
 const JWT_SECRET = String(process.env.JWT_SECRET || "").trim();
 
-function signUserToken(userId, email) {
+function signUserToken(userId, email, authVersion = 0) {
   if (!JWT_SECRET) {
     throw new Error("JWT is not configured.");
   }
-  return jwt.sign({ userId, email, type: "user", role: "user" }, JWT_SECRET, { expiresIn: "7d" });
+  return jwt.sign({ userId, email, type: "user", role: "user", sv: Number(authVersion) }, JWT_SECRET, { expiresIn: "7d" });
 }
 
 const DEFAULT_USER_SETTINGS = Object.freeze({
@@ -387,8 +387,8 @@ router.post("/verify-otp", async (req, res) => {
     // Create User
     const passwordHash = await bcrypt.hash(password, 10);
     const [result] = await pool.execute(
-      "INSERT INTO users (full_name, email, password_hash, role, is_verified, status) VALUES (?, ?, ?, 'user', 1, 'approved')",
-      [name, normalizedEmail, passwordHash]
+      "INSERT INTO users (full_name, email, password_hash, recovery_email, recovery_email_verified_at, role, is_verified, status) VALUES (?, ?, ?, ?, UTC_TIMESTAMP(3), 'user', 1, 'approved')",
+      [name, normalizedEmail, passwordHash, normalizedEmail]
     );
 
     const userId = result.insertId;
@@ -478,7 +478,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: "Invalid email or password." });
     }
 
-    const token = signUserToken(user.id, user.email);
+    const token = signUserToken(user.id, user.email, user.auth_version || 0);
     console.log(`[AUTH LOGIN] ✅ Success for ${normalizedEmail} from ${clientIp}`);
 
     res.json({

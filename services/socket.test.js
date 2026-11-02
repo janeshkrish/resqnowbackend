@@ -34,11 +34,11 @@ function waitForConnection(socket) {
 test('authenticates technician, user, and admin socket identities from JWT claims', () => {
   assert.deepEqual(
     authenticateSocketToken(token({ id: '7', email: 'tech@example.com', role: 'technician' })),
-    { id: '7', email: 'tech@example.com', role: 'technician' },
+    { id: '7', email: 'tech@example.com', role: 'technician', sessionVersion: 0 },
   );
   assert.deepEqual(
     authenticateSocketToken(token({ id: '9', email: 'user@example.com', type: 'user' })),
-    { id: '9', email: 'user@example.com', role: 'user' },
+    { id: '9', email: 'user@example.com', role: 'user', sessionVersion: 0 },
   );
 });
 
@@ -52,7 +52,7 @@ test('blocks socket connections during database initialization and accepts a ret
   const server = createServer();
   const service = new SocketService();
   let ready = false;
-  service.init(server, { isReady: () => ready });
+  service.init(server, { validateSession: async () => {}, isReady: () => ready });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const client = createClient(`http://127.0.0.1:${server.address().port}`, {
     autoConnect: false, reconnection: false, transports: ['websocket'], auth: { token: token({ id: '9', role: 'user' }) },
@@ -121,7 +121,7 @@ test('delivers accepted tracking only to an authorised request subscriber', asyn
     receivedAt: '2026-09-17T10:00:00.010Z',
     locationUpdatedAt: '2026-09-17T10:00:00.000Z',
   };
-  service.init(server, {
+  service.init(server, { validateSession: async () => {},
     accessControl: {
       async getTrackingRequest(identity, requestId) {
         return identity.role === 'user' && identity.id === '9' && String(requestId) === '44'

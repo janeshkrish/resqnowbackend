@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS service_requests (
   applied_discount_percent DECIMAL(8,6) DEFAULT 0.000000,
   applied_discount_amount DECIMAL(10,2) DEFAULT 0.00,
   payment_status VARCHAR(50) DEFAULT 'pending',
+  cash_payment_intent JSON NULL,
   status VARCHAR(50) DEFAULT 'pending',
   contact_phone VARCHAR(50),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

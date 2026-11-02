@@ -179,6 +179,7 @@ export async function sendEmail({
   attachments = [],
   from,
   replyTo,
+  sensitive = false,
 }) {
   try {
     if (!transporter) {
@@ -220,7 +221,7 @@ export async function sendEmail({
       payload.attachments = normalizedAttachments;
     }
 
-    const response = await transporter.sendMail(payload);
+    const response = await transporter.sendMail({ ...payload, sensitive });
 
     if (
       Array.isArray(response?.rejected) &&
@@ -241,7 +242,8 @@ export async function sendEmail({
     });
     return response;
   } catch (err) {
-    console.error("EMAIL ERROR FULL:", getEmailErrorDetails(err));
+    if (sensitive) console.error('[Email] Sensitive message delivery failed.');
+    else console.error("EMAIL ERROR FULL:", getEmailErrorDetails(err));
     throw normalizeError(err);
   }
 }

@@ -21,6 +21,7 @@ export const COLUMN_TARGETS = Object.freeze({
 });
 
 export const POLYMORPHIC = Object.freeze({
+  password_recovery_tokens: { account_id: "account_role" },
   android_app_installation_accounts: { account_id: "account_type" },
   device_tokens: { user_id: "user_type" },
   request_timeline: { actor_id: "actor_type" },

@@ -43,7 +43,8 @@ const accepted = (extra = {}) => ({ id: 501, user_id: 3, technician_id: 7, statu
 let state;
 const pool = { query: async (sql, params = []) => {
   if (sql === "SELECT 1") return [[{ result: 1 }]];
-  if (/information_schema.columns/.test(sql)) return [state.columns.has(`${params[0]}.${params[1]}`) ? [{ result: 1 }] : []];
+  if (/information_schema.columns/.test(sql)) return [state.columns.has(`${params[0]}.${params[1]}`)
+    ? [params[1] === 'cash_payment_intent' ? { data_type: 'json', is_nullable: 'YES' } : { result: 1 }] : []];
   if (/information_schema.statistics/.test(sql)) return [[{ result: 1 }]];
   if (/^ALTER TABLE/.test(sql)) {
     const match = sql.match(/ALTER TABLE (\w+) ADD COLUMN (\w+)/);
@@ -51,8 +52,11 @@ const pool = { query: async (sql, params = []) => {
   }
   if (/FROM platform_pricing_config/.test(sql)) return [[{ id: 1, currency: "INR", welcome_coupon_active: false }]];
   if (/COUNT\(\*\)/.test(sql)) return [[{ count: 0 }]];
-  if (/FROM payments/.test(sql)) return [state.payments.map(row => ({ user_id: 3, ...row }))];
-  if (/FROM invoices/.test(sql)) return [[{ id: 32, status: "EMAILED" }]];
+  if (/FROM payments/.test(sql)) return [state.payments
+    .filter(row => !/IN \('completed', 'paid'\)/.test(sql) || ['completed', 'paid'].includes(row.status) || (/OR settlement_key IS NOT NULL/.test(sql) && row.settlement_key != null))
+    .map(row => ({ user_id: 3, ...row }))];
+  if (/FROM account_payment_orders/.test(sql)) return [[]]; // This fixture contains service orders only.
+  if (/FROM invoices/.test(sql)) return [/LEFT\(order_id, 5\)/.test(sql) ? [] : [{ id: 32, status: "EMAILED" }]];
   if (/FROM wallet_transactions/.test(sql)) return [[{ id: 44, amount: 1200 }]];
   if (/FROM service_requests/.test(sql)) return [[{ ...state.request }]];
   if (/FROM technicians/.test(sql)) return [[{ pricing: '{"car-battery":9000}' }]];
@@ -371,7 +375,7 @@ test("schema setup adds missing snapshots once and keeps the request schema in p
   await db.ensureServiceRequestsTable();
   await db.ensureDispatchOffersTable();
   assert.ok(state.createSql.every(sql => /pricing_snapshot JSON/.test(sql)));
-  assert.deepEqual(state.ddl.map(sql => sql.match(/ALTER TABLE (\w+)/)[1]).sort(), ["dispatch_offers", "service_requests"]);
+  assert.deepEqual(state.ddl.map(sql => sql.match(/ALTER TABLE (\w+)/)[1]).sort(), ["dispatch_offers", "service_requests", "service_requests"]);
 });
 
 test("billing preserves the accepted platform fee discount when no new discount is requested", () => {

@@ -1,17 +1,21 @@
 # Database models, relationships and TiDB deployment migration
 
-All **42 active table definitions** are under `models/schema/`. The preceding UUID refactor defined 45; the original backend defined 46 including separate OTP throttling. The hosted database inventory is unverified: configured credentials returned `ER_ACCESS_DENIED_ERROR` during read-only inspection on 2026-10-15.
+All **49 active table definitions** are under `models/schema/`. The preceding UUID refactor defined 45; the original backend defined 46 including separate OTP throttling. The hosted database inventory is unverified: configured credentials returned `ER_ACCESS_DENIED_ERROR` during read-only inspection on 2026-10-15.
 
 | Group | Tables |
 | --- | --- |
 | Identity | users, otp_requests, device_tokens |
+| Recovery | password_recovery_tokens, recovery_rate_limits |
 | Technicians | technicians, technician_fleet_vehicles, technician_team_members, technician_login_sessions, technician_activity_alerts |
 | Requests | service_requests, request_timeline, request_attachments, dispatch_offers, technician_location_history, job_monitoring_alerts, reviews, user_vehicles |
-| Commerce | payments, technician_dues, technician_wallets, wallet_transactions, payouts, withdrawal_requests, payout_allocations, payment_refunds, invoices, platform_pricing_config |
+| Commerce | account_payment_orders, payments, technician_dues, technician_wallets, wallet_transactions, payouts, withdrawal_requests, payout_allocations, payment_refunds, invoices, platform_pricing_config |
 | Catalog and pricing | technician_services, service_master, vehicle_category_master, vehicle_subcategory_master, service_vehicle_mapping, service_pricing_field_master, towing_fleet_master, technician_service_pricing |
 | Content | notifications, email_templates, files |
 | Administration | account_notes, admin_actions_log, admin_complaints, admin_complaint_updates |
 | Fuel prices | fuel_prices |
+| Android analytics | android_app_installations, android_app_installation_accounts, android_apk_download_sessions, android_app_analytics_daily |
+
+`account_payment_orders` binds registration/subscription checkout to its account, purpose, frozen price and plan, with unique Razorpay order/payment IDs. See [QA-001 rollout and verification](../docs/qa-001-payment-binding.md) for the additive bootstrap and treatment of legacy unbound orders. This ledger is separate from service-request `payments`.
 
 `bootstrap.js` owns schema additions, indexes and seeds; `adminSchema.js` owns admin initialization. `db.js` selects the deployment database and preserves existing helper imports. Historical integer-schema SQL lives in `models/migrations/legacy/`; do not apply it to a UUID database. `schema.sql` points to the canonical models.
 
@@ -25,7 +29,7 @@ All **42 active table definitions** are under `models/schema/`. The preceding UU
 
 Different legacy tables map to different UUIDs even when their old integer IDs matched. Queries filter by owner/source to retrieve each history. Approval action/status/reason fields and the customer-note response alias are preserved; approval actors use `admin_id` instead of email.
 
-Many-to-many relationship tables such as `service_vehicle_mapping` and `payout_allocations` are necessary. Wallet entries, payment attempts, refunds, invoices, location history, login sessions and complaint updates represent distinct facts. Removing them would discard history or force duplicated/embedded data. Dashboards query source records; no summary, ID-mapping or migration-history tables are added. The retained original database is a rollback copy, so the cluster temporarily holds both original tables and the 42 target tables.
+Many-to-many relationship tables such as `service_vehicle_mapping` and `payout_allocations` are necessary. Wallet entries, payment attempts, refunds, invoices, location history, login sessions and complaint updates represent distinct facts. Removing them would discard history or force duplicated/embedded data. Dashboards query source records; no summary, ID-mapping or migration-history tables are added. The retained original database is a rollback copy, so the cluster temporarily holds both original tables and the 49 target tables.
 
 ## UUIDs and queries
 
@@ -62,7 +66,7 @@ Names above are examples; use your actual source name. Target defaults to `<DB_N
 
 1. Stop old writers, take a verified backup and drain old-ID dispatch jobs using deployment procedures.
 2. Set these variables consistently on API and standalone workers. Start the API with normal `npm start`. Set the platform startup/readiness timeout to accommodate the measured transfer time.
-3. Startup obtains a [cluster-wide TiDB advisory lock](https://docs.pingcap.com/tidb/v8.5/locking-functions/), preflights source identities/references, and builds 42 target tables. Unknown tables, unmapped ID columns, unknown consolidated fields, orphan references and ambiguous actors/targets stop migration.
+3. Startup obtains a [cluster-wide TiDB advisory lock](https://docs.pingcap.com/tidb/v8.5/locking-functions/), preflights source identities/references, and builds 49 target tables. Unknown tables, unmapped ID columns, unknown consolidated fields, orphan references and ambiguous actors/targets stop migration.
 4. It converts UUIDs, parent references, known JSON IDs, retry keys and merged histories. Binary/PDF data is copied as bound buffers in batches.
 5. Every target row is read back. Counts and a multiset SHA-256 content digest must match transformed expected rows. UUID/relationship validation must pass and original foreign-key rules are restored before activation.
 6. A versioned comment on the existing `users` table marks the verified database ready. The pool selects it dynamically. API bootstrap must complete before `/ready` returns 200; API routes, uploads, payment webhooks and sockets reject traffic during initialization.

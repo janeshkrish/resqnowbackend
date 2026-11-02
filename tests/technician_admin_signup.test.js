@@ -48,6 +48,7 @@ async function execute(sql, params = []) {
     const row = state.technicians.find((item) => String(item.id) === String(params.at(-1)));
     const fields = [...sql.matchAll(/([a-z_]+)\s*=\s*\?/g)].map((match) => match[1]);
     fields.forEach((field, index) => { row[field] = params[index]; });
+    if (/auth_version = auth_version \+ 1/.test(sql)) row.auth_version = Number(row.auth_version || 0) + 1;
     state.updatedFields = fields;
     return [{ affectedRows: 1 }];
   }
@@ -168,6 +169,7 @@ test("editing saves every sign-up field and the prices, keeps the password unles
   assert.equal(withPassword.statusCode, 200);
   assert.ok(state.updatedFields.includes("password_hash"));
   assert.notEqual(state.technicians[0].password_hash, "hash");
+  assert.equal(state.technicians[0].auth_version, 1);
 });
 
 test("editing refuses an email another technician has, and an unknown technician", async () => {

@@ -77,7 +77,7 @@ export async function verifyMailerTransport({ force = false } = {}) {
 }
 
 // Core send function using Resend HTTP API
-export async function sendMailViaResend({ from, to, subject, html, text, replyTo, attachments = [] }) {
+export async function sendMailViaResend({ from, to, subject, html, text, replyTo, attachments = [], sensitive = false }) {
   const client = getResendClient();
   if (!client) {
     throw new Error("Email is not configured. Set RESEND_API_KEY in environment variables.");
@@ -105,7 +105,8 @@ export async function sendMailViaResend({ from, to, subject, html, text, replyTo
   const { data, error } = await client.emails.send(payload);
 
   if (error) {
-    console.error("[Mailer] Resend send error:", error);
+    if (sensitive) console.error('[Mailer] Sensitive message delivery failed.');
+    else console.error("[Mailer] Resend send error:", error);
     const err = new Error(error.message || "Resend email send failed");
     err.code = error.statusCode;
     throw err;

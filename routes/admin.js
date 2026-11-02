@@ -1361,7 +1361,7 @@ router.put("/users/:id", async (req, res) => {
     if (password) {
       const password_hash = await bcrypt.hash(password, 10);
       await pool.execute(
-        "UPDATE users SET full_name = ?, password_hash = ? WHERE id = ?",
+        "UPDATE users SET full_name = ?, password_hash = ?, auth_version = auth_version + 1 WHERE id = ?",
         [trimmedName, password_hash, id]
       );
     } else {

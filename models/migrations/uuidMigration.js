@@ -17,6 +17,7 @@ export function migrateIdempotencyKey(table, value, resolve) {
   if (!value) return value;
   const [prefix, id, ...suffix] = String(value).split(":");
   const targets = {
+    'service-request': 'service_requests',
     "payment-credit": "payments", "payment-payout": "payments", "refund-adjustment": "payments",
     "manual-payout": "payouts", "withdrawal-request": "withdrawal_requests", "withdrawal-payout": "withdrawal_requests",
     "wallet-payout": table === "payouts" ? "technicians" : "payouts",
@@ -106,7 +107,7 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "", pres
     }
     if (!SOURCE_TABLES.includes(table)) continue;
     const selected = columns.filter(column => identityColumn(column, table, metadata.foreignKeys) || column.data_type === "json" ||
-      column.column_name === "idempotency_key" ||
+      ['idempotency_key', 'settlement_key'].includes(column.column_name) ||
       Object.values(POLYMORPHIC[table] || {}).includes(column.column_name) ||
       (table === "admin_audit_logs" && column.column_name === "actionType") ||
       (table === "users" && column.column_name === "email") ||
@@ -166,7 +167,7 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "", pres
         const name = column.column_name;
         if ((!preservedTables.includes(table) && name === "id") || row[name] == null) continue;
         const context = `${table}.${name} (${rowKey})`;
-        if (name === "idempotency_key") {
+        if (['idempotency_key', 'settlement_key'].includes(name)) {
           const migrated = migrateIdempotencyKey(table, row[name], resolve);
           if (migrated !== row[name]) changes[name] = migrated;
           continue;

@@ -173,9 +173,19 @@ export const ensureOtpRateLimitsTable = ensureOtpRequestsTable;
 
 
 
+export async function ensureCashPaymentIntentSchema(p) {
+  await addColumnIfNotExists(p, 'service_requests', 'cash_payment_intent JSON NULL');
+  const [columns] = await p.query(`SELECT data_type AS data_type, is_nullable AS is_nullable FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`, ['service_requests', 'cash_payment_intent']);
+  if (columns.length !== 1 || columns[0].data_type !== 'json' || columns[0].is_nullable !== 'YES') {
+    throw new Error('Missing or incompatible service_requests.cash_payment_intent. Apply the QA-004 schema before deployment.');
+  }
+}
+
 export async function ensureServiceRequestsTable() {
   const p = await getPool();
   await p.execute(TABLES.service_requests);
+  await ensureCashPaymentIntentSchema(p);
   await ensureDispatchPricingSnapshotColumn(p, "service_requests");
 }
 
@@ -547,9 +557,40 @@ export async function ensureDeviceTokensTable() {
 
 
 
+export async function ensureAccountPaymentOrdersTable() {
+  const p = await getPool();
+  await p.execute(TABLES.account_payment_orders);
+}
+
+export async function ensureServicePaymentSettlementSchema(p) {
+  await addColumnIfNotExists(p, 'payments', 'settlement_key VARCHAR(80) CHARACTER SET ascii COLLATE ascii_bin NULL');
+  const [columns] = await p.query(`SELECT data_type AS data_type, character_maximum_length AS character_maximum_length,
+    is_nullable AS is_nullable FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`, ['payments', 'settlement_key']);
+  if (columns.length !== 1 || columns[0].data_type !== 'varchar' || Number(columns[0].character_maximum_length) < 80 || columns[0].is_nullable !== 'YES') {
+    throw new Error('Missing or incompatible payments.settlement_key. Apply the QA-003 schema before deployment.');
+  }
+  const readIndex = () => p.query(`SELECT column_name AS column_name, non_unique AS non_unique, seq_in_index AS seq_in_index,
+    sub_part AS sub_part FROM information_schema.statistics
+    WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? ORDER BY seq_in_index`, ['payments', 'uq_payments_settlement_key']);
+  let [indexes] = await readIndex();
+  if (!indexes.length) {
+    try {
+      await runDdlWithRetry(p, 'create payments settlement uniqueness', () => p.query('CREATE UNIQUE INDEX uq_payments_settlement_key ON payments (settlement_key)'));
+    } catch (error) {
+      if (error.code !== 'ER_DUP_KEYNAME' && error.errno !== 1061) throw error;
+    }
+    [indexes] = await readIndex();
+  }
+  if (indexes.length !== 1 || indexes[0].column_name !== 'settlement_key' || Number(indexes[0].non_unique) !== 0 || indexes[0].sub_part != null) {
+    throw new Error('Missing or incompatible unique payments settlement index. Apply the QA-003 schema before deployment.');
+  }
+}
+
 export async function ensurePaymentsTable() {
   const p = await getPool();
   await p.execute(TABLES.payments);
+  await ensureServicePaymentSettlementSchema(p);
   // Ensure columns exist if table already existed without them
   await addColumnIfNotExists(p, 'payments', 'currency VARCHAR(10) DEFAULT "INR"');
   await addColumnIfNotExists(p, 'payments', 'base_amount DECIMAL(10, 2) DEFAULT 0.00');

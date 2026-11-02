@@ -1,4 +1,5 @@
 import { recordId, isRecordId } from "../models/identifiers.js";
+import { findCompletedServiceSettlement, settlementConflict } from "../services/servicePaymentSettlement.js";
 
 import express from "express";
 import { getPool } from "../db.js";
@@ -1064,6 +1065,35 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
             if (!transition.ok) {
                 return res.status(409).json({ error: transition.reason || "Invalid status transition." });
             }
+            if (isTowingServiceType(request.service_type) && requestedStatus === "closed") {
+                // The request lock precedes this current payment read, using the
+                // same lock order as cash and gateway settlement transactions.
+                const settlement = await findCompletedServiceSettlement(conn, requestId);
+                if (!settlement || recordId(settlement.user_id) !== recordId(request.user_id)) {
+                    throw settlementConflict("PAYMENT_RECONCILIATION_REQUIRED", "A matching confirmed payment is required before closing this job. Please reconcile the payment record.");
+                }
+                // Payments belong to requests/customers. Technician ownership is
+                // recorded on the invoice, not as a column on payments.
+                const cashSettlement = String(settlement.payment_method).toLowerCase() === "cash";
+                const [invoices] = await conn.query(`SELECT user_id, technician_id, order_id, razorpay_payment_id FROM invoices
+                    WHERE service_request_id = ? AND ${cashSettlement
+                        ? "razorpay_payment_id IS NULL AND LEFT(order_id, 5) = 'cash_'"
+                        : "(order_id = ? OR razorpay_payment_id = ?)"}
+                    ORDER BY created_at DESC, id DESC LIMIT 2 FOR UPDATE`, cashSettlement
+                    ? [requestId] : [requestId, settlement.razorpay_order_id, settlement.razorpay_payment_id]);
+                const invoice = invoices[0];
+                if (invoices.length !== 1 || recordId(invoice.user_id) !== recordId(request.user_id) ||
+                    recordId(invoice.technician_id) !== recordId(request.technician_id) || (!cashSettlement && (
+                        !settlement.razorpay_order_id || !settlement.razorpay_payment_id ||
+                        invoice.order_id !== settlement.razorpay_order_id || invoice.razorpay_payment_id !== settlement.razorpay_payment_id))) {
+                    throw settlementConflict("PAYMENT_RECONCILIATION_REQUIRED", "A matching payment invoice is required before closing this job. Please reconcile the payment record.");
+                }
+                if (transition.idempotent) {
+                    await conn.commit();
+                    committed = true;
+                    return res.json({ success: true, status: requestedStatus, idempotent: true });
+                }
+            }
         }
 
         // Fetch user and tech info upfront
@@ -1263,6 +1293,7 @@ export async function handleTechnicianStatusUpdate(req, res, { getPool: resolveP
 
     } catch (err) {
         if (err instanceof JobOwnershipError) return res.status(409).json({ code: err.code, error: err.message });
+        if (err.statusCode === 409) return res.status(409).json({ code: err.code, error: err.message });
         console.error("[Service Requests] Tech Update status error:", err);
         res.status(500).json({ error: "Failed to update status." });
     } finally {

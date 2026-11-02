@@ -1,5 +1,8 @@
 import { recordId, isRecordId } from "../models/identifiers.js";
 import { compactPaymentReceipt } from "../utils/paymentReference.js";
+import { createAccountPaymentService } from "../services/accountPaymentService.js";
+import { assertCashPayable, readCashIntent, createCashIntent, assertCashReceipt, publicCashIntent } from "../services/cashReceiptPolicy.js";
+import { serviceSettlementKey, findCompletedServiceSettlement, assertRequestNotCancelled, settlementConflict } from "../services/servicePaymentSettlement.js";
 
 import express from "express";
 import Razorpay from "razorpay";
@@ -48,6 +51,14 @@ const razorpay = hasRazorpayConfig
         key_secret: RAZORPAY_KEY_SECRET,
     })
     : null;
+
+const accountPayments = async () => createAccountPaymentService({
+    pool: await getPool(), gateway: razorpay, keySecret: RAZORPAY_KEY_SECRET,
+});
+const accountPaymentError = (res, error) => res.status(error.statusCode || 503).json({
+    error: error.statusCode ? error.message : "Payment could not be saved. Please retry confirmation.",
+    code: error.code && error.statusCode ? error.code : "PAYMENT_STORAGE_UNAVAILABLE",
+});
 
 const ensureRazorpayConfigured = (res) => {
     if (hasRazorpayConfig) return true;
@@ -355,11 +366,11 @@ async function upsertPendingRazorpayPayment({
     );
 
     if (existing.length > 0) {
-        await pool.execute(
+        const [pendingUpdate] = await pool.execute(
             `UPDATE payments
              SET status = ?, currency = ?, amount = ?, base_amount = ?, platform_fee = ?, payment_fee = ?,
                  technician_amount = ?, is_settled = TRUE, payment_to_technician_status = ?, ledger_status = ?, pricing_snapshot = ?
-             WHERE id = ?`,
+             WHERE id = ? AND settlement_key IS NULL AND LOWER(TRIM(status)) NOT IN ('completed', 'paid')`,
             [
                 "PENDING",
                 breakdown.currency,
@@ -374,6 +385,7 @@ async function upsertPendingRazorpayPayment({
                 existing[0].id
             ]
         );
+        if (pendingUpdate.affectedRows !== 1) throw settlementConflict('PAYMENT_SETTLEMENT_CONFLICT', 'Checkout has already been settled.');
         return existing[0].id;
     }
 
@@ -461,7 +473,7 @@ async function markClientSideVerification({
             `UPDATE payments
              SET status = ?, razorpay_payment_id = ?, razorpay_signature = ?, currency = ?, amount = ?, base_amount = ?,
                  platform_fee = ?, payment_fee = ?, technician_amount = ?, is_settled = TRUE, pricing_snapshot = ?, verified_at = NOW()
-             WHERE id = ?`,
+             WHERE id = ? AND settlement_key IS NULL AND LOWER(TRIM(status)) NOT IN ('completed', 'paid')`,
             [
                 "PROCESSING",
                 paymentId,
@@ -547,8 +559,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
              FROM payments
              WHERE razorpay_order_id = ?
              ORDER BY created_at DESC, id DESC
-             LIMIT 1
-             FOR UPDATE`,
+             LIMIT 1`,
             [orderId]
         );
 
@@ -562,7 +573,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
             };
         }
 
-        const paymentRow = paymentRows[0];
+        let paymentRow = paymentRows[0];
         const requestId = recordId(paymentRow.service_request_id);
         if (!isRecordId(requestId)) {
             await conn.rollback();
@@ -574,6 +585,11 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
             };
         }
 
+        const [requestLocks] = await conn.query('SELECT id FROM service_requests WHERE id = ? FOR UPDATE', [requestId]);
+        if (!requestLocks.length) {
+            await conn.rollback();
+            return { ...result, processed: false, reason: 'service_request_not_found' };
+        }
         const [requestRows] = await conn.query(
             `SELECT sr.id, sr.user_id, sr.technician_id, sr.service_type, sr.vehicle_type, sr.amount, sr.service_charge,
                     sr.technician_estimated_earning, sr.pricing_snapshot, sr.accepted_time,
@@ -604,6 +620,16 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
         }
 
         const request = requestRows[0];
+        assertRequestNotCancelled(request);
+        // All financial finalizers lock request -> payment. The first lookup
+        // only discovers the owner request; re-read the checkout under its lock.
+        const [lockedPayments] = await conn.query(`SELECT * FROM payments WHERE razorpay_order_id = ?
+            ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`, [orderId]);
+        if (lockedPayments.length !== 1 || String(lockedPayments[0].id) !== String(paymentRow.id) ||
+            String(lockedPayments[0].service_request_id) !== String(request.id)) {
+            throw settlementConflict('PAYMENT_SETTLEMENT_CONFLICT', 'Checkout changed while confirming payment.');
+        }
+        paymentRow = lockedPayments[0];
         if (!hasAcceptedRequestPricing(request)) {
             await conn.rollback();
             return { ...result, processed: false, duplicate: false, reason: "request_not_accepted" };
@@ -616,6 +642,14 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
         if (mismatch) {
             await conn.rollback();
             return { ...result, processed: false, duplicate: false, reason: mismatch };
+        }
+        const settled = await findCompletedServiceSettlement(conn, requestId);
+        if (settled && (String(settled.id) !== String(paymentRow.id) ||
+            String(settled.payment_method).toLowerCase() === 'cash' || String(settled.razorpay_payment_id || '') !== String(paymentId))) {
+            throw settlementConflict('PAYMENT_SETTLEMENT_CONFLICT', 'This request has already been settled using another payment.');
+        }
+        if (!settled && isRequestAlreadyPaid(request)) {
+            throw settlementConflict('PAYMENT_RECONCILIATION_REQUIRED', 'The original payment records require reconciliation.');
         }
         const pricingConfig = await getPlatformPricingConfig();
         // The gateway captured an existing order. Its stored checkout amounts
@@ -630,6 +664,20 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
             ["paid", "completed"].includes(String(request.payment_status || "").toLowerCase())
         );
 
+        if (settled) {
+            const [existingInvoices] = await conn.query(`SELECT id, status FROM invoices
+                WHERE order_id = ? OR razorpay_payment_id = ?
+                ORDER BY created_at DESC, id DESC LIMIT 2 FOR UPDATE`, [orderId, paymentId]);
+            if (existingInvoices.length !== 1) throw settlementConflict('PAYMENT_RECONCILIATION_REQUIRED', 'The original invoice requires reconciliation.');
+            await conn.commit();
+            return { ...result, processed: true, duplicate: true, requestId, userId: request.user_id,
+                technicianId: request.technician_id || null, status: request.status,
+                invoiceId: existingInvoices[0].id, invoiceStatus: existingInvoices[0].status,
+                customerEmail: request.customer_email || null, amount: resolvedTechnicianAmount,
+                walletTransactionId: settled.wallet_transaction_id || null,
+                invoiceData: buildInvoiceData({ invoiceId: existingInvoices[0].id, request, breakdown, paymentId, orderId }) };
+        }
+        await conn.execute('UPDATE payments SET settlement_key = ? WHERE id = ?', [serviceSettlementKey(requestId), paymentRow.id]);
         await conn.execute(
             `UPDATE payments
              SET status = ?, currency = ?, amount = ?, base_amount = ?, platform_fee = ?, payment_fee = ?,
@@ -800,6 +848,7 @@ async function finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayme
         try {
             await conn.rollback();
         } catch { }
+        if (error.code === 'ER_DUP_ENTRY') throw settlementConflict('PAYMENT_SETTLEMENT_CONFLICT', 'This request already has a financial settlement.');
         throw error;
     } finally {
         conn.release();
@@ -900,6 +949,10 @@ export async function razorpayWebhookHandler(req, res) {
 
     try {
         const finalized = await finalizeCapturedServicePayment({ orderId, paymentId, gatewayPayment: paymentEntity });
+        if (!finalized.processed && finalized.reason === "payment_row_not_found") {
+            const accountResult = await (await accountPayments()).finalizeCapturedOrder({ orderId, paymentId });
+            if (accountResult.processed) return res.status(200).json({ received: true, ...accountResult });
+        }
 
         if (!finalized.processed && finalized.reason) {
             paymentDiag("webhook_not_processed", { orderId, paymentId, reason: finalized.reason });
@@ -918,6 +971,10 @@ export async function razorpayWebhookHandler(req, res) {
 
         return res.status(200).json({ received: true, processed: true, duplicate: finalized.duplicate });
     } catch (err) {
+        if (err.statusCode === 409) {
+            paymentDiag("webhook_settlement_conflict", { orderId, paymentId, reason: err.code });
+            return res.status(200).json({ received: true, processed: false, reason: err.code });
+        }
         console.error("[Razorpay Webhook] Failed to process payment.captured:", err);
         paymentDiag("webhook_processing_failed", { orderId, paymentId, error: err?.message || String(err) });
         return res.status(500).json({ error: "Failed to process webhook." });
@@ -931,74 +988,32 @@ export async function razorpayWebhookHandler(req, res) {
 router.post("/create-registration-order", verifyTechnician, async (req, res) => {
     try {
         if (!ensureRazorpayConfigured(res)) return;
-        const technicianId = req.technicianId;
-
-        // Registration fee (e.g., ₹500)
         const pricingConfig = await getPlatformPricingConfig();
-        const amount = Math.round(pricingConfig.registration_fee * 100); // Razorpay expects amount in paise
-
-        const options = {
-            amount: amount,
+        const order = await (await accountPayments()).createOrder({
+            purpose: "registration", ownerId: req.technicianId,
+            amountPaise: Math.round(pricingConfig.registration_fee * 100),
             currency: pricingConfig.currency || "INR",
-            receipt: compactPaymentReceipt(`reg_receipt_${technicianId}_${Date.now()}`),
-        };
-
-        const order = await razorpay.orders.create(options);
-
-        // Save order ID to technician record
-        const pool = await getPool();
-        await pool.execute(
-            "UPDATE technicians SET registration_order_id = ?, registration_payment_status = 'processing' WHERE id = ?",
-            [order.id, technicianId]
-        );
-
-        res.json({
-            success: true,
-            order_id: order.id,
-            amount: order.amount,
-            currency: order.currency,
-            key_id: RAZORPAY_KEY_ID
         });
+        return res.json({ success: true, order_id: order.id, amount: order.amount,
+            currency: order.currency, key_id: RAZORPAY_KEY_ID });
     } catch (err) {
-        console.error("[Payments] Create order error:", err);
-        res.status(500).json({ error: "Failed to create payment order." });
+        return accountPaymentError(res, err);
     }
 });
 
-/**
- * POST /api/payments/verify-registration-payment
- * Verify the payment signature from Razorpay.
- */
+/** Verify a registration payment against its server-owned checkout. */
 router.post("/verify-registration-payment", verifyTechnician, async (req, res) => {
     try {
         if (!ensureRazorpayConfigured(res)) return;
-        const technicianId = req.technicianId;
-        const {
-            razorpay_order_id,
-            razorpay_payment_id,
-            razorpay_signature
-        } = req.body;
-
-        const generated_signature = crypto
-            .createHmac("sha256", RAZORPAY_KEY_SECRET)
-            .update(razorpay_order_id + "|" + razorpay_payment_id)
-            .digest("hex");
-
-        if (generated_signature === razorpay_signature) {
-            // Payment verified
-            const pool = await getPool();
-            await pool.execute(
-                "UPDATE technicians SET registration_payment_status = 'completed', registration_payment_id = ?, status = 'pending', is_active = FALSE, is_available = FALSE, current_job_id = NULL WHERE id = ?",
-                [razorpay_payment_id, technicianId]
-            );
-
-            res.json({ success: true, message: "Payment verified successfully." });
-        } else {
-            res.status(400).json({ error: "Invalid payment signature." });
-        }
+        const body = req.body || {};
+        const result = await (await accountPayments()).verifyPayment({
+            purpose: "registration", ownerId: req.technicianId, planCode: null,
+            orderId: body.razorpay_order_id, paymentId: body.razorpay_payment_id,
+            signature: body.razorpay_signature,
+        });
+        return res.json({ success: true, message: "Payment verified successfully.", duplicate: result.duplicate });
     } catch (err) {
-        console.error("[Payments] Verify payment error:", err);
-        res.status(500).json({ error: "Payment verification failed." });
+        return accountPaymentError(res, err);
     }
 });
 
@@ -1211,14 +1226,17 @@ router.post('/create-order', verifyUser, async (req, res) => {
                 technicianAmount,
             });
 
-            await pool.execute(
+            const [requestUpdate] = await pool.execute(
                 `UPDATE service_requests
                  SET payment_method = ?,
                      payment_status = ?,
                      applied_coupon_code = ?,
                      applied_discount_percent = ?,
                      applied_discount_amount = ?
-                 WHERE id = ?`,
+                 WHERE id = ? AND LOWER(COALESCE(payment_status, '')) NOT IN ('paid', 'completed')
+                 AND LOWER(COALESCE(status, '')) NOT IN ('cancelled', 'canceled', 'rejected', 'expired')
+                 AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.service_request_id = service_requests.id
+                    AND (p.settlement_key IS NOT NULL OR LOWER(TRIM(p.status)) IN ('completed', 'paid')))`,
                 [
                     "razorpay",
                     "pending",
@@ -1229,6 +1247,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
                 ]
             );
 
+            if (requestUpdate.affectedRows !== 1) throw settlementConflict('PAYMENT_SETTLEMENT_CONFLICT', 'Request changed or has already been settled.');
             return res.json({
                 id: reusablePayment.razorpay_order_id,
                 amount: Math.round(breakdown.totalAmount * 100),
@@ -1298,14 +1317,17 @@ router.post('/create-order', verifyUser, async (req, res) => {
             technicianAmount,
         });
 
-        await pool.execute(
+        const [requestUpdate] = await pool.execute(
             `UPDATE service_requests
              SET payment_method = ?,
                  payment_status = ?,
                  applied_coupon_code = ?,
                  applied_discount_percent = ?,
                  applied_discount_amount = ?
-             WHERE id = ?`,
+             WHERE id = ? AND LOWER(COALESCE(payment_status, '')) NOT IN ('paid', 'completed')
+                 AND LOWER(COALESCE(status, '')) NOT IN ('cancelled', 'canceled', 'rejected', 'expired')
+                 AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.service_request_id = service_requests.id
+                    AND (p.settlement_key IS NOT NULL OR LOWER(TRIM(p.status)) IN ('completed', 'paid')))`,
             [
                 "razorpay",
                 "pending",
@@ -1316,6 +1338,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
             ]
         );
 
+        if (requestUpdate.affectedRows !== 1) throw settlementConflict('PAYMENT_SETTLEMENT_CONFLICT', 'Request changed or has already been settled.');
         // Return breakdown so frontend can display consistent info
         res.json({
             ...order,
@@ -1345,7 +1368,7 @@ router.post('/create-order', verifyUser, async (req, res) => {
     } catch (err) {
         console.error('Create order error:', err);
         paymentDiag("create_order_failed", { requestId: req?.body?.requestId, userId: req?.user?.userId, error: err?.message || String(err) });
-        res.status(500).json({ error: 'Failed to create payment order' });
+        res.status(err.statusCode || 500).json({ error: err.statusCode ? err.message : 'Failed to create payment order', ...(err.statusCode ? { code: err.code } : {}) });
     }
 });
 
@@ -1402,7 +1425,10 @@ router.post('/confirm', verifyUser, async (req, res) => {
         });
 
         await pool.execute(
-            "UPDATE service_requests SET payment_method = ? WHERE id = ?",
+            `UPDATE service_requests SET payment_method = ? WHERE id = ?
+             AND LOWER(COALESCE(payment_status, '')) NOT IN ('paid', 'completed')
+             AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.service_request_id = service_requests.id
+                AND (p.settlement_key IS NOT NULL OR LOWER(TRIM(p.status)) IN ('completed', 'paid')))`,
             ["razorpay", requestId]
         );
 
@@ -1463,75 +1489,119 @@ router.post('/confirm', verifyUser, async (req, res) => {
 });
 
 // Cash payment for a request
-router.post('/cash', verifyUser, async (req, res) => {
+async function handleCashPayment(req, res, confirmReceipt = false) {
     try {
         console.log('PAYMENT REQUEST: cash (body):', req.body);
-        const { requestId, couponCode } = req.body || {};
-        const authUserId = req.user.userId;
+        const { couponCode } = req.body || {};
+        const requestId = recordId(req.body?.requestId);
+        const actorId = confirmReceipt ? req.technicianId : req.user.userId;
         if (!requestId) return res.status(400).json({ error: 'requestId is required' });
 
         const pool = await getPool();
         const pricingConfig = await getPlatformPricingConfig();
-        const [reqRows] = await pool.query(
-            `SELECT sr.id, sr.user_id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type,
-                    sr.technician_id, sr.technician_estimated_earning, sr.pricing_snapshot, sr.accepted_time, sr.status, sr.payment_status,
-                    sr.address, sr.drop_address, sr.drop_latitude, sr.drop_longitude, sr.route_distance_km,
-                    sr.estimated_duration, sr.pricing_breakdown_json, sr.applied_coupon_code,
-                    sr.applied_discount_percent, sr.applied_discount_amount,
-                    t.pricing AS technician_pricing, t.service_costs AS technician_service_costs
-             FROM service_requests sr
-             LEFT JOIN technicians t ON t.id = sr.technician_id
-             WHERE sr.id = ? AND sr.user_id = ?`,
-            [requestId, authUserId]
-        );
-        if (reqRows.length === 0) return res.status(404).json({ error: 'Request not found' });
-        if (isRequestAlreadyPaid(reqRows[0])) {
-            return res.json({ success: true, alreadyPaid: true });
-        }
-
-        const requestRow = reqRows[0];
-        if (!ensureRequestAcceptedForPayment(res, requestRow)) return;
-        const technicianId = requestRow.technician_id;
-        const userId = requestRow.user_id;
-        const { breakdown, coupon } = await buildServiceRequestPaymentQuote({
-            pool,
-            requestRow,
-            pricingConfig,
-            couponCode,
-            preserveExistingApplied: false,
-            paymentMode: "cash",
-        });
-
-        if (coupon.providedCode && !coupon.isApplied) {
-            return res.status(400).json({
-                error: coupon.reason || "Coupon could not be applied.",
-                coupon: {
-                    active: coupon.active,
-                    configured_code: coupon.configuredCode,
-                    entered_code: coupon.providedCode,
-                    reason: coupon.reason,
-                    discount_percent: coupon.discountPercent,
-                    remaining_eligible_uses: coupon.remainingEligibleUses,
-                    max_uses_per_user: coupon.maxUsesPerUser,
-                }
-            });
-        }
-
-        const techAmount = await resolveTechnicianPaymentAmount({
-            requestRow,
-            technicianProfile: {
-                id: requestRow.technician_id,
-                pricing: requestRow.technician_pricing,
-                service_costs: requestRow.technician_service_costs,
-            },
-            connection: pool,
-        }) ?? breakdown.baseAmount;
-        const isTowingRequest = isTowingServiceType(requestRow?.service_type);
-        const paidRequestStatus = isTowingRequest ? "payment_pending" : "completed";
-
         const conn = await pool.getConnection();
         try {
             await conn.beginTransaction();
+            const [reqRows] = await conn.query(
+                `SELECT sr.id, sr.user_id, sr.amount, sr.service_charge, sr.service_type, sr.vehicle_type,
+                        sr.technician_id, sr.technician_estimated_earning, sr.pricing_snapshot, sr.accepted_time, sr.status, sr.payment_status, sr.payment_method, sr.cash_payment_intent,
+                        sr.address, sr.drop_address, sr.drop_latitude, sr.drop_longitude, sr.route_distance_km,
+                        sr.estimated_duration, sr.pricing_breakdown_json, sr.applied_coupon_code,
+                        sr.applied_discount_percent, sr.applied_discount_amount
+                 FROM service_requests sr
+                 WHERE sr.id = ? AND sr.${confirmReceipt ? 'technician_id' : 'user_id'} = ? FOR UPDATE`,
+                [requestId, actorId]
+            );
+            if (reqRows.length === 0) { await conn.rollback(); return res.status(404).json({ error: 'Request not found' }); }
+            const requestRow = reqRows[0];
+            assertRequestNotCancelled(requestRow);
+            const settled = await findCompletedServiceSettlement(conn, requestId);
+            if (settled && (String(settled.payment_method).toLowerCase() !== 'cash' || String(settled.user_id) !== String(requestRow.user_id))) {
+                throw settlementConflict('PAYMENT_SETTLEMENT_CONFLICT', 'This request has already been settled using another payment.');
+            }
+            const [cashInvoices] = await conn.query(`SELECT * FROM invoices
+                WHERE service_request_id = ? AND razorpay_payment_id IS NULL AND LEFT(order_id, 5) = 'cash_'
+                ORDER BY created_at DESC, id DESC LIMIT 2 FOR UPDATE`, [requestId]);
+            if (settled) {
+                if (confirmReceipt) {
+                    const proof = safeParseObject(settled.pricing_snapshot)?.cashReceipt;
+                    if (!proof) throw settlementConflict('CASH_RECEIPT_RECONCILIATION_REQUIRED', 'This historical cash receipt requires reconciliation.');
+                    assertCashReceipt(proof, req.body || {}, actorId);
+                }
+                if (cashInvoices.length !== 1) throw settlementConflict('PAYMENT_RECONCILIATION_REQUIRED', 'The original cash invoice requires reconciliation.');
+                await conn.commit();
+                return res.json({ success: true, alreadyPaid: true, payment_id: settled.id, invoice_id: cashInvoices[0].id,
+                    request: serializeServiceRequestRow(requestRow) });
+            }
+            if (isRequestAlreadyPaid(requestRow) || cashInvoices.length) {
+                throw settlementConflict('PAYMENT_RECONCILIATION_REQUIRED', 'The original payment records require reconciliation.');
+            }
+            if (!ensureRequestAcceptedForPayment(res, requestRow)) { await conn.rollback(); return; }
+            assertCashPayable(requestRow);
+            const respondPending = async (intent, reused = false) => {
+                await conn.commit();
+                socketService.notifyTechnician(requestRow.technician_id, 'job:status_update', { requestId, status: requestRow.status, cashReceiptPending: true });
+                socketService.notifyUser(requestRow.user_id, 'job:status_update', { requestId, status: requestRow.status, cashReceiptPending: true });
+                return res.json({ success: true, pendingReceipt: true, reused, cash_intent: publicCashIntent(intent),
+                    request: serializeServiceRequestRow({ ...requestRow, payment_method: 'cash', cash_payment_intent: intent }) });
+            };
+            if (!confirmReceipt && requestRow.payment_method === 'cash') {
+                let previous;
+                try { previous = readCashIntent(requestRow); } catch { /* customer may replace a stale, unpaid intent */ }
+                if (previous && String(previous.coupon.appliedCode || '') === String(couponCode || '').trim().toUpperCase()) return await respondPending(previous, true);
+            }
+            const receiptIntent = confirmReceipt ? readCashIntent(requestRow) : null;
+            if (confirmReceipt) {
+                if (String(requestRow.payment_method).toLowerCase() !== 'cash') throw settlementConflict('CASH_INTENT_STALE', 'Cash is no longer the selected payment method.');
+                assertCashReceipt(receiptIntent, req.body || {}, actorId);
+            }
+            const technicianId = requestRow.technician_id;
+            const userId = requestRow.user_id;
+            const { breakdown, coupon } = receiptIntent || await buildServiceRequestPaymentQuote({
+                pool: conn,
+                requestRow,
+                pricingConfig,
+                couponCode,
+                preserveExistingApplied: false,
+                paymentMode: "cash",
+            });
+
+            if (coupon.providedCode && !coupon.isApplied) {
+                await conn.rollback();
+                return res.status(400).json({
+                    error: coupon.reason || "Coupon could not be applied.",
+                    coupon: {
+                        active: coupon.active,
+                        configured_code: coupon.configuredCode,
+                        entered_code: coupon.providedCode,
+                        reason: coupon.reason,
+                        discount_percent: coupon.discountPercent,
+                        remaining_eligible_uses: coupon.remainingEligibleUses,
+                        max_uses_per_user: coupon.maxUsesPerUser,
+                    }
+                });
+            }
+
+            const techAmount = receiptIntent?.technicianAmount ?? await resolveTechnicianPaymentAmount({
+                requestRow,
+                technicianProfile: {
+                    id: requestRow.technician_id,
+                    pricing: requestRow.technician_pricing,
+                    service_costs: requestRow.technician_service_costs,
+                },
+                connection: conn,
+            }) ?? breakdown.baseAmount;
+            if (!confirmReceipt) {
+                const intent = createCashIntent(requestRow, { breakdown, coupon, technicianAmount: techAmount });
+                await conn.execute(`UPDATE service_requests SET cash_payment_intent = ?, payment_method = ?,
+                    applied_coupon_code = ?, applied_discount_percent = ?, applied_discount_amount = ?, updated_at = NOW() WHERE id = ?`,
+                    [JSON.stringify(intent), 'cash', coupon.appliedCode || null, coupon.isApplied ? coupon.discountPercent : 0, breakdown.discountAmount, requestId]);
+                return await respondPending(intent);
+            }
+            const cashReceipt = { intentId: receiptIntent.intentId, technicianId: actorId, amountPaise: receiptIntent.amountPaise,
+                currency: receiptIntent.currency, receivedAt: new Date().toISOString() };
+            const isTowingRequest = isTowingServiceType(requestRow?.service_type);
+            const paidRequestStatus = isTowingRequest ? requestRow.status : "completed";
 
             await conn.execute(
                 `UPDATE service_requests
@@ -1562,13 +1632,13 @@ router.post('/cash', verifyUser, async (req, res) => {
             }
             console.log('REQUEST STATUS UPDATED:', { requestId, status: paidRequestStatus, amount: breakdown.baseAmount });
 
-            await conn.execute(
+            const [cashPaymentResult] = await conn.execute(
                 `INSERT INTO payments (
                     user_id, service_request_id, payment_method, status, currency, amount, base_amount,
                     platform_fee, payment_fee, technician_amount, is_settled,
-                    payment_to_technician_status, ledger_status, pricing_snapshot
+                    payment_to_technician_status, ledger_status, pricing_snapshot, settlement_key
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     userId,
                     requestId,
@@ -1583,10 +1653,12 @@ router.post('/cash', verifyUser, async (req, res) => {
                     false,
                     PAYMENT_TO_TECHNICIAN_STATUS.notApplicable,
                     PAYMENT_LEDGER_STATUS.skipped,
-                    JSON.stringify({ ...buildMarketplacePricingSnapshot({ breakdown, coupon }), technician_amount: techAmount }),
+                    JSON.stringify({ ...buildMarketplacePricingSnapshot({ breakdown, coupon }), technician_amount: techAmount, cashReceipt }),
+                    serviceSettlementKey(requestId),
                 ]
             );
 
+            const paymentId = cashPaymentResult.insertId;
             const [invResult] = await conn.execute(
                 `INSERT INTO invoices (
                     user_id, order_id, razorpay_payment_id, amount, invoice_pdf, status,
@@ -1594,7 +1666,7 @@ router.post('/cash', verifyUser, async (req, res) => {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     userId,
-                    `cash_${requestId}_${Date.now()}`,
+                    `cash_${requestId}`,
                     null,
                     breakdown.totalAmount,
                     null,
@@ -1656,7 +1728,7 @@ router.post('/cash', verifyUser, async (req, res) => {
                 technicianAmount: techAmount,
                 couponCode: coupon.appliedCode || null
             });
-            void recordRequestEvent({ requestId, eventType: "paid", status: paidRequestStatus, actorType: "user", actorId: userId, metadata: { paymentMethod: "cash", totalAmount: breakdown.totalAmount } });
+            void recordRequestEvent({ requestId, eventType: "paid", status: paidRequestStatus, actorType: "technician", actorId, metadata: { paymentMethod: "cash", totalAmount: breakdown.totalAmount, intentId: receiptIntent.intentId } });
             socketService.notifyAdmins("admin:payment_update", {
                 requestId,
                 paymentMethod: "cash",
@@ -1692,23 +1764,25 @@ router.post('/cash', verifyUser, async (req, res) => {
             socketService.notifyUser(userId, 'job:status_update', { requestId, status: paidRequestStatus });
 
             const [updatedRows] = await pool.query('SELECT * FROM service_requests WHERE id = ?', [requestId]);
-            res.json({ success: true, request: serializeServiceRequestRow(updatedRows[0]) });
+            res.json({ success: true, payment_id: paymentId, invoice_id: invoiceId, request: serializeServiceRequestRow(updatedRows[0]) });
 
         } catch (txErr) {
             await conn.rollback();
             console.error('Cash payment transaction error:', txErr);
-            paymentDiag("cash_payment_tx_failed", { requestId, userId: req.user.userId, error: txErr?.message || String(txErr) });
-            return res.status(500).json({ error: 'Failed to process cash payment' });
+            paymentDiag("cash_payment_tx_failed", { requestId, actorId, error: txErr?.message || String(txErr) });
+            return res.status(txErr.statusCode || (txErr.code === 'ER_DUP_ENTRY' ? 409 : 500)).json({ error: txErr.statusCode ? txErr.message : 'Failed to process cash payment', ...(txErr.code ? { code: txErr.code } : {}) });
         } finally {
             conn.release();
         }
 
     } catch (err) {
         console.error('Cash payment error:', err);
-        paymentDiag("cash_payment_failed", { requestId: req?.body?.requestId, userId: req?.user?.userId, error: err?.message || String(err) });
+        paymentDiag("cash_payment_failed", { requestId: req?.body?.requestId, userId: req?.user?.userId || req?.technicianId, error: err?.message || String(err) });
         res.status(500).json({ error: 'Failed to process cash payment' });
     }
-});
+}
+router.post('/cash', verifyUser, (req, res) => handleCashPayment(req, res));
+router.post('/cash/confirm', verifyTechnician, (req, res) => handleCashPayment(req, res, true));
 
 // Admin diagnostics for payment pipeline by request
 router.get('/diagnostics/overview', verifyAdmin, async (req, res) => {
@@ -1882,112 +1956,38 @@ router.get('/diagnostics/request/:requestId', verifyAdmin, async (req, res) => {
 router.post("/create-subscription-order", verifyUser, async (req, res) => {
     try {
         if (!ensureRazorpayConfigured(res)) return;
-        const userId = req.user.userId;
-        const { planId } = req.body;
-        if (!planId) {
-            return res.status(400).json({ error: "Missing planId" });
-        }
-
+        const { planId } = req.body || {};
+        if (typeof planId !== "string" || !planId) return res.status(400).json({ error: "Missing planId" });
         const pricingConfig = await getPlatformPricingConfig();
         const plan = getSubscriptionPlanById(planId, pricingConfig);
-        if (!plan || plan.active === false) {
-            return res.status(400).json({ error: "Invalid or inactive planId" });
-        }
-
-        const amount = Math.round(Number(plan.amount || 0) * 100);
-        if (!Number.isFinite(amount) || amount <= 0) {
-            return res.status(400).json({ error: "Selected plan does not require online payment" });
-        }
-
-        const options = {
-            amount,
-            currency: pricingConfig.currency || "INR",
-            receipt: compactPaymentReceipt(`sub_${planId}_${userId}_${Date.now()}`),
-            notes: {
-                userId,
-                planId,
-                planAmount: String(plan.amount),
-                type: "subscription"
-            }
-        };
-
-        const order = await razorpay.orders.create(options);
-
-        res.json({
-            success: true,
-            order_id: order.id,
-            amount: order.amount,
-            currency: order.currency,
-            key_id: RAZORPAY_KEY_ID
+        if (!plan || plan.active === false) return res.status(400).json({ error: "Invalid or inactive planId" });
+        const order = await (await accountPayments()).createOrder({
+            purpose: "subscription", ownerId: req.user.userId, planCode: plan.id,
+            amountPaise: Math.round(Number(plan.amount || 0) * 100), currency: pricingConfig.currency || "INR",
         });
+        return res.json({ success: true, order_id: order.id, amount: order.amount,
+            currency: order.currency, key_id: RAZORPAY_KEY_ID });
     } catch (err) {
-        console.error("[Payments] Create subscription order error:", err);
-        res.status(500).json({ error: "Failed to create subscription order." });
+        return accountPaymentError(res, err);
     }
 });
 
-/**
- * POST /api/payments/verify-subscription-payment
- */
+/** Verify the saved plan and price, even if the current catalog has changed. */
 router.post("/verify-subscription-payment", verifyUser, async (req, res) => {
     try {
         if (!ensureRazorpayConfigured(res)) return;
-        const userId = req.user.userId;
-        const {
-            razorpay_order_id,
-            razorpay_payment_id,
-            razorpay_signature,
-            planId
-        } = req.body;
-        if (!planId) {
-            return res.status(400).json({ error: "Missing planId" });
-        }
-
-        const pricingConfig = await getPlatformPricingConfig();
-        const plan = getSubscriptionPlanById(planId, pricingConfig);
-        if (!plan || plan.active === false) {
-            return res.status(400).json({ error: "Invalid or inactive planId" });
-        }
-
-        const generated_signature = crypto
-            .createHmac("sha256", RAZORPAY_KEY_SECRET)
-            .update(razorpay_order_id + "|" + razorpay_payment_id)
-            .digest("hex");
-
-        console.log("[Subscription Verification] Signature comparison prepared for order verification.");
-
-        if (generated_signature === razorpay_signature) {
-            // Payment verified
-            // Update user subscription in database
-            const pool = await getPool();
-
-            try {
-                // Map planId to db enum if necessary (e.g. 'basic' matches db enum)
-                // Assuming table 'users' has column 'subscription'
-                await pool.execute(
-                    "UPDATE users SET subscription = ? WHERE id = ?",
-                    [planId, userId]
-                );
-            } catch (dbErr) {
-                console.error("[Payments] Subscription DB Update Error:", dbErr);
-                return res.status(500).json({ error: "Database update failed during subscription verification." });
-            }
-
-            // Access to AuthContext update happens on frontend, but we ensure DB is correct here.
-
-            res.json({
-                success: true,
-                message: "Subscription verified successfully."
-            });
-        } else {
-            res.status(400).json({ error: "Invalid payment signature." });
-        }
+        const body = req.body || {};
+        if (typeof body.planId !== "string" || !body.planId) return res.status(400).json({ error: "Missing planId" });
+        const result = await (await accountPayments()).verifyPayment({
+            purpose: "subscription", ownerId: req.user.userId, planCode: body.planId.trim().toLowerCase(),
+            orderId: body.razorpay_order_id, paymentId: body.razorpay_payment_id,
+            signature: body.razorpay_signature,
+        });
+        return res.json({ success: true, message: "Subscription verified successfully.", duplicate: result.duplicate });
     } catch (err) {
-        console.error("[Payments] Verify subscription payment error:", err);
-        res.status(500).json({ error: "Payment verification failed." });
+        return accountPaymentError(res, err);
     }
 });
-
 
 export default router;
 

@@ -33,7 +33,7 @@ test("UUID migration preserves Razorpay payment IDs inside gateway and wallet me
 });
 
 test("every active table has a UUID primary key; external provider IDs and counters retain their types", () => {
-  assert.equal(Object.keys(TABLES).length, 46);
+  assert.equal(Object.keys(TABLES).length, 49);
   assert.equal(TABLES.otp_rate_limits, undefined);
   for (const [table, sql] of Object.entries(TABLES)) {
     assert.match(sql, /\bid CHAR\(36\) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY/, table);
@@ -115,7 +115,7 @@ function migrationDatabase({ extra = {}, engine = "8.0.36" } = {}) {
   };
   const metadata = Object.entries(data).flatMap(([table, rows]) => [...new Set(rows.flatMap(Object.keys))].map(column => ({
     table_name: table, column_name: column, data_type: column === "id" || column.endsWith("_id") ? "int" :
-      ["pricing_snapshot", "metadata"].includes(column) ? "json" : "varchar",
+      ["pricing_snapshot", "metadata", "cash_payment_intent"].includes(column) ? "json" : "varchar",
     column_type: column === "id" ? "int" : "varchar(255)", is_nullable: column === "id" ? "NO" : "YES",
     column_default: null, extra: column === "id" ? "auto_increment" : "", character_maximum_length: null,
   })));
@@ -329,12 +329,23 @@ test("audit target mapping follows request parameter priority rather than action
 
 test("migration updates internal idempotency keys so payment and payout retries still deduplicate", async () => {
   const db = migrationDatabase({ extra: {
-    payments: [{ id: 30, user_id: 1, service_request_id: 10 }],
+    payments: [{ id: 30, user_id: 1, service_request_id: 10, settlement_key: 'service-request:10' }],
     wallet_transactions: [{ id: 40, payment_id: 30, idempotency_key: "payment-credit:30" }],
     payouts: [{ id: 50, idempotency_key: "payment-payout:30" }],
   } });
   const plan = await buildUuidMigrationPlan(db.connection);
   const paymentId = migratedId("payments", 30);
+  assert.equal(plan.conversions.find(row => row.table === 'payments').changes.settlement_key, `service-request:${migratedId('service_requests', 10)}`);
   assert.equal(plan.conversions.find(row => row.table === "wallet_transactions").changes.idempotency_key, `payment-credit:${paymentId}`);
   assert.equal(plan.conversions.find(row => row.table === "payouts").changes.idempotency_key, `payment-payout:${paymentId}`);
+});
+
+test('UUID migration preserves cash intent identity while remapping its request and participants', async () => {
+  const intentId = '66666666-6666-4666-8666-666666666666';
+  const db = migrationDatabase({ extra: { technicians: [{ id: 7 }], service_requests: [{ id: 10, user_id: 1, technician_id: 7,
+    cash_payment_intent: { intentId, requestId: 10, userId: 1, technicianId: 7, amountPaise: 11000 } }] } });
+  const plan = await buildUuidMigrationPlan(db.connection);
+  const migrated = JSON.parse(plan.conversions.find(row => row.table === 'service_requests').changes.cash_payment_intent);
+  assert.equal(migrated.intentId,intentId); assert.equal(migrated.requestId,migratedId('service_requests',10));
+  assert.equal(migrated.userId,migratedId('users',1)); assert.equal(migrated.technicianId,migratedId('technicians',7)); assert.equal(migrated.amountPaise,11000);
 });

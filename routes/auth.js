@@ -141,7 +141,7 @@ router.get("/google/callback", async (req, res) => {
 
         // Generate JWT
         const token = jwt.sign(
-            { userId, email, role: "user" },
+            { userId, email, role: "user", sv: Number(userRow.auth_version || 0) },
             JWT_SECRET,
             { expiresIn: "30d" } // Session-like
         );

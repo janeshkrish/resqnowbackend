@@ -1,8 +1,30 @@
+export const account_payment_orders = `
+CREATE TABLE IF NOT EXISTS account_payment_orders (
+  id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+  purpose ENUM('registration', 'subscription') NOT NULL,
+  user_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  technician_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  plan_code VARCHAR(50) NULL,
+  amount_paise BIGINT UNSIGNED NOT NULL,
+  currency CHAR(3) NOT NULL,
+  razorpay_order_id VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL UNIQUE,
+  razorpay_payment_id VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NULL UNIQUE,
+  status ENUM('created', 'completed') NOT NULL DEFAULT 'created',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  completed_at DATETIME NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (technician_id) REFERENCES technicians(id),
+  INDEX idx_account_payment_user (user_id, created_at),
+  INDEX idx_account_payment_technician (technician_id, created_at)
+)
+`.trim();
+
 export const payments = `
 CREATE TABLE IF NOT EXISTS payments (
   id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
   user_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   service_request_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  settlement_key VARCHAR(80) CHARACTER SET ascii COLLATE ascii_bin NULL,
   payment_method VARCHAR(50) DEFAULT 'razorpay',
   status VARCHAR(50) DEFAULT 'pending',
   currency VARCHAR(10) DEFAULT 'INR',
@@ -24,6 +46,7 @@ CREATE TABLE IF NOT EXISTS payments (
   verified_at DATETIME NULL,
   captured_at DATETIME NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_payments_settlement_key (settlement_key),
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (service_request_id) REFERENCES service_requests(id)
 )

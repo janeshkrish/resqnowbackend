@@ -61,7 +61,7 @@ test('P1 through P4 travel through canonical ingestion, Redis state, request roo
   });
   const server = createServer();
   const service = new SocketService();
-  service.init(server, {
+  service.init(server, { validateSession: async () => {},
     trackingIngestion: ingestion,
     accessControl: {
       async getTrackingRequest(identity, requestId) {

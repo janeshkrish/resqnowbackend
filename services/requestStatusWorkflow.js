@@ -95,8 +95,8 @@ const ACTIVE_NON_TOWING_TRANSITIONS = Object.freeze({
   service_started: new Set(["in-progress", "in_progress", "awaiting_payment", "payment_pending", "cancelled"]),
   "in-progress": new Set(["awaiting_payment", "payment_pending", "cancelled"]),
   in_progress: new Set(["awaiting_payment", "payment_pending", "cancelled"]),
-  awaiting_payment: new Set(["payment_pending", "paid", "completed"]),
-  payment_pending: new Set(["paid", "completed"]),
+  awaiting_payment: new Set(["payment_pending", "completed"]),
+  payment_pending: new Set(["completed"]),
   paid: new Set(["completed"]),
 });
 
@@ -160,6 +160,10 @@ function validateTowingTransition({ currentStatus, nextStatus, paymentStatus }) 
   if (!TOWING_STATUS_FLOW.includes(next)) {
     return { ok: false, reason: "Status is not part of the towing workflow." };
   }
+  // Check before idempotence: a terminal label alone is not payment evidence.
+  if (next === "closed" && !isPaymentMarkedPaid(paymentStatus)) {
+    return { ok: false, reason: "Payment must be completed before closing a towing request." };
+  }
   if (current === next) return { ok: true, idempotent: true };
   const currentIndex = TOWING_STATUS_FLOW.indexOf(current);
   const nextIndex = TOWING_STATUS_FLOW.indexOf(next);
@@ -167,9 +171,6 @@ function validateTowingTransition({ currentStatus, nextStatus, paymentStatus }) 
     return { ok: false, reason: `Cannot move towing request from ${currentStatus || "unknown"} to ${next}.` };
   }
   if (nextIndex === currentIndex + 1) {
-    if (next === "closed" && !isPaymentMarkedPaid(paymentStatus)) {
-      return { ok: false, reason: "Payment must be completed before closing a towing request." };
-    }
     return { ok: true };
   }
   return {
@@ -178,10 +179,19 @@ function validateTowingTransition({ currentStatus, nextStatus, paymentStatus }) 
   };
 }
 
-function validateNonTowingTransition({ currentStatus, nextStatus }) {
+function validateNonTowingTransition({ currentStatus, nextStatus, paymentStatus }) {
   const current = normalizeRequestStatus(currentStatus) || "assigned";
   const next = normalizeRequestStatus(nextStatus);
   if (!next) return { ok: false, reason: "Invalid status." };
+  if (next === "paid") {
+    return { ok: false, reason: "Payment must be confirmed through online verification or cash receipt confirmation, not a job status update." };
+  }
+  if (next === "closed") {
+    return { ok: false, reason: "Status is not part of the non-towing workflow." };
+  }
+  if (next === "completed" && !isPaymentMarkedPaid(paymentStatus)) {
+    return { ok: false, reason: "Payment must be completed before finalizing a request." };
+  }
   if (current === next) return { ok: true, idempotent: true };
   if (["cancelled", "rejected"].includes(next)) {
     return ["pending", "assigned", "accepted"].includes(current)
@@ -208,7 +218,7 @@ export function validateTechnicianStatusTransition({
   if (isTowingServiceType(serviceType)) {
     return validateTowingTransition({ currentStatus, nextStatus, paymentStatus });
   }
-  return validateNonTowingTransition({ currentStatus, nextStatus });
+  return validateNonTowingTransition({ currentStatus, nextStatus, paymentStatus });
 }
 
 export function mapRequestedTechnicianStatus({ requestedStatus, currentStatus, serviceType }) {

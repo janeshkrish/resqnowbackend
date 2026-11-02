@@ -41,7 +41,7 @@ export async function verifyFirebaseIdToken(idToken) {
 
 async function findCustomer(pool, uid, phone) {
   const [rows] = await pool.query(
-    `SELECT id, full_name, email, phone, phone_e164, firebase_uid
+    `SELECT id, full_name, email, phone, phone_e164, firebase_uid, auth_version
      FROM users
      WHERE firebase_uid = ? OR phone_e164 = ?
      ORDER BY (firebase_uid = ?) DESC
@@ -117,7 +117,7 @@ export async function handlePhoneLogin(req, res, deps = {}) {
       }
     }
 
-    const token = signToken(customer.id, customer.email || null);
+    const token = signToken(customer.id, customer.email || null, customer.auth_version || 0);
     console.log(`[AUTH PHONE] ✅ ${isNew ? "New customer" : "Login"} #${customer.id}`);
 
     return res.status(isNew ? 201 : 200).json({

@@ -4,6 +4,7 @@ import { isOriginAllowed } from "../config/network.js";
 import { getPool } from "../db.js";
 import { notificationService } from "./notificationService.js";
 import { logLiveTrackingDiagnostic } from './liveTrackingDiagnostics.js';
+import { validateCredentialSession } from './credentialSessions.js';
 
 export const ADMIN_ROOM = 'admins';
 
@@ -41,6 +42,7 @@ export function authenticateSocketToken(token) {
       id: String(id),
       email: String(payload?.email || ''),
       role,
+      sessionVersion: payload.sv ?? 0,
     };
   } catch (error) {
     if (error instanceof SocketAuthError) throw error;
@@ -89,6 +91,8 @@ export class SocketService {
     socketAdapter = null,
     onTrackingAccepted = null,
     isReady = () => true,
+    validateSession = validateCredentialSession,
+    sessionCheckIntervalMs = 5000,
   } = {}) {
     this.accessControl = accessControl;
     this.trackingIngestion = trackingIngestion;
@@ -108,17 +112,31 @@ export class SocketService {
     });
     if (socketAdapter) this.io.adapter(socketAdapter);
 
-    this.io.use((socket, next) => {
+    this.io.use(async (socket, next) => {
       if (!isReady()) return next(new Error('Database initialization is in progress. Retry shortly.'));
       try {
         socket.data.identity = authenticateSocketToken(resolveSocketToken(socket.handshake));
+        await validateSession(socket.data.identity);
         next();
       } catch (error) {
-        next(new Error(error instanceof SocketAuthError ? 'Unauthorized' : 'Socket authentication failed'));
+        next(new Error(error instanceof SocketAuthError || error.statusCode === 401 ? 'Unauthorized' : 'Socket authentication failed'));
       }
     });
 
     this.io.on("connection", (socket) => {
+      const identity = socket.data.identity;
+      socket.join(`session_${identity.role}_${identity.id}`);
+      const checkSession = async () => {
+        try { await validateSession(identity); return true; }
+        catch { socket.disconnect(true); return false; }
+      };
+      socket.use(async (_packet, next) => {
+        if (await checkSession()) next();
+        else next(new Error('Unauthorized'));
+      });
+      const sessionTimer = setInterval(() => { void checkSession(); }, sessionCheckIntervalMs);
+      sessionTimer.unref?.();
+      socket.once('disconnect', () => clearInterval(sessionTimer));
       console.log(`[Socket] connected ${socket.id}`);
       // Admin screens get admin events; customers' and technicians' apps never do.
       if (socket.data.identity?.role === 'admin') socket.join(ADMIN_ROOM);
@@ -244,6 +262,10 @@ export class SocketService {
         }
       });
     });
+  }
+
+  revokeSessions(role, id) {
+    this.io?.in(`session_${role}_${id}`).disconnectSockets(true);
   }
 
   notifyTechnician(technicianId, event, data) {
