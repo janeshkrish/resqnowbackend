@@ -50,6 +50,8 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Reject high or critical dependency advisories
+        run: npm audit --audit-level=high
       - name: Verify all tests with disposable databases
         shell: bash
         run: |

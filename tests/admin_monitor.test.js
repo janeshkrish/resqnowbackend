@@ -13,6 +13,7 @@ import {
   getLiveRequests,
   getTechnicianJobs,
   getTechnicianRecord,
+  getTechnicianReviews,
   maskPhone,
   phaseOf,
   stepsOf,
@@ -277,6 +278,31 @@ test('job history judges each arrival against its own promise', async () => {
 });
 
 // ---------------------------------------------------------------- routes
+
+test('UUID technician records, job history and reviews preserve the database identity', async () => {
+  const technicianId = '0896f096-49af-598c-9c58-336d51b12a81';
+  const requestId = '58d15847-22fe-46e3-9be7-d32a0e473109';
+  const pool = fakePool([
+    [/FROM technicians WHERE id = \?/, [{ id: technicianId, name: 'UUID Recovery', is_logged_in: 1, is_available: 1 }]],
+    [/SELECT COUNT\(\*\) AS completed/, [{ completed: 1 }]],
+    [/ORDER BY sr\.created_at DESC\s+LIMIT \? OFFSET \?/, [{ id: requestId, status: 'paid', customer_name: 'Customer', final_price: 750 }]],
+    [/SELECT r\.id, r\.service_request_id, r\.rating/, [{ id: 'd1e93f8c-abec-4e5a-baa6-30dca5979e54', service_request_id: requestId, rating: 5, full_name: 'Customer' }]],
+    [/SELECT COUNT\(\*\) AS n/, [{ n: 1 }]],
+    [/.*/, []],
+  ]);
+  const record = await getTechnicianRecord({ pool, technicianId, now: NOW });
+  assert.equal(record.technician.id, technicianId);
+  assert.equal(record.technician.name, 'UUID Recovery');
+  assert.equal(record.kpis.jobsCompleted, 1);
+  assert.deepEqual(pool.seen[0].params, [technicianId]);
+
+  const jobs = await getTechnicianJobs({ pool, technicianId });
+  assert.equal(jobs.data[0].id, requestId);
+  const reviews = await getTechnicianReviews({ pool, technicianId });
+  assert.equal(reviews.data[0].requestId, requestId);
+  assert.equal(reviews.data[0].rating, 5);
+  assert.ok(pool.seen.filter(({ sql }) => /technician_id = \?/.test(sql)).every(({ params }) => params.includes(technicianId)));
+});
 
 function call(router, { method = 'GET', url, body = {} }) {
   return new Promise((resolve) => {
