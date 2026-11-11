@@ -207,7 +207,7 @@ export const jobDispatchService = {
      * 3. Sort by ETA (fastest first).
      * 4. Return top candidates.
      */
-    async findTopTechnicians(jobRequest, radiusKm = null, { pool: suppliedPool, routeProvider = getRoute } = {}) {
+    async findTopTechnicians(jobRequest, radiusKm = null, { pool: suppliedPool, routeProvider = getRoute, throwOnError = false } = {}) {
         console.log(`[Dispatch] Finding technicians for Job #${jobRequest.id} (Radius: ${radiusKm}km)`);
         const { userLat, userLng } = this.buildRequestCriteria(jobRequest, radiusKm);
 
@@ -288,6 +288,7 @@ export const jobDispatchService = {
 
         } catch (err) {
             console.error("[Dispatch] Error finding technicians:", err);
+            if (throwOnError) throw err;
             return [];
         }
     },
@@ -296,7 +297,8 @@ export const jobDispatchService = {
      * Dispatch Job to Technicians.
      * Creates offers and sends socket notifications.
      */
-    async dispatchJob(jobRequest, technicians, { pool: suppliedPool, sockets = socketService, estimateEarning = estimateTechnicianEarningForRequest } = {}) {
+    async dispatchJob(jobRequest, technicians, { pool: suppliedPool, sockets = socketService, estimateEarning = estimateTechnicianEarningForRequest,
+        connection, notify = action => action() } = {}) {
         if (!technicians || technicians.length === 0) return;
         const pool = suppliedPool || await db.getPool();
 
@@ -315,7 +317,7 @@ export const jobDispatchService = {
         // Invalid/missing registered rates cannot become zero or platform-priced offers.
         for (const t of freshTechnicians) {
             let offer;
-            try { offer = await createPricedDispatchOffer(pool, jobRequest, t, { estimateEarning }); }
+            try { offer = await createPricedDispatchOffer(pool, jobRequest, t, { estimateEarning, connection }); }
             catch (error) {
                 if (!["pricing_unavailable", "offer_unavailable"].includes(error.code)) throw error;
                 console.warn(`[Dispatch] Skipped technician ${t.id}: ${error.code}`);
@@ -340,16 +342,17 @@ export const jobDispatchService = {
             };
 
             // Emit to technician room and push notification
-            sockets.io?.to(`technician_${t.id}`).emit("JOB_ALERT", offerPayload);
-            sockets.notifyTechnician(t.id, "job_offer", offerPayload);
-            sockets.io?.to(`technician_${t.id}`).emit("job:list_update", {
-                requestId: jobRequest.id,
-                action: "created"
+            notify(() => {
+                sockets.io?.to(`technician_${t.id}`).emit("JOB_ALERT", offerPayload);
+                sockets.notifyTechnician(t.id, "job_offer", offerPayload);
+                sockets.io?.to(`technician_${t.id}`).emit("job:list_update", {
+                    requestId: jobRequest.id, action: "created"
+                });
             });
             console.log(`[Dispatch] Notified technician ${t.id} for request #${jobRequest.id}.`);
 
             // Push Notification (Simulated)
-            pool.query("INSERT INTO notifications (type, title, message, created_at) VALUES (?, ?, ?, NOW())", [
+            await pool.query("INSERT INTO notifications (type, title, message, created_at) VALUES (?, ?, ?, NOW())", [
                 'job_offer',
                 'New Job Alert!',
                 `Service: ${jobRequest.service_type}. ETA: ${t.etaText}`

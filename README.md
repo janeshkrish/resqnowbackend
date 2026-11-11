@@ -188,6 +188,8 @@ Update `.env` with local, staging, or production values before starting the serv
 | `ANTHROPIC_API_KEY` | unset | Turns on ResQNow-Thozhan's AI step for sentences the app can't read on its own. Without it, voice still works on the app's word lists. |
 | `VOICE_AI_MODEL` | `claude-haiku-5-5` | Model for the AI step. |
 | `VOICE_AI_TIMEOUT_MS` | `3500` | After this the app carries on without the AI step. |
+| `VOICE_WAKE_WORD` / `VOICE_RECOGNITION` | `on` | Set either to `off` to disable foreground wake or microphone transcription independently. Typed requests continue. |
+| `VOICE_AI_MAX_CONCURRENT` / `VOICE_TTS_MAX_CONCURRENT` | `16` / `24` | Maximum simultaneous provider calls. With `REDIS_URL`, replicas share expiring leases; otherwise each process applies its own limit. Busy or unavailable providers fall back to local interpretation and device speech. |
 | `SARVAM_API_KEY` | unset | Gives ResQNow-Thozhan a natural, human-sounding voice from Sarvam's Bulbul (made for Indian languages). Without a voice key, the phone's own voice is used. |
 | `GOOGLE_TTS_API_KEY` | unset | The same with Google's Chirp 3 HD voices instead (Cloud Text-to-Speech API key). |
 | `VOICE_TTS_PROVIDER` | first key set | `sarvam`, `google`, or `off` for the phone's own voice. |

@@ -13,7 +13,9 @@ export function createVoiceRouter({ config = voiceConfig(), understanding = crea
 
   router.get("/status", auth, (req, res) => {
     const enabled = voiceEnabledFor(config, req.user?.userId);
-    res.json({ enabled, ai: enabled && understanding.enabled, voice: enabled && speech.enabled });
+    res.set("Cache-Control", "private, no-store");
+    res.json({ enabled, ai: enabled && understanding.enabled, voice: enabled && speech.enabled,
+      ...(config.wake === false && { wake: false }), ...(config.recognition === false && { recognition: false }) });
   });
 
   const limiter = rateLimit({
@@ -34,13 +36,20 @@ export function createVoiceRouter({ config = voiceConfig(), understanding = crea
     } catch (error) {
       return res.status(error.status || 400).json({ error: error.message });
     }
+    const controller = new AbortController();
+    const disconnected = () => controller.abort();
+    res.once("close", disconnected);
     try {
-      const result = await understanding.understand(ctx);
+      const result = await understanding.understand(ctx, controller.signal);
+      if (res.destroyed) return;
       return res.json({ result });
     } catch (error) {
+      if (res.destroyed) return;
       // The words themselves are never logged.
-      console.warn("[voice] AI step failed:", error.message);
+      if (error.status !== 503) console.warn("[voice] AI step failed:", error.message);
       return res.status(error.status || 502).json({ error: "The AI step is unavailable." });
+    } finally {
+      res.off("close", disconnected);
     }
   });
 
@@ -69,7 +78,7 @@ export function createVoiceRouter({ config = voiceConfig(), understanding = crea
       res.set("Cache-Control", "private, max-age=86400");
       return res.send(audio);
     } catch (error) {
-      console.warn("[voice] natural voice failed:", error.message);
+      if (error.status !== 503) console.warn("[voice] natural voice failed:", error.message);
       return res.status(error.status || 502).json({ error: "The natural voice is unavailable." });
     }
   });

@@ -41,7 +41,7 @@ import {
     PAYMENT_LEDGER_STATUS,
     PAYMENT_TO_TECHNICIAN_STATUS,
 } from "../models/marketplaceConstants.js";
-import { enqueueDispatchJob } from "../services/dispatchQueueService.js";
+import { deliverBookingDispatch, enqueueDispatchJob } from "../services/dispatchQueueService.js";
 import {
     isActiveJobStatus,
     isTerminalJobStatus,
@@ -270,6 +270,29 @@ router.get("/", verifyUser, async (req, res) => {
 router.post("/", verifyUser, async (req, res) => {
     try {
         const userId = req.user.userId;
+        const { idempotencyKey = null, ...bookingPayload } = req.body;
+        if (idempotencyKey !== null && (typeof idempotencyKey !== "string" || !/^[A-Za-z0-9_-]{1,96}$/.test(idempotencyKey))) {
+            return res.status(400).json({ error: "Invalid booking idempotency key." });
+        }
+        const payloadHash = idempotencyKey ? crypto.createHash("sha256").update(JSON.stringify(bookingPayload, (_key, value) =>
+            value && typeof value === "object" && !Array.isArray(value)
+                ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)).digest("hex") : null;
+        const respondToReplay = async (pool) => {
+            if (!idempotencyKey) return false;
+            const [[existing]] = await pool.query(
+                "SELECT id, status, booking_payload_hash, booking_dispatch_pending FROM service_requests WHERE user_id = ? AND idempotency_key = ?",
+                [userId, idempotencyKey]
+            );
+            if (!existing) return false;
+            if (existing.booking_payload_hash !== payloadHash) {
+                res.status(409).json({ code: "idempotency_conflict", error: "This booking key was already used for different request details." });
+            } else {
+                if (Number(existing.booking_dispatch_pending)) await deliverBookingDispatch(pool, existing.id);
+                res.json({ id: existing.id, status: existing.status, idempotencyReused: true });
+            }
+            return true;
+        };
+        if (idempotencyKey && await respondToReplay(await getPool())) return;
         const {
             service_type,
             vehicle_type,
@@ -335,6 +358,7 @@ router.post("/", verifyUser, async (req, res) => {
         );
 
         if (recentRequests.length > 0) {
+            if (await respondToReplay(pool)) return;
             return res.status(409).json({
                 error: "A similar request is already active.",
                 id: recentRequests[0].id
@@ -367,9 +391,11 @@ router.post("/", verifyUser, async (req, res) => {
                 return res.status(400).json({ error: "Selected technician is not approved." });
             }
             if (!tech.is_active || !tech.is_available) {
+                if (await respondToReplay(pool)) return;
                 return res.status(400).json({ error: "Selected technician is not currently available." });
             }
             if (tech.current_job_id != null) {
+                if (await respondToReplay(pool)) return;
                 return res.status(400).json({ error: "Selected technician is currently on another active job." });
             }
             const serviceDomains = [
@@ -493,10 +519,13 @@ router.post("/", verifyUser, async (req, res) => {
         try {
             result = await createRequestWithReservation(pool,
             `INSERT INTO service_requests
-      (user_id, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_estimated_earning, technician_id, status, amount, vehicle_brand, vehicle_subtype, tow_truck_type, request_details_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (user_id, idempotency_key, booking_payload_hash, booking_dispatch_pending, service_type, vehicle_type, vehicle_model, address, contact_name, contact_email, contact_phone, description, location_lat, location_lng, customer_location_lat, customer_location_lng, drop_address, drop_latitude, drop_longitude, route_distance_km, estimated_duration, route_metadata_json, pricing_breakdown_json, estimated_price, final_price, technician_estimated_earning, technician_id, status, amount, vehicle_brand, vehicle_subtype, tow_truck_type, request_details_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 userId,
+                idempotencyKey,
+                payloadHash,
+                Boolean(idempotencyKey && !directTechnicianId),
                 canonicalServiceType,
                 inferredVehicle || null,
                 vehicle_model || null,
@@ -535,6 +564,9 @@ router.post("/", verifyUser, async (req, res) => {
             } }
             );
         } catch (error) {
+            // The unique key serializes competing INSERTs across server instances. The winning
+            // transaction owns technician reservation, offer creation and the dispatch below.
+            if ((error.code === "ER_DUP_ENTRY" || error instanceof JobOwnershipError) && await respondToReplay(pool)) return;
             if (error instanceof JobOwnershipError || error.code === "pricing_unavailable") return res.status(409).json({ code: error.code, error: error.message });
             throw error;
         }
@@ -645,6 +677,10 @@ router.post("/", verifyUser, async (req, res) => {
                 console.warn(`[Dispatch Trace] requestId=${newRequestId} no_matching_technicians`);
             };
 
+            if (idempotencyKey && !directTechnicianId) {
+                await deliverBookingDispatch(pool, newRequestId);
+                return;
+            }
             try {
                 if (hasDirectTechnician && directTechnicianId) {
                     const directAssignedPayload = {

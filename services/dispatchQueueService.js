@@ -511,6 +511,7 @@ export async function enqueueDispatchJob(payload, options = {}) {
     return { queued: false, reason: "invalid_job_id" };
   }
 
+  let addAttempted = false;
   try {
     const q = await getDispatchQueue();
     if (!q) return { queued: false, reason: "queue_unavailable" };
@@ -527,9 +528,11 @@ export async function enqueueDispatchJob(payload, options = {}) {
     console.log(
       `[Dispatch Queue] Adding job requestId=${normalizedPayload.jobId} retryCount=${normalizedPayload.retryCount} delayMs=${delayMs}`
     );
+    addAttempted = true;
     const queuedJob = await q.add(NEW_JOB_EVENT, normalizedPayload, {
       delay: delayMs,
-      jobId: `${NEW_JOB_EVENT}:${normalizedPayload.jobId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+      jobId: options.initialBooking ? `booking-${normalizedPayload.jobId}`
+        : `${NEW_JOB_EVENT}:${normalizedPayload.jobId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
     });
     console.log(
       `[Dispatch Queue] Job added requestId=${normalizedPayload.jobId} queueJobId=${queuedJob?.id || "n/a"}`
@@ -540,8 +543,58 @@ export async function enqueueDispatchJob(payload, options = {}) {
       `[Dispatch Queue] Failed to enqueue requestId=${normalizedPayload.jobId}:`,
       error?.message || error
     );
-    return { queued: false, reason: "enqueue_failed" };
+    return { queued: false, reason: options.initialBooking && !addAttempted ? "queue_unavailable" : "enqueue_failed" };
   }
+}
+
+/** The booking transaction leaves this flag set until its first dispatch is durable. The
+ * request lock serializes the original HTTP handler, retries and the recovery sweep. */
+export async function deliverBookingDispatch(pool, requestId) {
+  const conn = await pool.getConnection();
+  const notifications = [];
+  try {
+    await conn.beginTransaction();
+    const [[row]] = await conn.query("SELECT * FROM service_requests WHERE id = ? FOR UPDATE", [requestId]);
+    if (Number(row?.booking_dispatch_pending)) {
+      if (isPendingUnassignedRequest(row)) {
+        const queued = await enqueueDispatchJob({ jobId: requestId, userId: row.user_id, source: "service_request_create" }, { initialBooking: true });
+        if (!queued.queued) {
+          // An acknowledgement can be lost after Redis accepted the job. Retry its stable ID.
+          if (queued.reason === "enqueue_failed") throw new Error("Dispatch queue acknowledgement unavailable.");
+          const candidates = await jobDispatchService.findTopTechnicians(row, null, { pool: conn, throwOnError: true });
+          await jobDispatchService.dispatchJob(row, candidates, { pool: conn, connection: conn, notify: action => notifications.push(action) });
+        }
+      }
+      await conn.execute("UPDATE service_requests SET booking_dispatch_pending = 0 WHERE id = ?", [requestId]);
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally { conn.release(); }
+  for (const notify of notifications) notify();
+}
+
+export function startBookingDispatchRecovery() {
+  let running = false;
+  let cursor = "";
+  const sweep = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const pool = await getPool();
+      const [rows] = await pool.query("SELECT id FROM service_requests WHERE booking_dispatch_pending = 1 AND id > ? ORDER BY id LIMIT 50", [cursor]);
+      for (const { id } of rows) {
+        try { await deliverBookingDispatch(pool, id); }
+        catch (error) { console.error("[Booking Dispatch] Retaining pending handoff", id, error.message); }
+      }
+      cursor = rows.length === 50 ? rows.at(-1).id : "";
+    } catch (error) { console.error("[Booking Dispatch] Recovery query failed", error.message); }
+    finally { running = false; }
+  };
+  const timer = setInterval(() => void sweep(), 15_000);
+  timer.unref();
+  return timer;
 }
 
 export async function recoverRecentPendingDispatchJobs(options = {}) {
@@ -564,6 +617,7 @@ export async function recoverRecentPendingDispatchJobs(options = {}) {
      FROM service_requests sr
      WHERE LOWER(COALESCE(sr.status, '')) = 'pending'
        AND sr.technician_id IS NULL
+       AND sr.booking_dispatch_pending = 0
        AND sr.created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
        AND NOT EXISTS (
          SELECT 1

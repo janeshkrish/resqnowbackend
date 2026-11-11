@@ -3,6 +3,8 @@
 // or Google's Chirp 3 HD. Only what Thozhan says is sent, never what the customer says. Most lines
 // are the same for every customer ("எந்த டயர்?"), so each one is made once and kept in memory.
 
+import { createVoiceCapacity } from "./voiceCapacity.js";
+
 const SARVAM_URL = "https://api.sarvam.ai/text-to-speech";
 const GOOGLE_URL = "https://texttospeech.googleapis.com/v1/text:synthesize";
 const MAX_TEXT = 500;
@@ -44,6 +46,8 @@ export function speechConfig(env = process.env) {
     } : {},
     pace: Number.isFinite(pace) && pace > 0 ? Math.min(1.2, Math.max(0.8, pace)) : 1,
     timeoutMs: Number(env.VOICE_TTS_TIMEOUT_MS) || 6000,
+    maxConcurrent: Number(env.VOICE_TTS_MAX_CONCURRENT) || 24,
+    redisUrl: env.REDIS_URL,
   };
 }
 
@@ -103,7 +107,8 @@ async function askGoogle({ text, lang, voice, pace, apiKey, fetchImpl, signal })
  * Makes a line's audio (MP3). Lines already made are served from memory, oldest dropped first
  * once the store passes `cacheBytes`; a line asked for twice at once is made once.
  */
-export function createVoiceSpeech({ provider, apiKey, voices = {}, pace = 1, timeoutMs = 6000, fetchImpl = globalThis.fetch, cacheBytes = 40 * 1024 * 1024 } = {}) {
+export function createVoiceSpeech({ provider, apiKey, voices = {}, pace = 1, timeoutMs = 6000, fetchImpl = globalThis.fetch, cacheBytes = 40 * 1024 * 1024, maxConcurrent = 24, redisUrl } = {}) {
+  const run = createVoiceCapacity({ name: "speak", maxConcurrent, redisUrl, timeoutMs });
   const made = new Map();
   const making = new Map();
   let stored = 0;
@@ -148,7 +153,7 @@ export function createVoiceSpeech({ provider, apiKey, voices = {}, pace = 1, tim
         return { audio: ready, contentType: "audio/mpeg", cached: true };
       }
       if (!making.has(key)) {
-        making.set(key, make(text, lang).then((audio) => { remember(key, audio); return audio; }).finally(() => making.delete(key)));
+        making.set(key, run(() => make(text, lang)).then((audio) => { remember(key, audio); return audio; }).finally(() => making.delete(key)));
       }
       return { audio: await making.get(key), contentType: "audio/mpeg", cached: false };
     },

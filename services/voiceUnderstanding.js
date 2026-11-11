@@ -3,6 +3,8 @@
 // the request form's own fields, and every value it returns is checked against the form's ids and
 // options before it goes back. Nothing the customer says is stored or logged.
 
+import { createVoiceCapacity } from "./voiceCapacity.js";
+
 const API_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MODEL = "claude-haiku-5-5";
 const MAX_TEXT = 400;
@@ -29,6 +31,10 @@ export function voiceConfig(env = process.env) {
     apiKey: String(env.ANTHROPIC_API_KEY || "").trim(),
     model: String(env.VOICE_AI_MODEL || DEFAULT_MODEL).trim(),
     timeoutMs: Number(env.VOICE_AI_TIMEOUT_MS) || 3500,
+    maxConcurrent: Number(env.VOICE_AI_MAX_CONCURRENT) || 16,
+    redisUrl: env.REDIS_URL,
+    wake: String(env.VOICE_WAKE_WORD || "on").toLowerCase() !== "off",
+    recognition: String(env.VOICE_RECOGNITION || "on").toLowerCase() !== "off",
   };
 }
 
@@ -125,37 +131,40 @@ export function cleanResult(input, ctx) {
   return out;
 }
 
-export function createVoiceUnderstanding({ apiKey, model = DEFAULT_MODEL, timeoutMs = 3500, fetchImpl = globalThis.fetch } = {}) {
+export function createVoiceUnderstanding({ apiKey, model = DEFAULT_MODEL, timeoutMs = 3500, fetchImpl = globalThis.fetch, maxConcurrent = 16, redisUrl } = {}) {
+  const run = createVoiceCapacity({ name: "understand", maxConcurrent, redisUrl, timeoutMs });
   return {
     enabled: Boolean(apiKey),
-    async understand(ctx) {
+    async understand(ctx, signal) {
       if (!apiKey) throw new VoiceAiError("The AI step is not set up", 503);
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetchImpl(API_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-          body: JSON.stringify({
-            model,
-            max_tokens: 400,
-            system: SYSTEM,
-            tools: [TOOL],
-            tool_choice: { type: "tool", name: TOOL.name },
-            messages: [{ role: "user", content: userMessage(ctx) }],
-          }),
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new VoiceAiError(`AI request failed (${response.status})`, 502);
-        const data = await response.json();
-        const block = (Array.isArray(data?.content) ? data.content : []).find((b) => b?.type === "tool_use" && b?.name === TOOL.name);
-        return cleanResult(block?.input, ctx);
-      } catch (error) {
-        if (error?.name === "AbortError") throw new VoiceAiError("AI timed out", 504);
-        throw error instanceof VoiceAiError ? error : new VoiceAiError("AI request failed", 502);
-      } finally {
-        clearTimeout(timer);
-      }
+      return run(async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetchImpl(API_URL, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+            body: JSON.stringify({
+              model,
+              max_tokens: 400,
+              system: SYSTEM,
+              tools: [TOOL],
+              tool_choice: { type: "tool", name: TOOL.name },
+              messages: [{ role: "user", content: userMessage(ctx) }],
+            }),
+            signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+          });
+          if (!response.ok) throw new VoiceAiError(`AI request failed (${response.status})`, 502);
+          const data = await response.json();
+          const block = (Array.isArray(data?.content) ? data.content : []).find((b) => b?.type === "tool_use" && b?.name === TOOL.name);
+          return cleanResult(block?.input, ctx);
+        } catch (error) {
+          if (error?.name === "AbortError") throw new VoiceAiError("AI timed out", 504);
+          throw error instanceof VoiceAiError ? error : new VoiceAiError("AI request failed", 502);
+        } finally {
+          clearTimeout(timer);
+        }
+      });
     },
   };
 }

@@ -85,6 +85,20 @@ test('the fallback dispatcher advertises the same persisted technician earnings 
   assert.equal(JSON.parse(db.offers[0].pricing_snapshot).technician_earning, 1200);
 });
 
+test("fallback offers share the booking handoff transaction and alert only after its commit", async () => {
+  const db = storage();
+  db.offers.length = 0;
+  const conn = { ...db.pool, getConnection: async () => { throw new Error("Nested handoff transaction"); } };
+  const sockets = simulatedSockets();
+  const afterCommit = [];
+  await jobDispatchService.dispatchJob(db.row, [{ id: 7 }], { pool: conn, connection: conn, sockets,
+    estimateEarning: async () => ({ amount: 1200, source: "technician_pricing" }), notify: action => afterCommit.push(action) });
+  assert.equal(db.offers.length, 1);
+  assert.equal(sockets.alerts.length, 0);
+  afterCommit.forEach(action => action());
+  assert.equal(sockets.alerts[0].offerId, db.offers[0].id);
+});
+
 test('an old unpriced offer does not permanently exclude the only eligible technician', async () => {
   const db = storage();
   db.offers[0].pricing_snapshot = null;

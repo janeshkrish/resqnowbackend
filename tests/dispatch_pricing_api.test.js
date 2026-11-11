@@ -31,11 +31,17 @@ const row = (overrides = {}) => ({ id: 101, user_id: 3, technician_id: null, sta
   location_lat: 11, location_lng: 76, drop_address: "Workshop", payment_method: "upi", payment_status: "pending",
   technician_pricing: [{ service_domain: "battery", vehicle_type: "car", service_charge: 9000 }],
   ...overrides });
-const query = async (sql) => {
+const query = async (sql, params = []) => {
   if (sql === "SELECT 1") return [[{ result: 1 }]];
+  if (/FROM service_requests WHERE user_id = \? AND idempotency_key = \?/.test(sql)) {
+    return [[...state.bookings.values()].filter(row => row.user_id === params[0] && row.idempotency_key === params[1])];
+  }
   if (state.creating && /SELECT id FROM service_requests WHERE user_id/.test(sql)) return [[]];
   if (/FROM service_requests/.test(sql)) return [[{ ...state.request }]];
-  if (/FROM users/.test(sql)) return [[{ full_name: "Simulated customer", email: null }]];
+  if (/FROM users/.test(sql)) {
+    if (state.failUserLookup) { state.failUserLookup = false; throw new Error("Lost post-commit connection"); }
+    return [[{ full_name: "Simulated customer", email: null }]];
+  }
   if (/FROM payments/.test(sql)) return [[]];
   if (/FROM platform_pricing_config/.test(sql)) return [[{ id: 1, currency: "INR", welcome_coupon_active: false }]];
   if (/FROM technicians|FROM technician_services/.test(sql)) {
@@ -48,8 +54,18 @@ const execute = async (sql, params = []) => {
   state.executions.push({ sql, params });
   if (/INSERT INTO service_requests/.test(sql)) {
     const columns = sql.match(/INSERT INTO service_requests\s*\(([^)]*)\)/s)[1].split(",").map((value) => value.trim());
-    state.request = { id: 101, ...Object.fromEntries(columns.map((column, index) => [column, params[index]])) };
+    const inserted = { id: 101, ...Object.fromEntries(columns.map((column, index) => [column, params[index]])) };
+    if (inserted.idempotency_key) {
+      const key = JSON.stringify([inserted.user_id, inserted.idempotency_key]);
+      if (state.bookings.has(key)) throw Object.assign(new Error('Duplicate booking key'), { code: 'ER_DUP_ENTRY' });
+      state.bookings.set(key, inserted);
+    }
+    state.request = inserted;
     return [{ insertId: 0, affectedRows: 1 }];
+  }
+  if (/UPDATE service_requests SET booking_dispatch_pending = 0/.test(sql)) {
+    state.request.booking_dispatch_pending = 0;
+    return [{ affectedRows: 1 }];
   }
   if (/UPDATE service_requests/.test(sql)) {
     state.request.status = params[0]; state.request.technician_id = null;
@@ -60,7 +76,17 @@ const execute = async (sql, params = []) => {
 };
 const connection = { query, execute, beginTransaction: async () => {}, commit: async () => {},
   rollback: async () => {}, release: () => {} };
-const pool = { query, execute, getConnection: async () => connection, end: async () => {} };
+const pool = { query, execute, getConnection: async () => {
+  let unlock;
+  return { ...connection, query: async (sql, params) => {
+    if (state.creating && /service_requests WHERE id = \? FOR UPDATE/.test(sql)) {
+      const previous = state.bookingLock;
+      state.bookingLock = new Promise(resolve => { unlock = resolve; });
+      await previous;
+    }
+    return query(sql, params);
+  }, release: () => unlock?.() };
+}, end: async () => {} };
 mock.method(mysql, "createPool", () => pool);
 mock.method(Redis.prototype, "connect", async function () { return this; });
 mock.method(Redis.prototype, "sendCommand", async () => null);
@@ -77,7 +103,7 @@ for (const method of ["notifyUser", "notifyTechnician", "broadcast"]) mock.metho
 
 beforeEach(async () => {
   await db.closePool();
-  state = { request: row(), profileQueries: 0, recoveryCalls: 0, executions: [], released: [] };
+  state = { request: row(), profileQueries: 0, recoveryCalls: 0, executions: [], released: [], bookings: new Map() };
 });
 after(async () => { await db.closePool(); await closeLiveTrackingRuntime(); mock.restoreAll(); });
 
@@ -162,6 +188,57 @@ test("request creation returns no customer-specific price before a technician ac
     assert.equal(result.estimatedEarnings, undefined);
     assert.match(state.request.id, /^[0-9a-f-]{36}$/);
     assert.equal(result.id, state.request.id);
+  } finally { matcher.mock.restore(); process.env.REDIS_URL = previousRedisUrl; }
+});
+
+test("concurrent posts and a lost response recover one booking and dispatch per account", async () => {
+  state.creating = true;
+  const previousRedisUrl = process.env.REDIS_URL;
+  delete process.env.REDIS_URL;
+  const matcher = mock.method(jobDispatchService, "findTopTechnicians", async () => []);
+  const body = { service_type: "car-battery", vehicle_type: "car", address: "Pickup", amount: 777, idempotencyKey: "retry-for-a-booking" };
+  const handler = serviceRoutes.default.stack.find(entry => entry.route?.path === '/' && entry.route.methods.post).route.stack.at(-1).handle;
+  async function post(payload, userId = 3) {
+    const res = response();
+    await handler({ user: { userId }, body: payload }, res);
+    return res;
+  }
+  try {
+    const [a, b] = await Promise.all([post(body), post(body)]);
+    assert.equal(a.statusCode, 200); assert.equal(b.statusCode, 200);
+    assert.ok(a.body.id); assert.equal(a.body.id, b.body.id);
+    const retry = await post(Object.fromEntries(Object.entries(body).reverse()));
+    assert.equal(retry.body.id, a.body.id);
+    assert.equal(matcher.mock.callCount(), 1);
+    const conflict = await post({ ...body, address: "Different pickup" });
+    assert.equal(conflict.statusCode, 409); assert.equal(conflict.body.code, "idempotency_conflict");
+    assert.equal(matcher.mock.callCount(), 1);
+    const other = await post(body, 4);
+    assert.equal(other.statusCode, 200); assert.notEqual(other.body.id, a.body.id);
+    assert.equal(matcher.mock.callCount(), 2);
+  } finally { matcher.mock.restore(); process.env.REDIS_URL = previousRedisUrl; }
+});
+
+test("a retry repairs a booking committed before its dispatch handoff", async () => {
+  state.creating = true;
+  state.failUserLookup = true;
+  const previousRedisUrl = process.env.REDIS_URL;
+  delete process.env.REDIS_URL;
+  const matcher = mock.method(jobDispatchService, "findTopTechnicians", async () => []);
+  const body = { service_type: "car-battery", vehicle_type: "car", address: "Pickup", amount: 777, idempotencyKey: "postcommit" };
+  const handler = serviceRoutes.default.stack.find(entry => entry.route?.path === '/' && entry.route.methods.post).route.stack.at(-1).handle;
+  const post = async () => {
+    const res = response();
+    await handler({ user: { userId: 3 }, body }, res);
+    return res;
+  };
+  try {
+    assert.equal((await post()).statusCode, 500);
+    const id = state.request.id;
+    assert.ok(id); assert.equal(matcher.mock.callCount(), 0);
+    assert.equal((await post()).body.id, id);
+    assert.equal((await post()).body.id, id);
+    assert.equal(matcher.mock.callCount(), 1);
   } finally { matcher.mock.restore(); process.env.REDIS_URL = previousRedisUrl; }
 });
 

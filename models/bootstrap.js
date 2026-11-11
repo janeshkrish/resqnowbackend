@@ -823,8 +823,27 @@ export async function ensureTechnicianApprovalAuditTable() {
   await p.execute(TABLES.admin_actions_log);
 }
 
+export async function ensureBookingIdempotencySchema(pool) {
+  await addColumnIfNotExists(pool, "service_requests", "idempotency_key VARCHAR(96) CHARACTER SET ascii COLLATE ascii_bin NULL");
+  await addColumnIfNotExists(pool, "service_requests", "booking_payload_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL");
+  await addColumnIfNotExists(pool, "service_requests", "booking_dispatch_pending BOOLEAN NOT NULL DEFAULT FALSE");
+  await addIndexIfNotExists(pool, "service_requests", "idx_booking_dispatch_pending", "booking_dispatch_pending, id");
+  const indexName = "uq_service_request_user_attempt";
+  await addUniqueIndexIfNotExists(pool, "service_requests", indexName, "user_id, idempotency_key");
+  const [index] = await pool.query(
+    "SELECT column_name AS column_name, non_unique AS non_unique FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? ORDER BY seq_in_index",
+    ["service_requests", indexName]
+  );
+  if (index.map(entry => entry.column_name).join(",") !== "user_id,idempotency_key" ||
+      index.some(entry => Number(entry.non_unique) !== 0) || !await columnExists(pool, "service_requests", "booking_payload_hash") ||
+      !await columnExists(pool, "service_requests", "booking_dispatch_pending")) {
+    throw new Error("Missing booking idempotency schema on service_requests.");
+  }
+}
+
 export async function updateServiceRequestsTableSchema() {
   const p = await getPool();
+  await ensureBookingIdempotencySchema(p);
   // Add fields that may be missing on older DB installs
   await addColumnIfNotExists(p, 'service_requests', 'vehicle_model VARCHAR(255)');
   await addColumnIfNotExists(p, 'service_requests', 'vehicle_type VARCHAR(100)');

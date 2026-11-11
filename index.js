@@ -66,6 +66,7 @@ import {
 } from "./services/operationsCommandCenterService.js";
 import {
   recoverRecentPendingDispatchJobs,
+  startBookingDispatchRecovery,
   startDispatchQueueWorker,
   stopDispatchQueueWorker,
 } from "./services/dispatchQueueService.js";
@@ -371,7 +372,9 @@ httpServer.on("error", (err) => {
 });
 
 let shuttingDown = false;
+let bookingRecoveryTimer;
 async function shutdown(signal) {
+  clearInterval(bookingRecoveryTimer);
   if (shuttingDown) return;
   shuttingDown = true;
 
@@ -437,6 +440,7 @@ async function startServer() {
         console.log("[Dispatch Queue] Embedded worker disabled (DISPATCH_WORKER_EMBEDDED=false).");
       }
       startOperationsCommandCenterMonitor();
+      bookingRecoveryTimer = startBookingDispatchRecovery();
       startTechnicianActivityMonitor();
       startFuelPriceSync();
       dbState.ready = true;
