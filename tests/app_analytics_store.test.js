@@ -35,14 +35,30 @@ test('real DB: withdrawal before analytics schema is installed is harmless', {sk
 });
 test('real DB: a client deadline retains its SQL slot while business queries remain available', {skip:!enabled,timeout:3000}, async()=>{
  const {createDisposableDatabase}=await import('./helpers/appAnalyticsDatabase.mjs');const {createAnalyticsPool}=await import('../services/appAnalyticsDatabase.js');const {createAppAnalyticsWriteQueue}=await import('../services/appAnalyticsWriteQueue.js');
- const db=await createDisposableDatabase(),analytics=createAnalyticsPool(db.config,{timeoutMs:20}),q=createAppAnalyticsWriteQueue({timeoutMs:15});
+ // Hold the real SQL work until this test releases it. A short SLEEP plus
+ // millisecond checks races the scheduler under a full parallel test run.
+ // The SQL deadline is deliberately outside this client-deadline scenario.
+ const db=await createDisposableDatabase(),analytics=createAnalyticsPool(db.config,{timeoutMs:5000}),q=createAppAnalyticsWriteQueue({timeoutMs:15});
+ const blocker=await db.pool.getConnection(),work=[];
  try{
-   const jobs=[q.submit(()=>analytics.query('SELECT SLEEP(0.1)')),q.submit(()=>analytics.query('SELECT SLEEP(0.1)'))];
+   await db.pool.query('CREATE TABLE analytics_deadline_fixture (id INT PRIMARY KEY, attempts INT NOT NULL)');
+   await db.pool.query('INSERT INTO analytics_deadline_fixture VALUES (1,0)');
+   await blocker.beginTransaction();
+   await blocker.query('SELECT id FROM analytics_deadline_fixture WHERE id=1 FOR UPDATE');
+   const submit=()=>q.submit(()=>{const operation=analytics.query('UPDATE analytics_deadline_fixture SET attempts=attempts+1 WHERE id=1');work.push(operation);return operation;});
+   const jobs=[submit(),submit()];
    await Promise.all(jobs.map(p=>assert.rejects(p)));
    assert.equal(q.health().active,2);await db.pool.query('SELECT 1');
-   await new Promise(r=>setTimeout(r,45));assert.equal(q.health().active,2);
-   await new Promise(r=>setTimeout(r,200));assert.equal(q.health().active,0);
- }finally{await analytics.end();await db.close();}
+   const [[blocked]]=await db.pool.query('SELECT attempts FROM analytics_deadline_fixture WHERE id=1');
+   assert.equal(blocked.attempts,0);assert.equal(q.health().active,2);
+   await blocker.commit();
+   await Promise.all(work);
+   // Let the queue's settlement handlers run; do not wait for a guessed SQL duration.
+   await new Promise(setImmediate);
+   assert.equal(q.health().active,0);
+   const [[finished]]=await db.pool.query('SELECT attempts FROM analytics_deadline_fixture WHERE id=1');
+   assert.equal(finished.attempts,2);
+ }finally{await blocker.rollback();blocker.release();await Promise.allSettled(work);await analytics.end();await db.close();}
 });
 test('installation store and additive migration are available',()=>{assert.equal(typeof store.registerInstallation,'function');assert.equal(typeof migration.migrateAppAnalytics,'function');});
 test('Kolkata calendar period includes midnight rather than rolling 24-hour windows',()=>{assert.equal(typeof store.reportWindow,'function');assert.equal(store.reportWindow(7,Date.parse('2026-10-27T02:00:00Z')).start.toISOString(),'2026-10-20T18:30:00.000Z');});
