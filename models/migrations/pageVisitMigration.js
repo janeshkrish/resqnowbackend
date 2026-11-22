@@ -1,6 +1,6 @@
 import * as schema from '../schema/pageVisit.js';
 
-export const PAGE_VISIT_SCHEMA_VERSION = 1;
+export const PAGE_VISIT_SCHEMA_VERSION = 2;
 
 const indexes = {
   page_visit: {
@@ -8,6 +8,7 @@ const indexes = {
     idx_page_visit_created_at: ['created_at'],
     idx_page_visit_ip: ['ip_address'],
     idx_page_visit_session: ['session_id'],
+    idx_page_visit_user_email: ['user_email'],
   },
 };
 
@@ -40,7 +41,7 @@ export async function migratePageVisit({ pool, mode = 'plan' }) {
         .filter((i) => i.Key_name === key)
         .sort((a, b) => a.Seq_in_index - b.Seq_in_index);
 
-      if (actual.map((i) => i.Column_name).join(',') !== fields.join(',')) {
+      if (actual.length > 0 && actual.map((i) => i.Column_name).join(',') !== fields.join(',')) {
         throw new Error(`Missing or incompatible index: ${name}.${key}`);
       }
     }

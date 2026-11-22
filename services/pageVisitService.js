@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { getPool } from '../db.js';
 
 export async function recordPageVisit({
+  id: providedId,
   ipAddress,
   pageVisited,
   previousPage,
@@ -10,10 +11,17 @@ export async function recordPageVisit({
   browser = 'Unknown',
   location = 'Local/Unknown',
   sessionId,
+  userName = null,
+  userEmail = null,
+  userPhone = null,
+  userRole = null,
   poolLike,
 }) {
   const pool = poolLike || (await getPool());
-  const id = randomUUID();
+  const id = providedId && typeof providedId === 'string' && /^[0-9a-f-]{36}$/i.test(providedId)
+    ? providedId
+    : randomUUID();
+
   const timeSpent = Math.max(0, Math.min(86400, parseInt(timeSpentSeconds, 10) || 0));
   const cleanPage = String(pageVisited || '/').slice(0, 255);
   const cleanPrev = String(previousPage || 'direct').slice(0, 255);
@@ -22,12 +30,22 @@ export async function recordPageVisit({
   const cleanLocation = String(location || 'Local/Unknown').slice(0, 150);
   const cleanSession = String(sessionId || id).slice(0, 64);
   const cleanIp = String(ipAddress || '127.0.0.1').slice(0, 45);
+  const cleanName = userName ? String(userName).slice(0, 120) : null;
+  const cleanEmail = userEmail ? String(userEmail).slice(0, 150) : null;
+  const cleanPhone = userPhone ? String(userPhone).slice(0, 40) : null;
+  const cleanRole = userRole ? String(userRole).slice(0, 40) : null;
 
   const sql = `
     INSERT INTO page_visit (
       id, ip_address, page_visited, previous_page, time_spent_seconds,
-      device, browser, location, session_id, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))
+      device, browser, location, session_id, user_name, user_email, user_phone, user_role, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))
+    ON DUPLICATE KEY UPDATE
+      time_spent_seconds = VALUES(time_spent_seconds),
+      user_name = COALESCE(VALUES(user_name), user_name),
+      user_email = COALESCE(VALUES(user_email), user_email),
+      user_phone = COALESCE(VALUES(user_phone), user_phone),
+      user_role = COALESCE(VALUES(user_role), user_role)
   `;
 
   await pool.execute(sql, [
@@ -40,6 +58,10 @@ export async function recordPageVisit({
     cleanBrowser,
     cleanLocation,
     cleanSession,
+    cleanName,
+    cleanEmail,
+    cleanPhone,
+    cleanRole,
   ]);
 
   return { id, success: true };
@@ -66,7 +88,7 @@ export async function getPageVisitSummary({ range = 'today', poolLike } = {}) {
   const pool = poolLike || (await getPool());
   const dateFilter = resolveDateFilter(range);
 
-  // 1. Overall counts (unique visitors, total views, average time spent)
+  // 1. Overall counts
   const [statsRows] = await pool.query(`
     SELECT
       COUNT(DISTINCT ip_address) AS visitorsToday,
@@ -152,13 +174,12 @@ export async function listPageVisits({
 
   if (search && typeof search === 'string' && search.trim()) {
     const q = `%${search.trim()}%`;
-    conditions.push('(page_visited LIKE ? OR ip_address LIKE ? OR location LIKE ? OR previous_page LIKE ?)');
-    params.push(q, q, q, q);
+    conditions.push('(page_visited LIKE ? OR ip_address LIKE ? OR location LIKE ? OR previous_page LIKE ? OR user_name LIKE ? OR user_email LIKE ? OR user_phone LIKE ?)');
+    params.push(q, q, q, q, q, q, q);
   }
 
   const whereClause = conditions.join(' AND ');
 
-  // Fetch count
   const [countRows] = await pool.query(
     `SELECT COUNT(*) AS total FROM page_visit WHERE ${whereClause}`,
     params
@@ -166,7 +187,6 @@ export async function listPageVisits({
   const total = Number(countRows[0]?.total || 0);
   const totalPages = Math.max(1, Math.ceil(total / safeLimit));
 
-  // Fetch paginated rows, newest first
   const [rows] = await pool.query(
     `
     SELECT
@@ -179,6 +199,10 @@ export async function listPageVisits({
       browser,
       location,
       session_id,
+      user_name,
+      user_email,
+      user_phone,
+      user_role,
       created_at
     FROM page_visit
     WHERE ${whereClause}
@@ -188,7 +212,6 @@ export async function listPageVisits({
     [...params, safeLimit, offset]
   );
 
-  // Fetch distinct filter options
   const [sourcesRows] = await pool.query(
     `SELECT DISTINCT previous_page FROM page_visit WHERE ${resolveDateFilter(range)} ORDER BY previous_page ASC LIMIT 50`
   );
@@ -239,7 +262,6 @@ export function startPageVisitMaintenance({ intervalMs = 3600000, enabled = () =
     }
   }
 
-  // Run initial cleanup after startup delay
   setTimeout(() => void runCleanup(), 60000);
   const timer = setInterval(() => void runCleanup(), intervalMs);
   timer.unref?.();

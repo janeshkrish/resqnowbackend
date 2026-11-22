@@ -1,5 +1,6 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
 import rateLimit from 'express-rate-limit';
+import jwt from 'jsonwebtoken';
 import { verifyAdmin } from '../middleware/auth.js';
 import { extractClientIp } from '../utils/clientIp.js';
 import { parseUserAgent } from '../utils/userAgentParser.js';
@@ -10,15 +11,37 @@ import {
   listPageVisits,
 } from '../services/pageVisitService.js';
 
+function extractUserFromAuthHeader(req) {
+  const auth = req.headers?.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return null;
+  try {
+    const token = auth.slice(7);
+    const decoded = jwt.decode(token);
+    if (decoded && typeof decoded === 'object') {
+      return {
+        email: decoded.email || null,
+        name: decoded.name || decoded.fullName || null,
+        phone: decoded.phone || decoded.phoneNumber || null,
+        role: decoded.role || decoded.type || null,
+      };
+    }
+  } catch {}
+  return null;
+}
+
 /**
  * Public ingestion router: POST /api/page-visits
  */
 export function createPublicPageVisitsRouter() {
   const router = Router();
 
+  // Internal body parsers to ensure robust parsing regardless of upstream middleware position
+  router.use(express.json({ limit: '64kb' }));
+  router.use(express.text({ type: ['text/plain', 'application/json', '*/*'], limit: '64kb' }));
+
   const visitLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 120, // 120 page visits per IP per minute
+    max: 200, // 200 requests per IP per minute
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Rate limit exceeded' },
@@ -26,7 +49,16 @@ export function createPublicPageVisitsRouter() {
 
   router.post('/', visitLimiter, async (req, res) => {
     try {
-      const body = req.body || {};
+      let body = req.body || {};
+      if (typeof body === 'string') {
+        try {
+          body = JSON.parse(body);
+        } catch {
+          body = {};
+        }
+      }
+
+      const id = body.id || body.visit_id || undefined;
       const pageVisited = String(body.page_visited || '').trim();
       const previousPage = String(body.previous_page || 'direct').trim();
       const sessionId = String(body.session_id || '').trim();
@@ -37,7 +69,7 @@ export function createPublicPageVisitsRouter() {
         return res.status(400).json({ error: 'Missing required tracking parameters' });
       }
 
-      // Skip tracking admin routes if accidentally sent
+      // Skip tracking admin routes
       if (pageVisited.startsWith('/admin')) {
         return res.status(200).json({ ok: true, skipped: 'admin' });
       }
@@ -52,8 +84,15 @@ export function createPublicPageVisitsRouter() {
       }
 
       const location = resolveLocationFromIp(clientIp);
+      const tokenUser = extractUserFromAuthHeader(req);
+
+      const userName = body.user_name || tokenUser?.name || null;
+      const userEmail = body.user_email || tokenUser?.email || null;
+      const userPhone = body.user_phone || tokenUser?.phone || null;
+      const userRole = body.user_role || tokenUser?.role || null;
 
       const result = await recordPageVisit({
+        id,
         ipAddress: clientIp,
         pageVisited,
         previousPage,
@@ -62,12 +101,15 @@ export function createPublicPageVisitsRouter() {
         browser,
         location,
         sessionId,
+        userName,
+        userEmail,
+        userPhone,
+        userRole,
       });
 
-      return res.status(201).json({ ok: true, id: result.id });
+      return res.status(200).json({ ok: true, id: result.id });
     } catch (err) {
       console.error('[PageVisitIngestion] Error recording visit:', err?.message || err);
-      // Return 200 or 500 without crashing client
       return res.status(500).json({ error: 'Failed to record visit' });
     }
   });
@@ -81,7 +123,7 @@ export function createPublicPageVisitsRouter() {
 export function createAdminPageVisitsRouter() {
   const router = Router();
 
-  // All endpoints require admin authentication
+  router.use(express.json());
   router.use(verifyAdmin);
 
   router.get('/summary', async (req, res) => {

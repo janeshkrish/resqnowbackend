@@ -230,7 +230,6 @@ function createApp() {
   app.use('/api/app-analytics', createAppAnalyticsRouter());
   startAppAnalyticsMaintenance();
   app.use('/api/page-visits', createPublicPageVisitsRouter());
-  app.use('/api/admin/page-visits', createAdminPageVisitsRouter());
   startPageVisitMaintenance();
   app.use(express.json({ limit: "2mb" }));
   app.use(express.urlencoded({ extended: true }));
@@ -294,6 +293,7 @@ function createApp() {
   // Route mounts
   app.use("/api/technicians", techniciansRouter);
   app.use("/api/technician", techniciansRouter);
+  app.use("/api/admin/page-visits", createAdminPageVisitsRouter());
   app.use("/api/admin/monitor", adminMonitorRouter);
   app.use("/api/admin/portal", adminPortalRouter);
   app.use("/api/admin", adminRouter);
