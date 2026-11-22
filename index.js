@@ -11,6 +11,8 @@ import adminRouter from "./routes/admin.js";
 import adminMonitorRouter from "./routes/adminMonitor.js";
 import adminPortalRouter from "./routes/adminPortal.js";
 import { createAppAnalyticsRouter } from './routes/appAnalytics.js';
+import { createPublicPageVisitsRouter, createAdminPageVisitsRouter } from './routes/pageVisits.js';
+import { startPageVisitMaintenance } from './services/pageVisitService.js';
 import { startAppAnalyticsMaintenance } from './services/appAnalyticsService.js';
 import usersRouter from "./routes/users.js";
 import authRouter from "./routes/auth.js";
@@ -136,6 +138,7 @@ async function bootstrapDatabase() {
     ensureServicePricingFieldMasterTable,
     ensureTowingFleetMasterTable,
     ensureTechnicianServicePricingTable,
+    ensurePageVisitTable,
     seedInitialServiceConfig,
   } = await import("./db.js");
 
@@ -179,6 +182,7 @@ async function bootstrapDatabase() {
     ensureServicePricingFieldMasterTable,
     ensureTowingFleetMasterTable,
     ensureTechnicianServicePricingTable,
+    ensurePageVisitTable,
   ];
 
   for (const ensureStep of ensureSteps) {
@@ -225,6 +229,8 @@ function createApp() {
 
   app.use('/api/app-analytics', createAppAnalyticsRouter());
   startAppAnalyticsMaintenance();
+  app.use('/api/page-visits', createPublicPageVisitsRouter());
+  startPageVisitMaintenance();
   app.use(express.json({ limit: "2mb" }));
   app.use(express.urlencoded({ extended: true }));
 
@@ -287,6 +293,7 @@ function createApp() {
   // Route mounts
   app.use("/api/technicians", techniciansRouter);
   app.use("/api/technician", techniciansRouter);
+  app.use("/api/admin/page-visits", createAdminPageVisitsRouter());
   app.use("/api/admin/monitor", adminMonitorRouter);
   app.use("/api/admin/portal", adminPortalRouter);
   app.use("/api/admin", adminRouter);

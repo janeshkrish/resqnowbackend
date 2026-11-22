@@ -8,6 +8,7 @@ import * as admin from "./admin.js";
 import * as fuel from "./fuel.js";
 import * as appAnalytics from "./appAnalytics.js";
 import * as recovery from "./recovery.js";
+import * as pageVisit from "./pageVisit.js";
 
 export const TABLES = Object.freeze({
   ...identity,
@@ -20,4 +21,5 @@ export const TABLES = Object.freeze({
   ...fuel,
   ...appAnalytics,
   ...recovery,
+  ...pageVisit,
 });

@@ -173,6 +173,7 @@ Update `.env` with local, staging, or production values before starting the serv
 | `ROUTE_RATE_LIMIT_PER_MINUTE` | `60` | Route API rate limit. |
 | `ROUTE_PROVIDER_TIMEOUT_MS` | `6500` | Route provider timeout. |
 | `ROUTE_CACHE_TTL_MS` | `600000` | Route cache TTL. |
+| `PAGE_VISIT_RETENTION_DAYS` | `90` | Retention window in days for public visitor tracking data. Records older than this are periodically purged. |
 | `PRICING_CONFIG_CACHE_TTL_MS` | `30000` | Pricing config cache TTL. |
 | `OTP_TTL_MINUTES` | `5` | OTP expiry. |
 | `OTP_DEBUG_ROUTE_ENABLED` | `false` | Enables debug OTP route. Keep disabled in production. |

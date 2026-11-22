@@ -7,6 +7,7 @@
   },
   "scripts": {
     "test": "node scripts/test.mjs",
+    "db:migrate:page-visit": "node scripts/migrate-page-visit.mjs",
     "db:migrate:app-analytics": "node scripts/migrate-app-analytics.mjs",
     "db:migrate:uuid": "node models/migrations/uuid-cli.mjs",
     "db:migrate:deploy": "node models/migrations/deploy-cli.mjs",
@@ -19,6 +20,7 @@
     "test:dispatch-matching": "node --test tests/dispatch_matching.test.js",
     "test:technician-pricing": "node --test tests/technician_pricing.test.js",
     "test:towing-phase2": "node --test tests/towing_phase2.test.js",
+    "test:page-visits": "node --test tests/page_visits_api.test.js",
     "start": "node index.js",
     "dev": "node --watch index.js",
     "worker:dispatch": "node workers/dispatchWorker.js"
@@ -33,6 +35,7 @@
     "express": "^4.22.3",
     "express-rate-limit": "^7.5.1",
     "firebase-admin": "^13.6.1",
+    "geoip-lite": "^1.4.10",
     "google-auth-library": "^10.5.0",
     "ioredis": "^5.10.0",
     "jsonwebtoken": "^9.0.2",
@@ -41,7 +44,8 @@
     "pdfkit": "^0.13.0",
     "razorpay": "^2.9.6",
     "resend": "^6.10.0",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "ua-parser-js": "^2.0.10"
   },
   "devDependencies": {
     "socket.io-client": "^4.8.3"

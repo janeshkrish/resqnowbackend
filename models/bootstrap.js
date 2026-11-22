@@ -153,6 +153,31 @@ export async function ensureTechniciansTable() {
   await p.execute(TABLES.technicians);
 }
 
+export async function ensurePageVisitTable() {
+  const p = await getPool();
+  await p.execute(TABLES.page_visit);
+
+  const columnsToAdd = [
+    { name: "user_name", type: "VARCHAR(120) NULL" },
+    { name: "user_email", type: "VARCHAR(150) NULL" },
+    { name: "user_phone", type: "VARCHAR(40) NULL" },
+    { name: "user_role", type: "VARCHAR(40) NULL" },
+  ];
+
+  for (const col of columnsToAdd) {
+    const exists = await columnExists(p, "page_visit", col.name);
+    if (!exists) {
+      try {
+        await p.execute(`ALTER TABLE page_visit ADD COLUMN ${col.name} ${col.type}`);
+      } catch (err) {
+        if (!String(err?.message || "").includes("Duplicate column")) {
+          console.warn("[DB DDL] page_visit alter column:", err?.message || err);
+        }
+      }
+    }
+  }
+}
+
 
 
 export async function ensureUsersTable() {
