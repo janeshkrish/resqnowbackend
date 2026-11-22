@@ -153,6 +153,11 @@ export async function ensureTechniciansTable() {
   await p.execute(TABLES.technicians);
 }
 
+export async function ensurePageVisitTable() {
+  const p = await getPool();
+  await p.execute(TABLES.page_visit);
+}
+
 
 
 export async function ensureUsersTable() {
