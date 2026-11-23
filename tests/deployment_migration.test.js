@@ -151,10 +151,18 @@ test("deployment configuration defaults to automatic, validates names, and can b
 
 test("automatic TiDB copy preserves source, relationships, merged histories, OTP state, and binary files", async () => {
   const fixture = cluster();
+  const pageVisit = {
+    id: migratedId("page_visit", 1), session_id: "browser-session-1",
+    ip_address: "192.0.2.10", page_visited: "/services", previous_page: "/", created_at: stamp,
+  };
+  fixture.seed("legacy", "page_visit", [
+    "id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY", "session_id VARCHAR(64) NOT NULL",
+    "ip_address VARCHAR(45) NOT NULL", "page_visited VARCHAR(255) NOT NULL", "previous_page VARCHAR(255) NOT NULL", "created_at DATETIME(3) NOT NULL",
+  ], [pageVisit]);
   const before = clone([...fixture.databases.get("legacy")]);
   const result = await run(fixture);
   assert.equal(result.migrated, true);
-  assert.equal(result.tables, 50);
+  assert.equal(result.tables, MODEL_TABLES.length);
   const target = fixture.databases.get(result.database);
   assert.deepEqual([...target.keys()].sort(), [...MODEL_TABLES].sort());
   assert.ok(target.has("page_visit"));
@@ -177,6 +185,7 @@ test("automatic TiDB copy preserves source, relationships, merged histories, OTP
   assert.ok(audits.some(row => row.reason === "Documents checked" && row.previous_status === "pending"));
   assert.equal(audits.find(row => row.source === "http").target_id, request.id);
   assert.deepEqual(target.get("files").rows[0].data, Buffer.from([0, 255, 39, 92, 10]));
+  assert.deepEqual(target.get("page_visit").rows, [pageVisit]);
   assert.equal(target.get("otp_requests").rows.length, 1);
   assert.equal(target.get("otp_requests").rows[0].otp_hash, "latest");
   assert.equal(target.get("otp_requests").rows[0].otp_request_count, 3);
@@ -273,10 +282,11 @@ test("full preservation retains legacy modules and orphan history with disabled,
   fixture.seed("legacy", "vehicles", ["`id` INT NOT NULL PRIMARY KEY AUTO_INCREMENT", "`user_id` INT NOT NULL", "`vehicle_number` VARCHAR(64)"], [{ id: 7, user_id: 1, vehicle_number: "original plate" }]);
   fixture.seed("legacy", "technician_availability", ["`technician_id` INT NOT NULL PRIMARY KEY", "`is_available` BOOLEAN DEFAULT FALSE"], [{ technician_id: 1, is_available: 0 }]);
   const before = clone([...fixture.databases.get("legacy")]);
+  const preservedTables = ["vehicles", "technician_availability"];
   const result = await prepareDeploymentDatabase(env, { connect: fixture.connect, log() {},
-    planOptions: { preservedTables: ["vehicles", "technician_availability"], restoreMissingPrincipals: true } });
+    planOptions: { preservedTables, restoreMissingPrincipals: true } });
   const target = fixture.databases.get(result.database);
-  assert.equal(result.tables, 52);
+  assert.equal(result.tables, MODEL_TABLES.length + preservedTables.length);
   assert.equal(result.preservedSourceRows.service_requests, 2);
   assert.equal(target.get("service_requests").rows.length, 2);
   assert.equal(target.get("vehicles").rows[0].id, 7);

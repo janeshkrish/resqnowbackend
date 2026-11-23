@@ -5,10 +5,12 @@ export const EXTERNAL_IDS = new Set([
   "app_id", // Android package name, not a relational UUID.
   "google_id", "firebase_uid", "upi_id", "registration_payment_id", "registration_order_id",
   "razorpay_payment_id", "razorpay_order_id", "order_id", "sequence_id",
-  "page_visit.session_id", // Opaque browser session; do not exempt other tables' session_id columns.
 ]);
 
-export const isExternalId = (table, column) => EXTERNAL_IDS.has(column) || EXTERNAL_IDS.has(`${table}.${column}`);
+export function isExternalId(table, column) {
+  // Analytics uses a browser-provided session ID for grouping visits.
+  return EXTERNAL_IDS.has(column) || (table === "page_visit" && column === "session_id");
+}
 
 export const COLUMN_TARGETS = Object.freeze({
   installation_id: "android_app_installations",

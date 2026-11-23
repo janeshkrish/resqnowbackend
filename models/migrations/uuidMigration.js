@@ -1,6 +1,6 @@
 import { isUuid, migratedId } from "../identifiers.js";
 import { boundedIdempotencyKey } from "../../utils/paymentReference.js";
-import { COLUMN_TARGETS, isExternalId, JSON_ID_TARGETS, MODEL_TABLES, SOURCE_TABLES, POLYMORPHIC, referenceTarget } from "../relationships.js";
+import { COLUMN_TARGETS, JSON_ID_TARGETS, MODEL_TABLES, SOURCE_TABLES, POLYMORPHIC, isExternalId, referenceTarget } from "../relationships.js";
 import { LEGACY_KEYS, legacyReference, migrationRowKey } from "./preservation.js";
 
 export const UUID_TYPE = "CHAR(36) CHARACTER SET ascii COLLATE ascii_bin";
