@@ -7,6 +7,11 @@ export const EXTERNAL_IDS = new Set([
   "razorpay_payment_id", "razorpay_order_id", "order_id", "sequence_id",
 ]);
 
+export function isExternalId(table, column) {
+  // Analytics uses a browser-provided session ID for grouping visits.
+  return EXTERNAL_IDS.has(column) || (table === "page_visit" && column === "session_id");
+}
+
 export const COLUMN_TARGETS = Object.freeze({
   installation_id: "android_app_installations",
   user_id: "users", customer_id: "users", technician_id: "technicians",
