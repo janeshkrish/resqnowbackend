@@ -35,7 +35,7 @@
     "express": "^4.22.3",
     "express-rate-limit": "^7.5.1",
     "firebase-admin": "^13.6.1",
-    "geoip-lite": "^1.4.10",
+    "geoip-lite": "^2.0.3",
     "google-auth-library": "^10.5.0",
     "ioredis": "^5.10.0",
     "jsonwebtoken": "^9.0.2",

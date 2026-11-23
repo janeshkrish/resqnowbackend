@@ -1,6 +1,6 @@
 import { isUuid, migratedId } from "../identifiers.js";
 import { boundedIdempotencyKey } from "../../utils/paymentReference.js";
-import { COLUMN_TARGETS, EXTERNAL_IDS, JSON_ID_TARGETS, MODEL_TABLES, SOURCE_TABLES, POLYMORPHIC, referenceTarget } from "../relationships.js";
+import { COLUMN_TARGETS, isExternalId, JSON_ID_TARGETS, MODEL_TABLES, SOURCE_TABLES, POLYMORPHIC, referenceTarget } from "../relationships.js";
 import { LEGACY_KEYS, legacyReference, migrationRowKey } from "./preservation.js";
 
 export const UUID_TYPE = "CHAR(36) CHARACTER SET ascii COLLATE ascii_bin";
@@ -95,7 +95,7 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "", pres
   const inPlaceSupported = !/tidb/i.test(engine) || ![...metadata.tables].some(([table, columns]) => MODEL_TABLES.includes(table) && columns.some(column => column.column_name === "id" && column.data_type !== "char"));
   for (const [table, columns] of metadata.tables) {
     if (!SOURCE_TABLES.includes(table)) continue;
-    const unknown = columns.filter(column => column.column_name.endsWith("_id") && !EXTERNAL_IDS.has(column.column_name) && !identityColumn(column, table, metadata.foreignKeys));
+    const unknown = columns.filter(column => column.column_name.endsWith("_id") && !isExternalId(table, column.column_name) && !identityColumn(column, table, metadata.foreignKeys));
     if (unknown.length) throw new Error(`Unmodeled ID columns require review: ${unknown.map(column => `${table}.${column.column_name}`).join(", ")}`);
   }
   const records = new Map();
@@ -203,7 +203,7 @@ export async function buildUuidMigrationPlan(connection, { adminEmail = "", pres
             }
           }
           if (JSON.stringify(migrated) !== JSON.stringify(json)) changes[name] = JSON.stringify(migrated);
-        } else if (!preservedTables.includes(table) && name.endsWith("_id") && !EXTERNAL_IDS.has(name) && !identityColumn(column, table, metadata.foreignKeys)) {
+        } else if (!preservedTables.includes(table) && name.endsWith("_id") && !isExternalId(table, name) && !identityColumn(column, table, metadata.foreignKeys)) {
           issues.push(`${context}: unmodeled ID column`);
         }
       }

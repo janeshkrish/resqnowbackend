@@ -33,7 +33,7 @@ test("UUID migration preserves Razorpay payment IDs inside gateway and wallet me
 });
 
 test("every active table has a UUID primary key; external provider IDs and counters retain their types", () => {
-  assert.equal(Object.keys(TABLES).length, 49);
+  assert.equal(Object.keys(TABLES).length, 50);
   assert.equal(TABLES.otp_rate_limits, undefined);
   for (const [table, sql] of Object.entries(TABLES)) {
     assert.match(sql, /\bid CHAR\(36\) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY/, table);
@@ -44,6 +44,7 @@ test("every active table has a UUID primary key; external provider IDs and count
   assert.match(TABLES.payments, /razorpay_payment_id VARCHAR\(255\)/);
   assert.match(TABLES.technician_location_history, /sequence_id BIGINT/);
   assert.match(TABLES.otp_requests, /otp_request_count INT/);
+  assert.match(TABLES.page_visit, /session_id VARCHAR\(64\) NOT NULL/);
 });
 
 test("UUID generation and stable migration mappings keep different entity IDs distinct", () => {
@@ -160,6 +161,19 @@ test("migration plans deterministic keys, foreign keys and nested snapshots with
   assert.equal(JSON.parse(request.changes.pricing_snapshot).request_id, request.newId);
   assert.equal(db.data.users[0].id, 1);
   assert.ok(db.statements.every(sql => /^SELECT/.test(sql)));
+});
+
+test("page-visit browser sessions remain opaque while unrelated unmodeled session columns still fail closed", async () => {
+  const session = "s_synthetic-browser-session";
+  const db = migrationDatabase({ extra: { page_visit: [{ id: 17, session_id: session }] } });
+  const plan = await buildUuidMigrationPlan(db.connection);
+  const row = plan.conversions.find(item => item.table === "page_visit");
+  assert.equal(row.newId, migratedId("page_visit", 17));
+  assert.equal(row.changes.session_id, undefined);
+  assert.equal(db.data.page_visit[0].session_id, session);
+  assert.ok(db.statements.every(sql => /^SELECT/.test(sql)));
+  const unrelated = migrationDatabase({ extra: { payments: [{ id: 18, session_id: session }] } });
+  await assert.rejects(buildUuidMigrationPlan(unrelated.connection), /payments\.session_id/);
 });
 
 test("migration refuses orphans and blocks unsupported TiDB ALTER before writing", async () => {
