@@ -49,5 +49,10 @@
   },
   "devDependencies": {
     "socket.io-client": "^4.8.3"
+  },
+  "overrides": {
+    "geoip-lite": {
+      "ip-address": "^10.7.6"
+    }
   }
 }
