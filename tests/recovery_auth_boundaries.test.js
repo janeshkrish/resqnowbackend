@@ -16,22 +16,27 @@ const { default: usersRouter } = await import('../routes/users.js');
 
 test('admin password change revokes old customer JWT, old password fails, new password signs in despite stale header',async t=>{
   const account={id:ID,email:'owner@example.test',full_name:'Customer',role:'user',is_verified:1,auth_version:0,password_hash:await bcrypt.hash('original-password!',4)};
+  // Login throttle bookkeeping (recovery_rate_limits): always under the limit here;
+  // tests/login_throttle.test.js covers the throttle itself.
+  const throttleRow=[[{request_count:0,age_seconds:0}]];
   const pool={query:async(sql,args)=>{
     if(sql==='SELECT 1')return[[{ok:1}]];
+    if(sql.includes('recovery_rate_limits'))return throttleRow;
     if(sql.includes('FROM users'))return[[{...account}]];
     throw Error(`Unexpected auth boundary query: ${sql}`);
   },execute:async(sql,args)=>{
+    if(sql.includes('recovery_rate_limits'))return sql.includes('SELECT')?throttleRow:[{affectedRows:1}];
     if(sql.includes('SELECT'))return pool.query(sql,args);
     assert.match(sql,/UPDATE users SET full_name = \?, password_hash = \?, auth_version = auth_version \+ 1 WHERE id = \?/);
     assert.equal(args[2],ID);account.full_name=args[0];account.password_hash=args[1];account.auth_version++;return[{affectedRows:1}];
-  },end:async()=>{}};
+  },getConnection:async()=>({beginTransaction:async()=>{},commit:async()=>{},rollback:async()=>{},release(){},query:(...a)=>pool.query(...a),execute:(...a)=>pool.execute(...a)}),end:async()=>{}};
   const driver=mock.method(mysql,'createPool',()=>pool);t.after(async()=>{await db.closePool();driver.mock.restore();});
   const app=express();app.use(express.json());mountCredentialSessions(app);app.use('/api/users',usersRouter);app.use('/api/admin',adminRouter);
   app.get('/api/private',verifyUser,(_req,res)=>res.json({ok:true}));
   const server=app.listen(0,'127.0.0.1');await new Promise(resolve=>server.once('listening',resolve));t.after(()=>new Promise(resolve=>server.close(resolve)));
   const oldToken=jwt.sign({userId:ID,role:'user',sv:0},process.env.JWT_SECRET);
   const call=(path,method,body,token=oldToken)=>fetch(`http://127.0.0.1:${server.address().port}${path}`,{method,headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},...(body?{body:JSON.stringify(body)}:{})});
-  const adminToken=jwt.sign({id:ID,role:'admin'},process.env.JWT_SECRET);
+  const adminToken=jwt.sign({id:ID,role:'admin',sv:1},process.env.JWT_SECRET);
   const update=await call(`/api/admin/users/${ID}`,'PUT',{name:'Customer',password:'replacement-password!'},adminToken);
   assert.equal(update.status,200,JSON.stringify(await update.json()));assert.equal(account.auth_version,1);
   assert.equal((await call('/api/private','GET')).status,401);

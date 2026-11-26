@@ -1,11 +1,18 @@
 import { getPool } from '../db.js';
 import { isUuid } from '../models/identifiers.js';
+import { isCurrentAdminSession } from './adminCredentials.js';
 
 export function createCredentialSessionValidator({ getPool: resolvePool = getPool } = {}) {
   return async function validateCredentialSession(identity) {
-    if (identity?.role === 'admin') return;
-    const { id, role, sessionVersion = 0 } = identity || {};
     const denied = () => Object.assign(new Error('Please sign in again.'), { statusCode: 401 });
+    // The admin account lives in the environment, so its sessions are versioned by
+    // ADMIN_SESSION_VERSION rather than a database row. No default: a token without
+    // a version is a pre-revocation token and must sign in again.
+    if (identity?.role === 'admin') {
+      if (!isCurrentAdminSession(identity.sessionVersion)) throw denied();
+      return;
+    }
+    const { id, role, sessionVersion = 0 } = identity || {};
     if (!isUuid(id) || !['user','technician'].includes(role) || !Number.isSafeInteger(sessionVersion) || sessionVersion < 0) throw denied();
     let row;
     try {

@@ -11,6 +11,7 @@ import * as mail from "../services/mailer.js";
 import Razorpay from "razorpay";
 import crypto from "crypto";
 import { verifyTechnician, verifyAdmin, signTechnicianToken } from "../middleware/auth.js";
+import { loginThrottle, emailFromBody } from "../services/loginThrottle.js";
 import {
   canonicalizeServiceDomain,
   canonicalizeVehicleFamily,
@@ -1255,7 +1256,7 @@ router.post("/register", async (req, res) => {
   }
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", loginThrottle({ scope: "technician", account: emailFromBody }), async (req, res) => {
   try {
     const { email, password } = req.body;
     const normalizedEmail = (email || "").trim().toLowerCase();
@@ -1264,12 +1265,11 @@ router.post("/login", async (req, res) => {
     }
     const rows = await db.query("SELECT * FROM technicians WHERE email = ? LIMIT 1", [normalizedEmail]);
     const row = rows[0];
-    if (!row) {
-      return res.status(404).json({ error: "User not found." });
-    }
-    const valid = await bcrypt.compare(password, row.password_hash || "");
+    // Same answer for an unknown email and a wrong password, so sign-in cannot be
+    // used to discover which emails belong to registered technicians.
+    const valid = row ? await bcrypt.compare(String(password), row.password_hash || "") : false;
     if (!valid) {
-      return res.status(401).json({ error: "Incorrect password. Please try again." });
+      return res.status(401).json({ error: "Incorrect email or password. Please try again." });
     }
     const status = String(row.status || "").trim().toLowerCase() || "pending";
     const approvalFlagRaw = row.isApproved ?? row.is_approved;

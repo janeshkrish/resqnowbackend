@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import { ensureAdminIdentity } from "../models/userIdentity.js";
 import { isUuid } from "../models/identifiers.js";
+import { ADMIN_TOKEN_TTL, currentAdminSessionVersion, isCurrentAdminSession } from "../services/adminCredentials.js";
 
 function getJwtSecret() {
   const secret = String(process.env.JWT_SECRET || "").trim();
@@ -74,6 +75,11 @@ export function verifyAdmin(req, res, next) {
     if (role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
+    // Checked here as well as in the global session guard, so an admin route
+    // mounted without that guard still honours ADMIN_SESSION_VERSION revocation.
+    if (!isCurrentAdminSession(payload.sv)) {
+      return res.status(401).json({ error: "Please sign in again." });
+    }
     req.admin = payload;
     req.adminEmail = payload.email;
     next();
@@ -85,18 +91,13 @@ export function verifyAdmin(req, res, next) {
   }
 }
 
-export function getAdminCredentials() {
-  return {
-    email: process.env.ADMIN_EMAIL || "",
-    password: process.env.ADMIN_PASSWORD || "",
-  };
-}
-
 export function signTechnicianToken(id, email, authVersion = 0) {
   return jwt.sign({ id, email, type: "technician", role: "technician", sv: Number(authVersion) }, getJwtSecret(), { expiresIn: "7d" });
 }
 
 export async function signAdminToken(email) {
+  const sv = currentAdminSessionVersion();
+  if (sv === null) throw new Error("ADMIN_SESSION_VERSION is invalid.");
   const id = await ensureAdminIdentity(email);
-  return jwt.sign({ id, userId: id, email, type: "admin", role: "admin" }, getJwtSecret(), { expiresIn: "1d" });
+  return jwt.sign({ id, userId: id, email, type: "admin", role: "admin", sv }, getJwtSecret(), { expiresIn: ADMIN_TOKEN_TTL });
 }

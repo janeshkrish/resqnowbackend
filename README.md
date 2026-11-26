@@ -117,7 +117,8 @@ Update `.env` with local, staging, or production values before starting the serv
 | `DB_SSL` | Set `true` for managed cloud databases that require SSL. |
 | `JWT_SECRET` | Long random secret used to sign user, technician, and admin JWTs. |
 | `ADMIN_EMAIL` | Admin login email. |
-| `ADMIN_PASSWORD` | Admin login password. Store only in secret manager or `.env`. |
+| `ADMIN_PASSWORD_HASH` | bcrypt hash (cost 10 or more) of the admin password. Create it with `npm run admin:hash-password`. Without it, admin sign-in is disabled; the rest of the API keeps working. The old plaintext `ADMIN_PASSWORD` is ignored; remove it. |
+| `ADMIN_SESSION_VERSION` | Optional, default `1`. Raise it (for example to `2`) to sign every admin out immediately, including live dashboard sockets. Admin tokens last 8 hours. |
 | `EMAIL_USER` | Email sender/auth user. |
 | `EMAIL_PASS` | Email password or provider credential. |
 | `SMTP_HOST` | SMTP host. |

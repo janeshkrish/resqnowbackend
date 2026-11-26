@@ -5,9 +5,9 @@ import * as db from "../db.js";
 import * as mail from "../services/mailer.js";
 import { socketService } from "../services/socket.js";
 import bcrypt from "bcryptjs";
-import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { getAdminCredentials, signAdminToken, verifyUser } from "../middleware/auth.js";
+import { verifyUser } from "../middleware/auth.js";
+import { loginThrottle, emailFromBody } from "../services/loginThrottle.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
 import { handlePhoneLogin } from "../services/phoneLogin.js";
 
@@ -118,23 +118,6 @@ function maskEmail(email) {
   if (!name || !domain) return "";
   if (name.length < 3) return `${name[0] || "*"}***@${domain}`;
   return `${name.slice(0, 2)}***@${domain}`;
-}
-
-function secureEqual(left, right) {
-  const leftBuffer = Buffer.from(String(left || ""), "utf8");
-  const rightBuffer = Buffer.from(String(right || ""), "utf8");
-  if (leftBuffer.length !== rightBuffer.length) return false;
-  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function isAdminCredentialMatch(normalizedEmail, password) {
-  const { email: adminEmail, password: adminPassword } = getAdminCredentials();
-  const normalizedAdminEmail = String(adminEmail || "").trim().toLowerCase();
-  const configuredAdminPassword = String(adminPassword || "");
-
-  if (!normalizedAdminEmail || !configuredAdminPassword) return false;
-  if (normalizedEmail !== normalizedAdminEmail) return false;
-  return secureEqual(password, configuredAdminPassword);
 }
 
 const OTP_TTL_MINUTES = toPositiveInt(process.env.OTP_TTL_MINUTES, 5);
@@ -345,7 +328,7 @@ router.post("/send-otp-debug", async (req, res) => {
 });
 
 // 2. Verify OTP and Create User (Step 2 of Registration)
-router.post("/verify-otp", async (req, res) => {
+router.post("/verify-otp", loginThrottle({ kind: "otp", scope: "otp", account: emailFromBody }), async (req, res) => {
   try {
     const { email, otp, name, password } = req.body;
     const normalizedEmail = (email || "").trim().toLowerCase();
@@ -424,7 +407,7 @@ router.post("/verify-otp", async (req, res) => {
 });
 
 // 3. Login
-router.post('/login', async (req, res) => {
+router.post('/login', loginThrottle({ scope: "user", account: emailFromBody }), async (req, res) => {
   try {
     const { email, password } = req.body;
     const normalizedEmail = (email || "").trim().toLowerCase();
@@ -438,22 +421,7 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: "Email and password are required." });
     }
 
-    if (isAdminCredentialMatch(normalizedEmail, rawPassword)) {
-      const token = await signAdminToken(normalizedEmail);
-      console.log(`[AUTH LOGIN] Admin login success from ${clientIp} for ${normalizedEmail}`);
-      return res.json({
-        token,
-        role: "admin",
-        user: {
-          id: jwt.decode(token).id,
-          name: "Admin",
-          email: normalizedEmail,
-          isVerified: true,
-          role: "admin",
-        },
-      });
-    }
-
+    // Admins sign in only at /api/admin/login (hashed password, revocable sessions).
     const [user] = await db.query("SELECT * FROM users WHERE email = ? LIMIT 1", [normalizedEmail]);
 
     if (!user) {

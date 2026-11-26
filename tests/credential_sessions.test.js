@@ -19,12 +19,13 @@ test('legacy and fresh JWT versions track persistent customer and technician cre
   assert.ok(queries.some(([sql])=>sql.includes('FROM users')));
 });
 
-test('deleted accounts and unavailable SQL fail closed; admins stay in existing auth',async()=>{
+test('deleted accounts and unavailable SQL fail closed; admins are versioned by ADMIN_SESSION_VERSION without SQL',async()=>{
   const missing=createCredentialSessionValidator({getPool:async()=>({query:async()=>[[]]})});
   await assert.rejects(missing({id:ID,role:'user',sessionVersion:0}),{statusCode:401});
   const broken=createCredentialSessionValidator({getPool:async()=>{throw Error('SQL offline');}});
   await assert.rejects(broken({id:ID,role:'technician',sessionVersion:0}),{statusCode:503});
-  await broken({id:ID,role:'admin'});
+  await broken({id:ID,role:'admin',sessionVersion:1});
+  await assert.rejects(broken({id:ID,role:'admin'}),{statusCode:401});
 });
 
 test('common API and auth mounts reject old native/REST tokens and accept fresh/legacy-zero tokens',async()=>{

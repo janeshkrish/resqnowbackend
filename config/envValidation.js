@@ -1,4 +1,5 @@
 import { getBackendPublicUrl, getFrontendUrl, getGoogleCallbackUrl } from "./network.js";
+import { adminConfigWarnings } from "../services/adminCredentials.js";
 
 const REQUIRED_ENV_KEYS = [
   "DB_HOST",
@@ -8,7 +9,8 @@ const REQUIRED_ENV_KEYS = [
   "DB_NAME",
   "JWT_SECRET",
   "ADMIN_EMAIL",
-  "ADMIN_PASSWORD",
+  // ADMIN_PASSWORD_HASH is deliberately not required: a missing admin hash must
+  // only disable admin sign-in, never mark the whole API unready.
   "RAZORPAY_KEY_ID",
   "RAZORPAY_KEY_SECRET",
   "EMAIL_USER",
@@ -25,7 +27,7 @@ const REQUIRED_ENV_KEYS = [
 const SECRET_KEYS = new Set([
   "DB_PASSWORD",
   "JWT_SECRET",
-  "ADMIN_PASSWORD",
+  "ADMIN_PASSWORD_HASH",
   "RAZORPAY_KEY_SECRET",
   "EMAIL_PASS",
   "GOOGLE_CLIENT_SECRET",
@@ -145,5 +147,8 @@ export function logEnvironmentSummary() {
   summary.FRONTEND_EFFECTIVE_URL = normalizeUrl(getFrontendUrl()) || "missing";
   summary.GOOGLE_CALLBACK_EFFECTIVE_URL = normalizeUrl(getGoogleCallbackUrl()) || "missing";
   summary.REDIS_URL = String(process.env.REDIS_URL || "").trim() ? "set" : "missing";
+  summary.ADMIN_PASSWORD_HASH = envState("ADMIN_PASSWORD_HASH");
+  summary.ADMIN_SESSION_VERSION = String(process.env.ADMIN_SESSION_VERSION || "").trim() || "1 (default)";
   console.log("[ENV] Required variable summary:", summary);
+  for (const warning of adminConfigWarnings()) console.warn(`[ENV] ${warning}`);
 }

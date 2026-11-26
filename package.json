@@ -17,6 +17,7 @@
     "production:check-login": "node scripts/production-login-check.mjs",
     "build": "node scripts/build-check.mjs",
     "email:test": "node scripts/email-smoke-test.mjs",
+    "admin:hash-password": "node scripts/hash-admin-password.mjs",
     "test:dispatch-matching": "node --test tests/dispatch_matching.test.js",
     "test:technician-pricing": "node --test tests/technician_pricing.test.js",
     "test:towing-phase2": "node --test tests/towing_phase2.test.js",

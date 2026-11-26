@@ -15,9 +15,10 @@ export function credentialSessions({ validateSession = validateCredentialSession
     try { payload = jwt.verify(authorization.slice(7), String(process.env.JWT_SECRET || '').trim()); }
     catch { return next(); } // Existing role middleware handles malformed/expired tokens.
     const role = String(payload.role || payload.type || 'user').toLowerCase();
-    if (role === 'admin') return next();
+    // Admins are validated too (by ADMIN_SESSION_VERSION); their tokens must carry sv.
+    const sessionVersion = role === 'admin' ? payload.sv : (payload.sv ?? 0);
     try {
-      await validateSession({ id: payload.userId || payload.id || payload.technicianId, role, sessionVersion: payload.sv ?? 0 });
+      await validateSession({ id: payload.userId || payload.id || payload.technicianId, role, sessionVersion });
       return next();
     } catch (error) {
       res.set('Cache-Control', 'no-store');

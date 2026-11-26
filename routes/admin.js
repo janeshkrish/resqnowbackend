@@ -6,7 +6,9 @@ import jwt from "jsonwebtoken";
 import * as db from "../db.js";
 import * as mail from "../services/mailer.js";
 import { addClient } from "../sse.js";
-import { getAdminCredentials, signAdminToken, verifyAdmin } from "../middleware/auth.js";
+import { signAdminToken, verifyAdmin } from "../middleware/auth.js";
+import { adminEmail as configuredAdminEmail, checkAdminLogin } from "../services/adminCredentials.js";
+import { loginThrottle, emailFromBody } from "../services/loginThrottle.js";
 import { getFrontendUrl } from "../config/network.js";
 import { canonicalizeServiceDomain, canonicalizeVehicleFamily } from "../services/serviceNormalization.js";
 import { normalizeTechnicianPricingEntries } from "../models/technicianPricing.js";
@@ -82,15 +84,17 @@ import {
 const router = Router();
 const JWT_SECRET = String(process.env.JWT_SECRET || "").trim();
 
-router.post("/login", async (req, res, next) => {
-  const { email, password } = req.body;
-  const { email: adminEmail, password: adminPassword } = getAdminCredentials();
-  if (!adminEmail || !adminPassword) {
+router.post("/login", loginThrottle({ scope: "admin", account: emailFromBody }), async (req, res, next) => {
+  const { email, password } = req.body || {};
+  let outcome;
+  try { outcome = await checkAdminLogin(email, password); } catch (error) { return next(error); }
+  if (outcome === "not_configured") {
     return res.status(503).json({ error: "Admin login is not configured." });
   }
-  if ((email || "").trim().toLowerCase() !== adminEmail.trim().toLowerCase() || password !== adminPassword) {
+  if (outcome !== "ok") {
     return res.status(401).json({ error: "Invalid email or password." });
   }
+  const adminEmail = configuredAdminEmail();
   let token;
   try { token = await signAdminToken(adminEmail); } catch (error) { return next(error); }
   return res.json({
