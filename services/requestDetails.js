@@ -2,6 +2,8 @@
 // questions, plus landmark, number plate, urgency and attachments. Everything here is
 // customer input, so it is trimmed, capped and never trusted for pricing on its own.
 
+import { canonicalUploadPath } from "./uploadLinks.js";
+
 const MAX_ANSWERS = 20;
 const MAX_TEXT = 120;
 const MAX_LONG_TEXT = 500;
@@ -46,10 +48,12 @@ export function sanitizeRequestDetails(input) {
     .slice(0, MAX_ANSWERS)
     .map(sanitizeAnswer)
     .filter((answer) => answer && !seen.has(answer.id) && seen.add(answer.id));
+  // Apps send back the signed links they were given; store only the plain path.
   const attachments = (Array.isArray(raw.attachments) ? raw.attachments : [])
-    .filter((a) => a && typeof a === "object" && ["photo", "voice"].includes(a.type) && ATTACHMENT_URL.test(String(a.url || "")))
-    .slice(0, MAX_ATTACHMENTS)
-    .map((a) => ({ type: a.type, url: String(a.url) }));
+    .filter((a) => a && typeof a === "object" && ["photo", "voice"].includes(a.type))
+    .map((a) => ({ type: a.type, url: canonicalUploadPath(a.url) || "" }))
+    .filter((a) => ATTACHMENT_URL.test(a.url))
+    .slice(0, MAX_ATTACHMENTS);
   const details = {
     answers,
     ...(BODY_SUBTYPES.has(raw.vehicle_base_subtype) ? { vehicle_base_subtype: raw.vehicle_base_subtype } : {}),

@@ -5,6 +5,7 @@ import { getPool } from "../db.js";
 import { notificationService } from "./notificationService.js";
 import { logLiveTrackingDiagnostic } from './liveTrackingDiagnostics.js';
 import { validateCredentialSession } from './credentialSessions.js';
+import { signSocketPayloads } from './uploadLinks.js';
 
 export const ADMIN_ROOM = 'admins';
 
@@ -111,6 +112,8 @@ export class SocketService {
       },
     });
     if (socketAdapter) this.io.adapter(socketAdapter);
+    // Job alerts and request updates carry photo/voice links: sign them like REST responses.
+    signSocketPayloads(this.io);
 
     this.io.use(async (socket, next) => {
       if (!isReady()) return next(new Error('Database initialization is in progress. Retry shortly.'));

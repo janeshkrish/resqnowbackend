@@ -58,6 +58,7 @@ import { closePool, getPool } from "./db.js";
 import { assertUuidSchema } from "./models/persistence.js";
 import { ensureModelRelationships } from "./models/constraints.js";
 import { databaseReadiness } from "./middleware/databaseReadiness.js";
+import { signUploadLinksInJson } from "./services/uploadLinks.js";
 import { mountCredentialSessions } from './middleware/credentialSessions.js';
 import { createPasswordRecoveryRouter } from './routes/passwordRecovery.js';
 import { ensurePasswordRecoverySchema } from './models/recoverySchema.js';
@@ -219,6 +220,10 @@ function createApp() {
   const corsOptions = buildCorsOptions();
   app.use(cors(corsOptions));
   app.options("*", cors(corsOptions));
+
+  // Uploaded files open only through signed links; every JSON response signs the
+  // links it carries (services/uploadLinks.js, launch checklist #4).
+  app.use(signUploadLinksInJson());
 
   // No route (including webhooks and uploads) may run against a partial transfer.
   app.use(databaseReadiness(dbState));

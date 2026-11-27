@@ -29,6 +29,7 @@ import { estimateTechnicianEarningForRequest } from "../services/technicianEarni
 import { answerValue, describeRequestDetails, sanitizeRequestDetails } from "../services/requestDetails.js";
 import { defaultTowTruckType, normalizeTowTruckType, normalizeVehicleSubtype } from "../services/vehicleClasses.js";
 import { buildTechnicianJobDetails } from "../services/technicianJobDetails.js";
+import { canonicalUploadPath } from "../services/uploadLinks.js";
 import {
     canCustomerCancelRequest,
     getTowingRealtimeEvent,
@@ -71,9 +72,9 @@ const normalizeUploadResourcePath = (rawValue) => {
     const raw = String(rawValue || "").trim();
     if (!raw) return "";
 
-    if (raw.startsWith("/api/upload/files/")) {
-        return raw;
-    }
+    // Plain path for any stored or signed upload link (apps send back signed links).
+    const uploadPath = canonicalUploadPath(raw);
+    if (uploadPath) return uploadPath;
 
     if (/^https?:\/\//i.test(raw)) {
         try {

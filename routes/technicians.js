@@ -12,6 +12,7 @@ import Razorpay from "razorpay";
 import crypto from "crypto";
 import { verifyTechnician, verifyAdmin, signTechnicianToken } from "../middleware/auth.js";
 import { loginThrottle, emailFromBody } from "../services/loginThrottle.js";
+import { canonicalUploadPath } from "../services/uploadLinks.js";
 import {
   canonicalizeServiceDomain,
   canonicalizeVehicleFamily,
@@ -265,9 +266,9 @@ function normalizeUploadResourcePath(rawValue) {
   const raw = String(rawValue || "").trim();
   if (!raw) return "";
 
-  if (raw.startsWith("/api/upload/files/")) {
-    return raw;
-  }
+  // Plain path for any stored or signed upload link (apps send back signed links).
+  const uploadPath = canonicalUploadPath(raw);
+  if (uploadPath) return uploadPath;
 
   if (/^https?:\/\//i.test(raw)) {
     try {
