@@ -119,16 +119,51 @@ test("a malformed or low-cost hash is refused", async () => {
   }
 });
 
-test("admin credentials on the customer login do not produce an admin session, even with the legacy variable set", () => withEnv(
-  { ADMIN_PASSWORD: PASSWORD },
+test("admin signs in from the customer login page with the hashed password", async () => {
+  const res = await login("/api/users/login", { email: ` ${ADMIN_EMAIL.toUpperCase()} `, password: PASSWORD });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.role, "admin");
+  assert.equal(body.user.role, "admin");
+  const payload = jwt.verify(body.token, process.env.JWT_SECRET);
+  assert.equal(payload.role, "admin");
+  assert.equal(payload.sv, 1);
+  assert.equal(payload.exp - payload.iat, 8 * 60 * 60);
+  assert.equal((await probe(body.token)).status, 200);
+});
+
+test("the customer login page never accepts the old plaintext ADMIN_PASSWORD", () => withEnv(
+  { ADMIN_PASSWORD: "old-plaintext-password" },
+  async () => {
+    const res = await login("/api/users/login", { email: ADMIN_EMAIL, password: "old-plaintext-password" });
+    assert.equal(res.status, 401);
+    assert.equal((await res.json()).token, undefined);
+  },
+));
+
+test("on the customer login page a wrong admin password looks exactly like a wrong customer password", async () => {
+  const admin = await login("/api/users/login", { email: ADMIN_EMAIL, password: "not-it" });
+  const customer = await login("/api/users/login", { email: "nobody@customer.test", password: "not-it" });
+  assert.equal(admin.status, 401);
+  assert.equal(customer.status, 401);
+  assert.deepEqual(await admin.json(), await customer.json());
+});
+
+test("without ADMIN_PASSWORD_HASH the customer login page refuses the admin with a plain 401", () => withEnv(
+  { ADMIN_PASSWORD_HASH: undefined, ADMIN_PASSWORD: PASSWORD },
   async () => {
     const res = await login("/api/users/login", { email: ADMIN_EMAIL, password: PASSWORD });
     assert.equal(res.status, 401);
-    const body = await res.json();
-    assert.equal(body.token, undefined);
-    assert.notEqual(body.role, "admin");
+    assert.equal((await res.json()).token, undefined);
   },
 ));
+
+test("raising ADMIN_SESSION_VERSION also revokes admin tokens issued by the customer login page", async () => {
+  const { token } = await (await login("/api/users/login", { email: ADMIN_EMAIL, password: PASSWORD })).json();
+  await withEnv({ ADMIN_SESSION_VERSION: "5" }, async () => {
+    assert.equal((await probe(token)).status, 401);
+  });
+});
 
 test("raising ADMIN_SESSION_VERSION revokes every existing admin token", async () => {
   const { token: v1 } = await (await login("/api/admin/login", { email: ADMIN_EMAIL, password: PASSWORD })).json();

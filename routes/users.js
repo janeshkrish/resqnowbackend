@@ -6,7 +6,8 @@ import * as mail from "../services/mailer.js";
 import { socketService } from "../services/socket.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { verifyUser } from "../middleware/auth.js";
+import { signAdminToken, verifyUser } from "../middleware/auth.js";
+import { adminEmail as configuredAdminEmail, checkAdminLogin } from "../services/adminCredentials.js";
 import { loginThrottle, emailFromBody } from "../services/loginThrottle.js";
 import { sendEventEmail } from "../utils/eventEmail.js";
 import { handlePhoneLogin } from "../services/phoneLogin.js";
@@ -421,7 +422,31 @@ router.post('/login', loginThrottle({ scope: "user", account: emailFromBody }), 
       return res.status(400).json({ error: "Email and password are required." });
     }
 
-    // Admins sign in only at /api/admin/login (hashed password, revocable sessions).
+    // The admin can also sign in from this login page. Same rules as /api/admin/login:
+    // password checked against ADMIN_PASSWORD_HASH (the plaintext ADMIN_PASSWORD is
+    // never accepted), 8-hour token versioned by ADMIN_SESSION_VERSION, and this
+    // route's login throttle. Any failure gets the same generic 401 as customers.
+    if (normalizedEmail === configuredAdminEmail()) {
+      const outcome = await checkAdminLogin(normalizedEmail, rawPassword);
+      if (outcome !== "ok") {
+        console.warn(`[AUTH LOGIN] Admin sign-in rejected (${outcome}) from ${clientIp}`);
+        return res.status(401).json({ error: "Invalid email or password." });
+      }
+      const token = await signAdminToken(normalizedEmail);
+      console.log(`[AUTH LOGIN] Admin login success from ${clientIp}`);
+      return res.json({
+        token,
+        role: "admin",
+        user: {
+          id: jwt.decode(token).id,
+          name: "Admin",
+          email: normalizedEmail,
+          isVerified: true,
+          role: "admin",
+        },
+      });
+    }
+
     const [user] = await db.query("SELECT * FROM users WHERE email = ? LIMIT 1", [normalizedEmail]);
 
     if (!user) {
