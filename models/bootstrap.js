@@ -853,6 +853,8 @@ export async function ensureBookingIdempotencySchema(pool) {
   await addColumnIfNotExists(pool, "service_requests", "booking_payload_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL");
   await addColumnIfNotExists(pool, "service_requests", "booking_dispatch_pending BOOLEAN NOT NULL DEFAULT FALSE");
   await addIndexIfNotExists(pool, "service_requests", "idx_booking_dispatch_pending", "booking_dispatch_pending, id");
+  // Set when dispatch ran out of technicians (checklist #10); NULL while searching.
+  await addColumnIfNotExists(pool, "service_requests", "dispatch_exhausted_at DATETIME(3) NULL");
   const indexName = "uq_service_request_user_attempt";
   await addUniqueIndexIfNotExists(pool, "service_requests", indexName, "user_id, idempotency_key");
   const [index] = await pool.query(
@@ -861,7 +863,8 @@ export async function ensureBookingIdempotencySchema(pool) {
   );
   if (index.map(entry => entry.column_name).join(",") !== "user_id,idempotency_key" ||
       index.some(entry => Number(entry.non_unique) !== 0) || !await columnExists(pool, "service_requests", "booking_payload_hash") ||
-      !await columnExists(pool, "service_requests", "booking_dispatch_pending")) {
+      !await columnExists(pool, "service_requests", "booking_dispatch_pending") ||
+      !await columnExists(pool, "service_requests", "dispatch_exhausted_at")) {
     throw new Error("Missing booking idempotency schema on service_requests.");
   }
 }

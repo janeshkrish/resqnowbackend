@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS service_requests (
   idempotency_key VARCHAR(96) CHARACTER SET ascii COLLATE ascii_bin NULL,
   booking_payload_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
   booking_dispatch_pending BOOLEAN NOT NULL DEFAULT FALSE,
+  dispatch_exhausted_at DATETIME(3) NULL,
   INDEX idx_booking_dispatch_pending (booking_dispatch_pending, id),
   UNIQUE KEY uq_service_request_user_attempt (user_id, idempotency_key),
   technician_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin,

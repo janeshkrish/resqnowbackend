@@ -7,6 +7,7 @@ import { socketService } from "./socket.js";
 import { isTowingServiceType } from "./towingServiceType.js";
 import { createPricedDispatchOffer, dispatchOfferPricingFields } from "./dispatchOfferService.js";
 import { buildTechnicianJobDetails } from "./technicianJobDetails.js";
+import { ADMIN_NOTIFICATION_TYPES } from "./adminNotificationTypes.js";
 
 export const DISPATCH_QUEUE_NAME = "job-dispatch-queue";
 const NEW_JOB_EVENT = "new-job";
@@ -329,12 +330,84 @@ async function requeueJob(payload, delayMs = DISPATCH_RETRY_DELAY_MS) {
   return enqueueDispatchJob(payload, { delayMs });
 }
 
+const WAITING_FOR_TECHNICIAN = "LOWER(COALESCE(status, '')) = 'pending' AND technician_id IS NULL";
+
+/**
+ * Dispatch ran out of retries (launch checklist #10, QA-008). The request stays
+ * "pending" (older apps keep working) but is stamped dispatch_exhausted_at, the
+ * customer is told (socket + push) and admins get a bell alert to assign by hand.
+ * Only the first call for a waiting request does anything.
+ */
+export async function markDispatchExhausted(pool, requestId, { sockets = socketService } = {}) {
+  const [result] = await pool.execute(
+    `UPDATE service_requests SET dispatch_exhausted_at = UTC_TIMESTAMP(3)
+      WHERE id = ? AND ${WAITING_FOR_TECHNICIAN} AND dispatch_exhausted_at IS NULL`,
+    [requestId]
+  );
+  if (Number(result?.affectedRows) !== 1) return { marked: false };
+
+  const [rows] = await pool.query(
+    "SELECT id, user_id, service_type, address, dispatch_exhausted_at FROM service_requests WHERE id = ? LIMIT 1",
+    [requestId]
+  );
+  const row = rows?.[0] || {};
+  console.warn(`[Dispatch Queue] No technician accepted requestId=${requestId}; customer and admins notified.`);
+  sockets.notifyUser(row.user_id, "job:status_update", {
+    requestId: String(requestId),
+    id: String(requestId),
+    status: "pending",
+    dispatchOutcome: "no_technician",
+    dispatchExhaustedAt: row.dispatch_exhausted_at || new Date().toISOString(),
+  });
+
+  const title = "No technician available";
+  const where = row.address ? ` at ${row.address}` : "";
+  const message = `Request #${requestId} (${row.service_type || "service"})${where} found no technician. Assign one manually or contact the customer.`;
+  try {
+    await pool.execute("INSERT INTO notifications (type, title, message) VALUES (?, ?, ?)",
+      [ADMIN_NOTIFICATION_TYPES.SYSTEM_ALERT, title, message]);
+    sockets.notifyAdmins("admin:notification", { title, message, requestId: String(requestId), created_at: new Date() });
+  } catch (error) {
+    console.error("[Dispatch Queue] Admin alert for exhausted dispatch failed:", error?.message || error);
+  }
+  return { marked: true };
+}
+
+/**
+ * The customer's "Try again": only the owner, only while the request is still waiting
+ * with no technician and was marked exhausted. Restarts through the same durable
+ * handoff as a new booking (booking_dispatch_pending + the 15-second recovery sweep).
+ */
+export async function retryExhaustedDispatch({ pool, requestId, userId, deliver = deliverBookingDispatch, sockets = socketService }) {
+  const [result] = await pool.execute(
+    `UPDATE service_requests SET dispatch_exhausted_at = NULL, booking_dispatch_pending = 1
+      WHERE id = ? AND user_id = ? AND ${WAITING_FOR_TECHNICIAN} AND dispatch_exhausted_at IS NOT NULL`,
+    [requestId, userId]
+  );
+  if (Number(result?.affectedRows) !== 1) {
+    return { ok: false, statusCode: 409, error: "This request is no longer waiting for a technician." };
+  }
+  sockets.notifyUser(userId, "job:status_update", {
+    requestId: String(requestId), id: String(requestId), status: "pending", dispatchOutcome: "searching",
+  });
+  try {
+    await deliver(pool, requestId);
+  } catch (error) {
+    console.error(`[Dispatch Queue] Retry handoff deferred to recovery requestId=${requestId}:`, error?.message || error);
+  }
+  return { ok: true };
+}
+
 export async function processNewDispatchJob(data, options = {}) {
   const payload = buildQueuePayload(data);
   const jobId = payload.jobId;
   if (!jobId) return { skipped: true, reason: "invalid_job_id" };
   if (payload.retryCount > DISPATCH_MAX_RETRIES) {
-    return { skipped: true, reason: "max_retries_reached" };
+    // Out of retries: say so instead of leaving the customer on "searching" forever.
+    const { marked } = await markDispatchExhausted(options.pool || await getPool(), jobId, {
+      sockets: options.sockets || socketService,
+    });
+    return { skipped: true, reason: "max_retries_reached", exhausted: marked };
   }
   console.log(
     `[Dispatch Queue] Processing new-job requestId=${jobId} retryCount=${payload.retryCount} source=${payload.source}`
@@ -618,6 +691,7 @@ export async function recoverRecentPendingDispatchJobs(options = {}) {
      WHERE LOWER(COALESCE(sr.status, '')) = 'pending'
        AND sr.technician_id IS NULL
        AND sr.booking_dispatch_pending = 0
+       AND sr.dispatch_exhausted_at IS NULL
        AND sr.created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
        AND NOT EXISTS (
          SELECT 1

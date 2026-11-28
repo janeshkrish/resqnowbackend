@@ -10,7 +10,7 @@ test("existing request tables gain nullable booking fields and an account-scoped
     if (/FROM information_schema.columns/i.test(sql)) return [columns.has(params[1]) ? [{ present: 1 }] : []];
     if (/FROM information_schema.statistics/i.test(sql)) return [indexes.get(params[1]) ?? []];
     if (/ALTER TABLE service_requests ADD COLUMN/.test(sql)) {
-      const match = sql.match(/ADD COLUMN (\w+) (?:(?:VAR)?CHAR\(\d+\) CHARACTER SET ascii COLLATE ascii_bin NULL|BOOLEAN NOT NULL DEFAULT FALSE)/i);
+      const match = sql.match(/ADD COLUMN (\w+) (?:(?:VAR)?CHAR\(\d+\) CHARACTER SET ascii COLLATE ascii_bin NULL|BOOLEAN NOT NULL DEFAULT FALSE|DATETIME\(3\) NULL)/i);
       assert.ok(match, "historic rows need nullable fields"); columns.add(match[1]);
     } else {
       const match = sql.match(/CREATE (UNIQUE )?INDEX (\w+) ON service_requests \(([^)]+)\)/i);
@@ -21,7 +21,8 @@ test("existing request tables gain nullable booking fields and an account-scoped
   assert.equal(typeof bootstrap.ensureBookingIdempotencySchema, "function");
   await bootstrap.ensureBookingIdempotencySchema(database);
   await bootstrap.ensureBookingIdempotencySchema(database);
-  assert.deepEqual([...columns], ["idempotency_key", "booking_payload_hash", "booking_dispatch_pending"]);
+  // dispatch_exhausted_at: set when dispatch ran out of technicians (checklist #10).
+  assert.deepEqual([...columns], ["idempotency_key", "booking_payload_hash", "booking_dispatch_pending", "dispatch_exhausted_at"]);
   assert.deepEqual(indexes.get("uq_service_request_user_attempt").map(row => row.column_name), ["user_id", "idempotency_key"]);
-  assert.equal(writes, 5);
+  assert.equal(writes, 6);
 });

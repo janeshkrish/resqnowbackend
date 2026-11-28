@@ -123,6 +123,11 @@ export function customerTripCopy(status, technicianName, serviceType) {
   }
 }
 
+export const NO_TECHNICIAN_COPY = Object.freeze({
+  title: "No technician free right now",
+  body: "We couldn't find a technician nearby. Open ResQNow to try again or cancel.",
+});
+
 function stringifyDataPayload(data) {
   const result = {};
   Object.entries(data || {}).forEach(([key, value]) => {
@@ -522,7 +527,11 @@ class NotificationService {
       const status = event === "payment_completed" ? "paid" : normalizeText(data?.status).toLowerCase();
       const requestId = normalizeText(data?.requestId || data?.id);
       const trip = await this.resolveCustomerTrip(requestId, data, pool);
-      const copy = customerTripCopy(status, trip.technicianName, trip.serviceType);
+      // Dispatch ran out of technicians (checklist #10): the status is still "pending",
+      // so it has its own wording. A restarted search ("searching") sends no push.
+      const copy = data?.dispatchOutcome === "no_technician"
+        ? NO_TECHNICIAN_COPY
+        : customerTripCopy(status, trip.technicianName, trip.serviceType);
       if (!copy) return null;
       const requestPath = requestId ? `/service-tracking/${encodeURIComponent(requestId)}` : "/";
       const requestLink = frontendBaseUrl ? `${frontendBaseUrl}${requestPath}` : undefined;

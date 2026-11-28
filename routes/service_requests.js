@@ -42,7 +42,7 @@ import {
     PAYMENT_LEDGER_STATUS,
     PAYMENT_TO_TECHNICIAN_STATUS,
 } from "../models/marketplaceConstants.js";
-import { deliverBookingDispatch, enqueueDispatchJob } from "../services/dispatchQueueService.js";
+import { deliverBookingDispatch, enqueueDispatchJob, retryExhaustedDispatch } from "../services/dispatchQueueService.js";
 import {
     isActiveJobStatus,
     isTerminalJobStatus,
@@ -1457,6 +1457,21 @@ export async function handleCustomerCancel(req, res, deps = {}) {
     }
 }
 router.patch("/:id/cancel", verifyUser, (req, res) => handleCustomerCancel(req, res));
+
+// "Try again" after dispatch found no technician (checklist #10). Owner only, and only
+// while the request is still waiting with no technician.
+router.post("/:id/retry-dispatch", verifyUser, async (req, res) => {
+    try {
+        const requestId = recordId(req.params.id);
+        if (!requestId) return res.status(400).json({ error: "Invalid request id." });
+        const result = await retryExhaustedDispatch({ pool: await getPool(), requestId, userId: req.user.userId });
+        if (!result.ok) return res.status(result.statusCode).json({ error: result.error });
+        return res.json({ success: true });
+    } catch (error) {
+        console.error("[Retry Dispatch] Failed:", error?.message || error);
+        return res.status(500).json({ error: "Could not restart the search. Please try again." });
+    }
+});
 
 /**
  * GET /api/service-requests/:id
